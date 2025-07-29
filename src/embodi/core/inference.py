@@ -5,7 +5,7 @@ EMBODIOS Inference Engine - Core AI execution for hardware control
 import numpy as np
 import struct
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import mmap
 import ctypes
 
@@ -21,7 +21,7 @@ class EMBODIOSInferenceEngine:
         self.weights_mmap: Optional[mmap.mmap] = None
         self.weights_data: Optional[bytes] = None
         self.weights_offset_diff: int = 0
-        self.architecture: Optional[Dict] = None
+        self.architecture: Optional[Dict[str, Any]] = None
         
     def _init_hardware_tokens(self) -> Dict[str, int]:
         """Initialize special tokens for hardware operations"""
@@ -183,6 +183,9 @@ class EMBODIOSInferenceEngine:
     
     def _embed_tokens(self, tokens: List[int]) -> np.ndarray:
         """Convert tokens to embeddings"""
+        if not self.architecture:
+            raise RuntimeError("Model not loaded")
+        
         vocab_size = self.architecture['vocab_size']
         hidden_size = self.architecture['hidden_size']
         
@@ -199,6 +202,8 @@ class EMBODIOSInferenceEngine:
             ).reshape(vocab_size, hidden_size)
         else:
             # Use in-memory weights (for small models/testing)
+            if self.weights_data is None:
+                raise RuntimeError("No weights loaded")
             embeddings = np.frombuffer(
                 self.weights_data[embedding_offset:embedding_offset + embedding_size],
                 dtype=np.float32
