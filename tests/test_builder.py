@@ -1,46 +1,65 @@
 """Tests for EMBODIOS builder functionality."""
 import pytest
 from pathlib import Path
-from embodi.builder.modelfile import Modelfile
-from embodi.builder.builder import EMBODIOSBuilder
+from embodi.builder.modelfile import ModelfileParser
+from embodi.builder.builder import EmbodiBuilder
 
 
 class TestModelfile:
     """Test Modelfile parsing."""
     
-    def test_parse_simple_modelfile(self):
+    def test_parse_simple_modelfile(self, tmp_path):
         """Test parsing a simple Modelfile."""
         content = """FROM scratch
 MODEL huggingface:TinyLlama/TinyLlama-1.1B-Chat-v1.0
 QUANTIZE 4bit
 MEMORY 2G"""
         
-        mf = Modelfile()
-        instructions = mf.parse(content)
+        # Write content to a temporary file
+        modelfile = tmp_path / "Modelfile"
+        modelfile.write_text(content)
         
-        assert len(instructions) == 4
-        assert instructions[0] == ('FROM', 'scratch')
-        assert instructions[1] == ('MODEL', 'huggingface:TinyLlama/TinyLlama-1.1B-Chat-v1.0')
-        assert instructions[2] == ('QUANTIZE', '4bit')
-        assert instructions[3] == ('MEMORY', '2G')
+        parser = ModelfileParser(str(modelfile))
+        spec = parser.parse()
+        
+        assert spec['from'] == 'scratch'
+        assert spec['model']['source'] == 'huggingface'
+        assert spec['model']['name'] == 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
+        assert spec['model']['quantization'] == '4bit'
+        assert spec['system']['memory'] == '2G'
     
-    def test_parse_modelfile_with_hardware(self):
+    def test_parse_modelfile_with_hardware(self, tmp_path):
         """Test parsing Modelfile with hardware specs."""
         content = """FROM scratch
 MODEL test-model
-HARDWARE gpio:enabled uart:enabled"""
+HARDWARE gpio:enabled
+HARDWARE uart:enabled"""
         
-        mf = Modelfile()
-        instructions = mf.parse(content)
+        # Write content to a temporary file
+        modelfile = tmp_path / "Modelfile"
+        modelfile.write_text(content)
         
-        assert len(instructions) == 3
-        assert instructions[2] == ('HARDWARE', 'gpio:enabled uart:enabled')
+        parser = ModelfileParser(str(modelfile))
+        spec = parser.parse()
+        
+        assert spec['from'] == 'scratch'
+        assert spec['model']['name'] == 'test-model'
+        assert 'gpio' in spec['hardware']
+        assert spec['hardware']['gpio'] == 'enabled'
+        assert 'uart' in spec['hardware']
+        assert spec['hardware']['uart'] == 'enabled'
     
-    def test_parse_empty_modelfile(self):
+    def test_parse_empty_modelfile(self, tmp_path):
         """Test parsing empty Modelfile."""
-        mf = Modelfile()
-        instructions = mf.parse("")
-        assert len(instructions) == 0
+        # Write empty content to a temporary file
+        modelfile = tmp_path / "Modelfile"
+        modelfile.write_text("")
+        
+        parser = ModelfileParser(str(modelfile))
+        spec = parser.parse()
+        
+        assert spec['from'] == 'scratch'  # default value
+        assert spec['commands'] == []
 
 
 class TestBuilder:
@@ -48,31 +67,26 @@ class TestBuilder:
     
     def test_builder_initialization(self):
         """Test builder initialization."""
-        builder = EMBODIOSBuilder()
+        builder = EmbodiBuilder()
         assert builder is not None
         assert hasattr(builder, 'build')
     
-    def test_builder_config_from_modelfile(self):
+    def test_builder_config_from_modelfile(self, tmp_path):
         """Test builder config extraction from Modelfile."""
         content = """FROM scratch
 MODEL test-model
 MEMORY 1G
 HARDWARE gpio:enabled"""
         
-        builder = EMBODIOSBuilder()
-        mf = Modelfile()
-        instructions = mf.parse(content)
+        # Write content to a temporary file
+        modelfile = tmp_path / "Modelfile"
+        modelfile.write_text(content)
         
-        # Test that builder can process instructions
-        config = {}
-        for cmd, value in instructions:
-            if cmd == 'MODEL':
-                config['model'] = value
-            elif cmd == 'MEMORY':
-                config['memory'] = value
-            elif cmd == 'HARDWARE':
-                config['hardware'] = value.split()
+        parser = ModelfileParser(str(modelfile))
+        spec = parser.parse()
         
-        assert config['model'] == 'test-model'
-        assert config['memory'] == '1G'
-        assert config['hardware'] == ['gpio:enabled']
+        # Test that we can extract config from parsed spec
+        assert spec['model']['name'] == 'test-model'
+        assert spec['system']['memory'] == '1G'
+        assert 'gpio' in spec['hardware']
+        assert spec['hardware']['gpio'] == 'enabled'

@@ -70,30 +70,50 @@ def build(ctx, file, tag, no_cache, platform):
 @click.option('-m', '--memory', default='2G', help='Memory limit')
 @click.option('-c', '--cpus', default=2, type=int, help='Number of CPUs')
 @click.option('--rm', is_flag=True, help='Remove container after exit')
+@click.option('--hardware', multiple=True, default=['gpio'], help='Hardware to enable')
+@click.option('--bare-metal', is_flag=True, help='Run in bare metal mode (simulated)')
 @click.pass_context
-def run(ctx, image, detach, name, memory, cpus, rm):
+def run(ctx, image, detach, name, memory, cpus, rm, hardware, bare_metal):
     """Run EMBODIOS image"""
     console.print(f"[bold blue]Starting EMBODIOS: {image}[/bold blue]")
     
-    runtime = EmbodiRuntime(debug=ctx.obj['debug'])
-    
-    container_id = runtime.run(
-        image=image,
-        detach=detach,
-        name=name,
-        memory=memory,
-        cpus=cpus,
-        remove=rm
-    )
-    
-    if container_id:
-        if detach:
-            console.print(f"[bold green]✓ Container started: {container_id[:12]}[/bold green]")
+    # Check if it's a .aios model file or an image name
+    if image.endswith('.aios') or Path(image).exists():
+        # Direct model file - use runtime kernel
+        from embodi.core.runtime_kernel import EMBODIOSRunner
+        
+        runner = EMBODIOSRunner()
+        
+        if bare_metal:
+            runner.run_bare_metal(image)
         else:
-            console.print("[bold green]✓ Container exited[/bold green]")
+            hardware_config = {
+                'enabled': list(hardware),
+                'memory_limit': memory,
+                'cpus': cpus
+            }
+            runner.run_interactive(image, hardware_config)
     else:
-        console.print("[bold red]✗ Failed to start container[/bold red]")
-        sys.exit(1)
+        # Container image - use regular runtime
+        runtime = EmbodiRuntime(debug=ctx.obj['debug'])
+        
+        container_id = runtime.run(
+            image=image,
+            detach=detach,
+            name=name,
+            memory=memory,
+            cpus=cpus,
+            remove=rm
+        )
+        
+        if container_id:
+            if detach:
+                console.print(f"[bold green]✓ Container started: {container_id[:12]}[/bold green]")
+            else:
+                console.print("[bold green]✓ Container exited[/bold green]")
+        else:
+            console.print("[bold red]✗ Failed to start container[/bold red]")
+            sys.exit(1)
 
 @cli.command()
 @click.option('-a', '--all', is_flag=True, help='Show all images')
