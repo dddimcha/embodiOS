@@ -119,6 +119,16 @@ else
     ((TESTS_FAILED++))
 fi
 
+# Test 5a: Check UART interrupt fix
+echo -e "\n${YELLOW}5a. Checking UART interrupt handler fix...${NC}"
+if grep -q "hasattr(uart, 'available')" src/embodi/core/runtime_kernel.py; then
+    echo -e "${GREEN}✓ UART interrupt handler fixed${NC}"
+    ((TESTS_PASSED++))
+else
+    echo -e "${RED}✗ UART interrupt handler not fixed${NC}"
+    ((TESTS_FAILED++))
+fi
+
 # Test 6: CI/CD workflow files
 echo -e "\n${YELLOW}6. Checking CI/CD workflows...${NC}"
 workflows=(".github/workflows/ci.yml" ".github/workflows/release.yml" ".github/workflows/publish.yml")
