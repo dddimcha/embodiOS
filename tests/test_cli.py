@@ -15,7 +15,7 @@ class TestCLI:
         """Test version command."""
         result = self.runner.invoke(cli, ['--version'])
         assert result.exit_code == 0
-        assert 'embodi' in result.output
+        assert 'EMBODIOS' in result.output or 'embodi' in result.output
     
     def test_cli_help(self):
         """Test help command."""

@@ -125,7 +125,9 @@ def test_bundle_creation():
             results[target] = {'success': False, 'error': str(e)}
             print(f"✗ Failed to create {target} bundle: {e}")
     
-    return results
+    # Check all succeeded
+    for target, result in results.items():
+        assert result['success'], f"Bundle creation failed for {target}"
 
 
 def test_qemu_emulator():
@@ -153,9 +155,11 @@ def test_qemu_emulator():
     
     if not qemu_available:
         print("✗ QEMU not found. Install with: brew install qemu")
-        return {'success': False, 'error': 'QEMU not installed'}
+        # Skip test if QEMU not available
+        import pytest
+        pytest.skip("QEMU not installed")
     
-    return {'success': True, 'qemu': qemu_available}
+    assert qemu_available is not None, "QEMU should be available"
 
 
 def benchmark_embodios_bare_metal(duration: int = 10) -> PerformanceMetrics:

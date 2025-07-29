@@ -47,10 +47,14 @@ def create_test_model():
             'hidden_size': 64
         }).encode()
         
+        # Calculate weights offset (after header + metadata + arch)
+        header_size = 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4  # 32 bytes
+        weights_offset = header_size + len(metadata_json) + len(arch_json)
+        
         # Write sizes
         f.write(struct.pack('<I', len(metadata_json)))
         f.write(struct.pack('<I', len(arch_json)))
-        f.write(struct.pack('<I', 0))  # weights_offset (will update)
+        f.write(struct.pack('<I', weights_offset))  # weights_offset
         f.write(struct.pack('<I', 1024))  # weights_size
         f.write(struct.pack('<I', 0))  # entry_offset
         f.write(struct.pack('<I', 0))  # checksum
@@ -59,15 +63,8 @@ def create_test_model():
         f.write(metadata_json)
         f.write(arch_json)
         
-        # Record weight offset
-        weights_offset = f.tell()
-        
         # Write dummy weights
         f.write(b'\x00' * 1024)
-        
-        # Update header
-        f.seek(16)
-        f.write(struct.pack('<I', weights_offset))
     
     print(f"Test model created: {model_path}")
     return model_path
