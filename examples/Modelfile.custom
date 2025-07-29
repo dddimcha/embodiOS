@@ -27,9 +27,9 @@ CAPABILITY data_logging
 CAPABILITY remote_access
 
 # Environment setup
-ENV AIOS_MODE production
-ENV AIOS_WATCHDOG enabled
-ENV AIOS_HEARTBEAT 1000
+ENV EMBODIOS_MODE production
+ENV EMBODIOS_WATCHDOG enabled
+ENV EMBODIOS_HEARTBEAT 1000
 
 # Custom build steps
 RUN configure_realtime_kernel

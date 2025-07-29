@@ -279,9 +279,9 @@ CAPABILITY realtime_control pid_loops
 
 ## Next Steps
 
-- [Hardware Compatibility List](hardware-compatibility.md)
-- [Performance Optimization](performance-tuning.md)
-- [Custom Hardware Drivers](custom-drivers.md)
-- [Multi-Node Deployment](clustering.md)
+- Check the [Hardware Documentation](hardware.md) for supported devices
+- See [Performance Benchmarks](performance-benchmarks.md) for optimization tips
+- Review the [API Documentation](api.md) for custom integrations
+- Explore [example Modelfiles](../examples/) for different configurations
 
 Welcome to the future of operating systems - powered by AI, controlled by natural language!
