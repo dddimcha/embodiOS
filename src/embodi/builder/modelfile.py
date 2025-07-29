@@ -3,8 +3,8 @@ EMBODIOS Modelfile Parser
 """
 
 from pathlib import Path
-from typing import Dict, List
-import yaml
+from typing import Dict, List, Any
+import yaml  # type: ignore
 
 class ModelfileParser:
     """Parse EMBODIOS Modelfiles"""
@@ -12,7 +12,7 @@ class ModelfileParser:
     def __init__(self, path: str):
         self.path = Path(path)
         
-    def parse(self) -> Dict:
+    def parse(self) -> Dict[str, Any]:
         """Parse Modelfile and return specification"""
         
         if self.path.suffix in ['.yaml', '.yml']:
@@ -20,12 +20,12 @@ class ModelfileParser:
         else:
             return self._parse_modelfile()
             
-    def _parse_yaml(self) -> Dict:
+    def _parse_yaml(self) -> Dict[str, Any]:
         """Parse YAML format"""
         with open(self.path) as f:
             return yaml.safe_load(f)
             
-    def _parse_modelfile(self) -> Dict:
+    def _parse_modelfile(self) -> Dict[str, Any]:
         """Parse Dockerfile-style Modelfile"""
         spec = {
             'name': 'embodi-custom',
@@ -59,24 +59,31 @@ class ModelfileParser:
                     else:
                         spec['model'] = {'name': args}
                 elif directive == 'QUANTIZE':
-                    spec['model']['quantization'] = args
+                    if isinstance(spec['model'], dict):
+                        spec['model']['quantization'] = args
                 elif directive == 'MEMORY':
-                    spec['system']['memory'] = args
+                    if isinstance(spec['system'], dict):
+                        spec['system']['memory'] = args
                 elif directive == 'CPU':
-                    spec['system']['cpus'] = int(args)
+                    if isinstance(spec['system'], dict):
+                        spec['system']['cpus'] = int(args)
                 elif directive == 'HARDWARE':
                     if ':' in args:
                         hw, state = args.split(':', 1)
                         if 'hardware' not in spec:
                             spec['hardware'] = {}
-                        spec['hardware'][hw] = state
+                        if isinstance(spec['hardware'], dict):
+                            spec['hardware'][hw] = state
                 elif directive == 'CAPABILITY':
-                    spec['capabilities'].append(args)
+                    if isinstance(spec['capabilities'], list):
+                        spec['capabilities'].append(args)
                 elif directive == 'ENV':
                     if '=' in args:
                         key, val = args.split('=', 1)
-                        spec['env'][key] = val
+                        if isinstance(spec['env'], dict):
+                            spec['env'][key] = val
                 elif directive == 'RUN':
-                    spec['commands'].append(args)
+                    if isinstance(spec['commands'], list):
+                        spec['commands'].append(args)
                     
         return spec
