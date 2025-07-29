@@ -2,9 +2,9 @@
 
 ## Overview
 
-EMBODIOS is a revolutionary operating system where AI models serve as the kernel, enabling natural language control of hardware and system resources through text commands. Instead of traditional command-line interfaces or system calls, EMBODIOS understands plain English text input.
+So, I've been working on this interesting project - EMBODIOS. It's basically an operating system, but with a twist. Instead of typing cryptic commands or dealing with complex system calls, you just... talk to it. Well, type to it, actually. The whole thing runs on language models that handle the kernel operations. Pretty neat way to control hardware when you think about it.
 
-**Note:** EMBODIOS processes natural language as text. The "Voice AI" refers to the conversational nature of the interface, not audio processing. For actual voice input, see our [voice demo example](docs/voice-demo.md).
+Quick heads up: When I say "conversational", I mean text-based conversations. The system reads what you type, not what you say out loud. Though if you're curious about voice stuff, there's a demo in the docs that shows how you could add that.
 
 ```bash
 > Turn on GPIO pin 17
@@ -29,7 +29,7 @@ cd core
 pip install -e .
 ```
 
-### Build Your First AI-OS
+### Try It Out
 
 ```bash
 # Create a Modelfile
@@ -50,12 +50,12 @@ embodi run my-ai-os:latest
 
 ## Key Features
 
-- **Natural Language OS**: Control everything with plain English
-- **AI as Kernel**: Language models directly manage hardware
-- **Docker-like Workflow**: Familiar tools for building and deployment
-- **Hardware Agnostic**: Runs on x86_64, ARM64, RISC-V
-- **Real-time Performance**: Sub-10ms response times
-- **Minimal Footprint**: Runs in as little as 512MB RAM
+- Control things by typing regular sentences
+- Language models handle the low-level stuff
+- Works like Docker if you're familiar with that
+- Runs on pretty much any modern processor
+- Responds quickly (usually under 10ms)
+- Doesn't need much memory - 512MB is enough to get started
 
 ## Documentation
 
@@ -96,25 +96,13 @@ CAPABILITY home_automation voice_control
 HARDWARE wifi:enabled zigbee:enabled
 ```
 
-## Architecture
+## How It Works
 
-```
-User Input (Natural Language)
-        ↓
-┌─────────────────┐
-│  AI Inference   │  ← Transformer Model
-│     Engine      │     processes input
-└────────┬────────┘
-         ↓
-┌─────────────────┐
-│ Hardware Layer  │  ← Direct hardware
-│      (HAL)      │     control via MMIO
-└─────────────────┘
-```
+The basic flow is simple: you type something, the language model figures out what you want, and then it talks directly to the hardware. No complicated APIs or system calls in between. The model processes your text and converts it into hardware instructions through memory-mapped I/O.
 
 ## Contributing
 
-We welcome contributions! See our [Contributing Guide](CONTRIBUTING.md) for details.
+If you want to help out or have ideas, that's awesome. Check the contributing guide for the details.
 
 ```bash
 # Clone the repository
@@ -133,10 +121,7 @@ make build
 
 ## Performance
 
-- **Boot Time**: ~800ms
-- **Inference Speed**: 154 tokens/sec (TinyLlama)
-- **Response Latency**: 6.5ms average
-- **Memory Usage**: 1.2GB (including model)
+In my testing, it boots in less than a second, processes about 154 tokens per second with TinyLlama, and typically responds in around 6-7 milliseconds. The whole thing (including the model) uses about 1.2GB of memory.
 
 ## Community
 
@@ -148,14 +133,8 @@ EMBODIOS is open source software licensed under the [MIT License](LICENSE).
 
 ## Acknowledgments
 
-Built with inspiration from:
-- Linux kernel architecture
-- Docker containerization
-- Transformer models
-- Embedded systems design
+This project pulls ideas from various places - Linux kernels, Docker's approach to containers, modern language models, and embedded systems. Just another unconventional approach to OS design that might interest someone out there.
 
 ---
 
----
-
-**EMBODIOS - Where Natural Language Meets Bare Metal**
+**EMBODIOS** - An experimental OS where you can control hardware through everyday language
