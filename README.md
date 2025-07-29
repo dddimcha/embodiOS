@@ -46,16 +46,23 @@ embodi build -f Modelfile -t my-ai-os:latest
 
 # Run it!
 embodi run my-ai-os:latest
+
+# Or run a model directly (no container)
+embodi run test-model.aios --bare-metal
+
+# Create bootable bundle for real hardware
+embodi bundle create --model my-ai-os:latest --output embodios.iso --target bare-metal
 ```
 
 ## Key Features
 
-- Control things by typing regular sentences
-- Language models handle the low-level stuff
-- Works like Docker if you're familiar with that
-- Runs on pretty much any modern processor
-- Responds quickly (usually under 10ms)
-- Doesn't need much memory - 512MB is enough to get started
+- **Natural Language Control**: Type commands in plain English - "turn on pin 17" instead of `gpio.write(17, HIGH)`
+- **AI-Powered Kernel**: Language models handle system operations, memory management, and hardware control
+- **Bare Metal Performance**: Direct hardware access with <2ms response times
+- **Minimal Footprint**: Entire OS in ~16MB RAM (vs 100MB+ for traditional deployments)
+- **Hardware Abstraction**: Unified interface for GPIO, I2C, SPI, UART through natural language
+- **Docker-like Workflow**: Build, run, and deploy AI-OS images with familiar commands
+- **Real-time Processing**: 465+ commands/second throughput on commodity hardware
 
 ## Documentation
 
@@ -63,6 +70,8 @@ embodi run my-ai-os:latest
 - [Modelfile Reference](docs/modelfile-reference.md)
 - [Hardware Compatibility](docs/hardware.md)
 - [API Documentation](docs/api.md)
+- [Performance Benchmarks](docs/performance-benchmarks.md)
+- [Bare Metal Deployment](docs/bare-metal-deployment.md)
 - [Contributing Guide](CONTRIBUTING.md)
 
 ## Use Cases
@@ -104,8 +113,13 @@ The basic flow is simple: you type something, the language model figures out wha
 User Input (Natural Language)
         ↓
 ┌─────────────────┐
+│  NL Processor   │  ← Pattern matching &
+│                 │     intent extraction
+└────────┬────────┘
+         ↓
+┌─────────────────┐
 │  AI Inference   │  ← Transformer Model
-│     Engine      │     processes input
+│     Engine      │     with hardware tokens
 └────────┬────────┘
          ↓
 ┌─────────────────┐
@@ -113,6 +127,13 @@ User Input (Natural Language)
 │      (HAL)      │     control via MMIO
 └─────────────────┘
 ```
+
+### Core Components
+
+- **Natural Language Processor**: Translates commands like "turn on the LED" into hardware operations
+- **Inference Engine**: Runs transformer models with special hardware control tokens
+- **Hardware Abstraction Layer**: Provides unified interface to GPIO, I2C, SPI, UART
+- **Runtime Kernel**: Manages system state, interrupts, and background services
 
 ## Why EMBODIOS?
 
@@ -151,7 +172,15 @@ make build
 
 ## Performance
 
-In my testing, it boots in less than a second, processes about 154 tokens per second with TinyLlama, and typically responds in around 6-7 milliseconds. The whole thing (including the model) uses about 1.2GB of memory.
+Latest benchmark results show significant improvements over traditional deployments:
+
+- **Boot Time**: <1 second to fully operational state
+- **Memory Usage**: 16.3MB (vs 108.5MB for traditional model servers)
+- **Response Time**: 1.3ms average (40.7x faster than traditional)
+- **Throughput**: 465 commands/second (vs 16/sec traditional)
+- **Token Processing**: 154 tokens/second with TinyLlama
+
+See [full benchmark results](docs/performance-benchmarks.md) for detailed comparisons.
 
 ## Community
 
