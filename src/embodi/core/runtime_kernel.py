@@ -305,11 +305,12 @@ class EMBODIOSKernel:
                 # In real implementation, would check interrupt controller
                 
                 # Check GPIO interrupts
-                gpio = self.hal.get_device('gpio')
-                if gpio and hasattr(gpio, 'check_interrupts'):
-                    irqs = gpio.check_interrupts()
-                    for irq in irqs:
-                        self._handle_interrupt(16, {'pin': irq})
+                if self.hal:
+                    gpio = self.hal.get_device('gpio')
+                    if gpio and hasattr(gpio, 'check_interrupts'):
+                        irqs = gpio.check_interrupts()
+                        for irq in irqs:
+                            self._handle_interrupt(16, {'pin': irq})
                 
                 time.sleep(0.01)  # 10ms polling
                 
@@ -405,12 +406,13 @@ class EMBODIOSKernel:
     
     def _handle_uart_interrupt(self, data: Optional[Dict]):
         """Handle UART interrupt"""
-        uart = self.hal.get_device('uart') if self.hal else None
-        if uart and hasattr(uart, 'available') and uart.available():
-            uart_data = uart.read(1) if hasattr(uart, 'read') else None
-            if uart_data:
-                print(f"\n[UART RX] {uart_data}")
-                print("> ", end='', flush=True)
+        if self.hal:
+            uart = self.hal.get_device('uart')
+            if uart and hasattr(uart, 'available') and uart.available():
+                uart_data = uart.read(1) if hasattr(uart, 'read') else None
+                if uart_data:
+                    print(f"\n[UART RX] {uart_data}")
+                    print("> ", end='', flush=True)
     
     def _handle_i2c_interrupt(self, data: Optional[Dict]):
         """Handle I2C interrupt"""

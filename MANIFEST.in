@@ -1,0 +1,18 @@
+include README.md
+include LICENSE
+include requirements.txt
+include requirements-dev.txt
+recursive-include src *.py
+recursive-exclude tests *
+recursive-exclude docs *
+recursive-exclude examples *
+exclude .gitignore
+exclude Dockerfile
+exclude Makefile
+prune embodi-installer
+prune scripts
+prune venv
+prune .git
+prune .github
+prune __pycache__
+prune .pytest_cache
