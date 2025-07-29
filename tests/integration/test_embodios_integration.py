@@ -48,16 +48,15 @@ def create_test_model():
         }).encode()
         
         # Calculate weights offset (after header + metadata + arch)
-        header_size = 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4  # 32 bytes
+        # Header: magic(4) + version(4) + metadata_size(4) + arch_size(4) + weights_offset(4) + weights_size(4) = 24 bytes
+        header_size = 24
         weights_offset = header_size + len(metadata_json) + len(arch_json)
         
-        # Write sizes
+        # Write sizes (must match what load_model expects)
         f.write(struct.pack('<I', len(metadata_json)))
         f.write(struct.pack('<I', len(arch_json)))
         f.write(struct.pack('<I', weights_offset))  # weights_offset
         f.write(struct.pack('<I', 1024))  # weights_size
-        f.write(struct.pack('<I', 0))  # entry_offset
-        f.write(struct.pack('<I', 0))  # checksum
         
         # Write metadata
         f.write(metadata_json)
