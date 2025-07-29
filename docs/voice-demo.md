@@ -33,10 +33,10 @@ python -m embodi.demos.voice_simulation --tts
 ```
 
 The demo shows:
-1. 🎤 Simulated speech recognition
-2. 🔊 Word-by-word processing
-3. ✅ Confidence levels
-4. ⚠️ Recognition errors
+1. Simulated speech recognition
+2. Word-by-word processing
+3. Confidence levels
+4. Recognition errors
 
 ## Real Voice Integration
 

@@ -24,9 +24,9 @@ CAPABILITY basic_networking
 CAPABILITY file_operations
 
 # Environment variables
-ENV AIOS_PROMPT "AI-OS> "
-ENV AIOS_DEBUG 0
-ENV AIOS_LOG_LEVEL info
+ENV EMBODIOS_PROMPT "AI-OS> "
+ENV EMBODIOS_DEBUG 0
+ENV EMBODIOS_LOG_LEVEL info
 
 # Build-time commands
 RUN echo "Building TinyLlama AI-OS..."

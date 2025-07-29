@@ -14,7 +14,10 @@ Welcome to EMBODIOS - Natural Operating System with Voice AI. This guide will he
 ### Quick Install (Recommended)
 
 ```bash
-curl -fsSL https://get.embodi.ai | bash
+# Clone and install from source
+git clone https://github.com/dddimcha/embodiOS.git
+cd embodiOS
+pip install -e .
 ```
 
 ### Manual Installation
@@ -222,8 +225,8 @@ MODEL custom:https://myserver/model.embodi
 
 ## Getting Help
 
-- [Documentation](https://docs.embodi.ai)
-- [Discord Community](https://discord.gg/embodi)
-- [GitHub Issues](https://github.com/embodi-os/embodi/issues)
+- [Documentation](https://github.com/dddimcha/embodiOS/tree/main/docs)
+- [Discord Community](https://discord.gg/xRsYfcdP)
+- [GitHub Issues](https://github.com/dddimcha/embodiOS/issues)
 
 Welcome to the future of operating systems!

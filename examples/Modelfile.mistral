@@ -30,10 +30,10 @@ CAPABILITY security
 CAPABILITY virtualization
 
 # Environment
-ENV AIOS_PROMPT "Mistral-OS> "
-ENV AIOS_NET_STACK tcp/ip
-ENV AIOS_SECURITY enabled
-ENV AIOS_MULTI_USER true
+ENV EMBODIOS_PROMPT "Mistral-OS> "
+ENV EMBODIOS_NET_STACK tcp/ip
+ENV EMBODIOS_SECURITY enabled
+ENV EMBODIOS_MULTI_USER true
 
 # Build commands
 RUN echo "Building Mistral AI-OS..."
