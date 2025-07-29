@@ -100,6 +100,36 @@ HARDWARE wifi:enabled zigbee:enabled
 
 The basic flow is simple: you type something, the language model figures out what you want, and then it talks directly to the hardware. No complicated APIs or system calls in between. The model processes your text and converts it into hardware instructions through memory-mapped I/O.
 
+```
+User Input (Natural Language)
+        ↓
+┌─────────────────┐
+│  AI Inference   │  ← Transformer Model
+│     Engine      │     processes input
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│ Hardware Layer  │  ← Direct hardware
+│      (HAL)      │     control via MMIO
+└─────────────────┘
+```
+
+## Why EMBODIOS?
+
+Here's the thing - traditional operating systems have layers upon layers of abstractions. System calls, drivers, APIs, frameworks... it all adds up. EMBODIOS cuts through all that overhead.
+
+**The benefits are pretty straightforward:**
+
+- **Speed**: Direct hardware access means no kernel/userspace context switches. We're talking microseconds, not milliseconds.
+- **Resource Efficiency**: No background services, no daemons, no unnecessary processes. Just your model and the hardware. Perfect when every MB counts.
+- **Bare Metal Access**: Your commands go straight to the metal. No translation layers, no permission checks, no virtualization overhead.
+- **IoT Ready**: Built specifically for embedded devices where traditional OSes are too heavy. Runs great on a Raspberry Pi or even smaller boards.
+- **Cloud Cost Savings**: Why pay for cloud compute when your edge device can handle everything locally? No API calls, no bandwidth costs, no latency.
+
+Think about it - a typical Linux distro needs hundreds of MB just for the base system. EMBODIOS? The whole OS *is* the model. That's it. Your 1GB model handles everything from memory management to GPIO control.
+
+For IoT developers tired of stripping down Linux distributions, or anyone who wants their devices to actually understand what they're being asked to do - this might be worth a look.
+
 ## Contributing
 
 If you want to help out or have ideas, that's awesome. Check the contributing guide for the details.
