@@ -47,6 +47,10 @@ def create_test_model():
             'hidden_size': 64
         }).encode()
         
+        # Calculate weights size based on model architecture
+        # Need at least embedding weights: vocab_size * hidden_size * 4 bytes (float32)
+        weights_size = metadata['vocab_size'] * metadata['hidden_size'] * 4
+        
         # Calculate weights offset (after header + metadata + arch)
         # Header: magic(4) + version(4) + metadata_size(4) + arch_size(4) + weights_offset(4) + weights_size(4) = 24 bytes
         header_size = 24
@@ -56,14 +60,14 @@ def create_test_model():
         f.write(struct.pack('<I', len(metadata_json)))
         f.write(struct.pack('<I', len(arch_json)))
         f.write(struct.pack('<I', weights_offset))  # weights_offset
-        f.write(struct.pack('<I', 1024))  # weights_size
+        f.write(struct.pack('<I', weights_size))  # weights_size
         
         # Write metadata
         f.write(metadata_json)
         f.write(arch_json)
         
-        # Write dummy weights
-        f.write(b'\x00' * 1024)
+        # Write dummy weights (zeros for simplicity)
+        f.write(b'\x00' * weights_size)
     
     print(f"Test model created: {model_path}")
     return model_path
