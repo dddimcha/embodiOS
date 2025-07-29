@@ -1,0 +1,34 @@
+# AI-OS Modelfile for TinyLlama
+# Lightweight AI operating system for embedded devices
+
+FROM scratch
+
+# Model configuration
+MODEL huggingface:TinyLlama/TinyLlama-1.1B-Chat-v1.0
+QUANTIZE 4bit
+
+# System requirements
+MEMORY 2G
+CPU 2
+
+# Hardware capabilities
+HARDWARE gpio:enabled
+HARDWARE uart:enabled
+HARDWARE i2c:enabled
+HARDWARE spi:disabled
+
+# OS capabilities
+CAPABILITY hardware_control
+CAPABILITY sensor_reading
+CAPABILITY basic_networking
+CAPABILITY file_operations
+
+# Environment variables
+ENV AIOS_PROMPT "AI-OS> "
+ENV AIOS_DEBUG 0
+ENV AIOS_LOG_LEVEL info
+
+# Build-time commands
+RUN echo "Building TinyLlama AI-OS..."
+RUN optimize_for_inference
+RUN enable_hardware_tokens
