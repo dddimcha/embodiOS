@@ -6,7 +6,6 @@ requests>=2.28
 
 # Build dependencies
 docker>=6.0
-qemu-python>=0.1
 
 # Model handling
 numpy>=1.21

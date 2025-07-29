@@ -1,5 +1,5 @@
-# NOVA Makefile
-PROJECT = nova
+# EMBODIOS Makefile
+PROJECT = embodi
 VERSION = 0.1.0
 
 # Directories
@@ -22,10 +22,10 @@ PIP = pip3
 .PHONY: all
 all: build
 
-# Build NOVA
+# Build EMBODIOS
 .PHONY: build
 build: clean
-	@echo "Building NOVA $(VERSION)..."
+	@echo "Building EMBODIOS $(VERSION)..."
 	@mkdir -p $(BUILD_DIR)
 	@$(PYTHON) -m build .
 	@echo "Build complete!"
@@ -42,7 +42,7 @@ deps:
 .PHONY: test
 test:
 	@echo "Running tests..."
-	@$(PYTHON) -m pytest tests/ -v --cov=nova
+	@$(PYTHON) -m pytest tests/ -v --cov=embodi
 	@echo "Tests complete!"
 
 # Lint code
@@ -70,12 +70,12 @@ clean:
 	@find . -type f -name "*.pyc" -delete
 	@echo "Clean complete!"
 
-# Install NOVA locally
+# Install EMBODIOS locally
 .PHONY: install
 install: build
-	@echo "Installing NOVA..."
+	@echo "Installing EMBODIOS..."
 	@$(PIP) install -e .
-	@echo "NOVA installed!"
+	@echo "EMBODIOS installed!"
 
 # Create distribution packages
 .PHONY: dist
@@ -85,23 +85,23 @@ dist: clean
 	@$(PYTHON) -m build --sdist --wheel
 	@echo "Distribution packages created!"
 
-# Run NOVA
+# Run EMBODIOS
 .PHONY: run
 run:
-	@nova --help
+	@embodi --help
 
 # Development server
 .PHONY: dev
 dev:
 	@echo "Starting development environment..."
-	@nova run --dev examples/Modelfile.tinyllama
+	@embodi run --dev examples/Modelfile.tinyllama
 
 # Docker build
 .PHONY: docker
 docker:
 	@echo "Building Docker images..."
-	@docker build -f docker/Dockerfile -t nova:$(VERSION) .
-	@docker build -f docker/Dockerfile.dev -t nova:dev .
+	@docker build -f docker/Dockerfile -t embodi:$(VERSION) .
+	@docker build -f docker/Dockerfile.dev -t embodi:dev .
 	@echo "Docker images built!"
 
 # Release
@@ -114,14 +114,14 @@ release: test lint dist
 # Show help
 .PHONY: help
 help:
-	@echo "NOVA Makefile targets:"
-	@echo "  make build    - Build NOVA"
+	@echo "EMBODIOS Makefile targets:"
+	@echo "  make build    - Build EMBODIOS"
 	@echo "  make deps     - Install dependencies"
 	@echo "  make test     - Run tests"
 	@echo "  make lint     - Lint code"
 	@echo "  make docs     - Build documentation"
 	@echo "  make clean    - Clean build artifacts"
-	@echo "  make install  - Install NOVA locally"
+	@echo "  make install  - Install EMBODIOS locally"
 	@echo "  make dist     - Create distribution packages"
 	@echo "  make docker   - Build Docker images"
 	@echo "  make release  - Create a new release"

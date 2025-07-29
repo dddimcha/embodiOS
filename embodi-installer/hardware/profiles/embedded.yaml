@@ -1,0 +1,38 @@
+# EMBODIOS Hardware Profile - Embedded Systems
+name: embedded
+description: Minimal profile for embedded devices and IoT
+
+requirements:
+  memory_min: 512M
+  memory_recommended: 1G
+  storage_min: 2G
+  cpu_cores: 1
+  
+supported_models:
+  - gpt2
+  - microsoft/phi-1.5
+  - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  
+features:
+  - gpio
+  - uart
+  - i2c
+  - spi
+  - pwm
+  
+disabled_features:
+  - network
+  - display
+  - audio
+  - usb_host
+  
+kernel_config:
+  preempt: yes
+  tickless: yes
+  compression: xz
+  debug: no
+  
+optimizations:
+  - size
+  - power
+  - realtime

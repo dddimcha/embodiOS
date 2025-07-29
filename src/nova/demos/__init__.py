@@ -1,3 +1,0 @@
-"""
-NOVA Demos - Demonstration modules
-"""

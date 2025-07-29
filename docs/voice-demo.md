@@ -1,14 +1,14 @@
-# NOVA Voice Demo
+# EMBODIOS Voice Demo
 
 ## Overview
 
-NOVA processes commands through **natural language text**. The "voice" aspect refers to the conversational nature of the interface, similar to how you would speak to a person.
+EMBODIOS processes commands through **natural language text**. The "voice" aspect refers to the conversational nature of the interface, similar to how you would speak to a person.
 
 For demonstration purposes, we've included a voice simulation that shows how audio input could work with proper hardware support.
 
 ## Text-Based Natural Language
 
-NOVA's primary interface is text:
+EMBODIOS's primary interface is text:
 
 ```bash
 > Turn on the LED
@@ -26,10 +26,10 @@ To see how voice control would work:
 
 ```bash
 # Run the voice simulation
-python -m nova.demos.voice_simulation
+python -m embodi.demos.voice_simulation
 
 # With text-to-speech simulation
-python -m nova.demos.voice_simulation --tts
+python -m embodi.demos.voice_simulation --tts
 ```
 
 The demo shows:
@@ -44,7 +44,7 @@ For actual voice control, you would need:
 
 1. **Audio Hardware Drivers** in the kernel
 2. **Speech Recognition** (e.g., Whisper model)
-3. **Wake Word Detection** (e.g., "Hey NOVA")
+3. **Wake Word Detection** (e.g., "Hey EMBODIOS")
 4. **Text-to-Speech** for responses
 
 Example Modelfile for voice-enabled system:
@@ -66,8 +66,8 @@ CAPABILITY speech_recognition
 CAPABILITY text_to_speech
 CAPABILITY wake_word_detection
 
-ENV NOVA_WAKE_WORD "hey nova"
-ENV NOVA_TTS_VOICE "en-US-Standard-C"
+ENV EMBODIOS_WAKE_WORD "hey embodi"
+ENV EMBODIOS_TTS_VOICE "en-US-Standard-C"
 ```
 
 ## Why Text-First?

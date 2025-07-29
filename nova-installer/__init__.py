@@ -1,1 +1,0 @@
-# NOVA Installer Package

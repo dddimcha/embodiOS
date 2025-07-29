@@ -1,19 +1,19 @@
-# NOVA - Natural Language Operating System with Versatile AI
+# EMBODIOS - Embodied Intelligence Operating System
 
 <div align="center">
-  <img src="docs/images/nova-logo.png" alt="NOVA Logo" width="200">
+  <img src="docs/images/embodi-logo.png" alt="EMBODIOS Logo" width="200">
   
   [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-  [![Build Status](https://img.shields.io/github/actions/workflow/status/yourusername/nova/ci.yml?branch=main)](https://github.com/yourusername/nova/actions)
-  [![Discord](https://img.shields.io/discord/1234567890?color=7289da&label=Discord&logo=discord&logoColor=white)](https://discord.gg/nova)
-  [![Documentation](https://img.shields.io/badge/docs-nova.ai-green)](https://nova.ai)
+  [![Build Status](https://img.shields.io/github/actions/workflow/status/yourusername/embodi/ci.yml?branch=main)](https://github.com/yourusername/embodi/actions)
+  [![Discord](https://img.shields.io/discord/1234567890?color=7289da&label=Discord&logo=discord&logoColor=white)](https://discord.gg/embodi)
+  [![Documentation](https://img.shields.io/badge/docs-embodi.ai-green)](https://embodi.ai)
 </div>
 
 ## 🌟 Overview
 
-NOVA is a revolutionary operating system where AI models serve as the kernel, enabling natural language control of hardware and system resources through text commands. Instead of traditional command-line interfaces or system calls, NOVA understands plain English text input.
+EMBODIOS is a revolutionary operating system where AI models serve as the kernel, enabling natural language control of hardware and system resources through text commands. Instead of traditional command-line interfaces or system calls, EMBODIOS understands plain English text input.
 
-**Note:** NOVA processes natural language as text. The "Voice AI" refers to the conversational nature of the interface, not audio processing. For actual voice input, see our [voice demo example](docs/voice-demo.md).
+**Note:** EMBODIOS processes natural language as text. The "Voice AI" refers to the conversational nature of the interface, not audio processing. For actual voice input, see our [voice demo example](docs/voice-demo.md).
 
 ```bash
 > Turn on GPIO pin 17
@@ -29,14 +29,14 @@ AI: System Status Report
 
 ## 🚀 Quick Start
 
-### Install NOVA CLI
+### Install EMBODIOS CLI
 
 ```bash
 # macOS/Linux
-curl -fsSL https://get.nova.ai | bash
+curl -fsSL https://get.embodi.ai | bash
 
 # Or with Homebrew
-brew install nova-os/tap/nova
+brew install embodi-os/tap/embodi
 ```
 
 ### Build Your First AI-OS
@@ -51,11 +51,11 @@ MEMORY 2G
 HARDWARE gpio:enabled
 EOF
 
-# Build NOVA image
-nova build -f Modelfile -t my-ai-os:latest
+# Build EMBODIOS image
+embodi build -f Modelfile -t my-ai-os:latest
 
 # Run it!
-nova run my-ai-os:latest
+embodi run my-ai-os:latest
 ```
 
 ## 🎯 Key Features
@@ -88,7 +88,7 @@ HARDWARE gpio:enabled uart:enabled
 
 ### Robotics
 ```yaml
-name: robot-nova
+name: robot-embodi
 model:
   source: huggingface
   name: microsoft/Phi-3-mini-4k-instruct
@@ -128,8 +128,8 @@ We welcome contributions! See our [Contributing Guide](CONTRIBUTING.md) for deta
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/nova.git
-cd nova
+git clone https://github.com/yourusername/embodi.git
+cd embodi
 
 # Install dependencies
 make deps
@@ -137,7 +137,7 @@ make deps
 # Run tests
 make test
 
-# Build NOVA
+# Build EMBODIOS
 make build
 ```
 
@@ -150,14 +150,14 @@ make build
 
 ## 🌍 Community
 
-- [Discord Server](https://discord.gg/nova)
-- [Forum](https://forum.nova.ai)
-- [Twitter](https://twitter.com/nova_os)
-- [Blog](https://blog.nova.ai)
+- [Discord Server](https://discord.gg/embodi)
+- [Forum](https://forum.embodi.ai)
+- [Twitter](https://twitter.com/embodi_os)
+- [Blog](https://blog.embodi.ai)
 
 ## 📄 License
 
-NOVA is open source software licensed under the [MIT License](LICENSE).
+EMBODIOS is open source software licensed under the [MIT License](LICENSE).
 
 ## 🙏 Acknowledgments
 
@@ -170,9 +170,9 @@ Built with inspiration from:
 ---
 
 <div align="center">
-  <b>NOVA - Where Natural Language Meets Bare Metal</b>
+  <b>EMBODIOS - Where Natural Language Meets Bare Metal</b>
   <br>
-  <a href="https://nova.ai">Website</a> •
+  <a href="https://embodi.ai">Website</a> •
   <a href="docs/getting-started.md">Get Started</a> •
-  <a href="https://github.com/yourusername/nova">GitHub</a>
+  <a href="https://github.com/yourusername/embodi">GitHub</a>
 </div>

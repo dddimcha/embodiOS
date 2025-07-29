@@ -1,4 +1,4 @@
-# NOVA Docker Image
+# EMBODIOS Docker Image
 FROM python:3.11-slim
 
 # Install system dependencies
@@ -21,12 +21,12 @@ COPY src/ src/
 COPY setup.py .
 COPY README.md .
 
-# Install NOVA
+# Install EMBODIOS
 RUN pip install --no-cache-dir -e .
 
-# Create NOVA home directory
-RUN mkdir -p /root/.nova
+# Create EMBODIOS home directory
+RUN mkdir -p /root/.embodi
 
 # Set entrypoint
-ENTRYPOINT ["nova"]
+ENTRYPOINT ["embodi"]
 CMD ["--help"]

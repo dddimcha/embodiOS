@@ -1,27 +1,27 @@
-# NOVA Bare Metal Deployment Guide
+# EMBODIOS Bare Metal Deployment Guide
 
-Deploy NOVA directly on physical hardware without a host OS.
+Deploy EMBODIOS directly on physical hardware without a host OS.
 
 ## Overview
 
-NOVA can run directly on bare metal, turning any computer into an AI-powered system. This guide covers creating bootable media and deploying NOVA on real hardware.
+EMBODIOS can run directly on bare metal, turning any computer into an AI-powered system. This guide covers creating bootable media and deploying EMBODIOS on real hardware.
 
 ## Quick Start
 
 ```bash
 # 1. Pull a model from HuggingFace
-nova pull huggingface:microsoft/phi-2 --quantize 4
+embodi pull huggingface:microsoft/phi-2 --quantize 4
 
 # 2. Create bootable ISO
-nova bundle create \
+embodi bundle create \
   --model microsoft/phi-2 \
-  --output nova-phi2.iso \
+  --output embodi-phi2.iso \
   --target bare-metal \
   --arch x86_64 \
   --features gpio,uart,network
 
 # 3. Write to USB drive
-nova bundle write nova-phi2.iso /dev/sdb --verify
+embodi bundle write embodi-phi2.iso /dev/sdb --verify
 ```
 
 ## Supported Hardware
@@ -46,13 +46,13 @@ Select a model based on your hardware:
 
 ```bash
 # For embedded/IoT (< 2GB RAM)
-nova pull huggingface:gpt2 --quantize 4
+embodi pull huggingface:gpt2 --quantize 4
 
 # For desktop (4-8GB RAM)
-nova pull huggingface:microsoft/phi-2 --quantize 4
+embodi pull huggingface:microsoft/phi-2 --quantize 4
 
 # For server (16GB+ RAM)
-nova pull huggingface:mistralai/Mistral-7B-Instruct-v0.2 --quantize 4
+embodi pull huggingface:mistralai/Mistral-7B-Instruct-v0.2 --quantize 4
 ```
 
 ### 2. Select Hardware Profile
@@ -61,13 +61,13 @@ Use predefined profiles or customize:
 
 ```bash
 # Embedded profile
-nova bundle create --model gpt2 --profile embedded ...
+embodi bundle create --model gpt2 --profile embedded ...
 
 # Desktop profile  
-nova bundle create --model phi-2 --profile desktop ...
+embodi bundle create --model phi-2 --profile desktop ...
 
 # Custom features
-nova bundle create --model mistral-7b \
+embodi bundle create --model mistral-7b \
   --features gpio,uart,i2c,spi,network,display \
   ...
 ```
@@ -76,17 +76,17 @@ nova bundle create --model mistral-7b \
 
 #### ISO for CD/DVD or USB
 ```bash
-nova bundle create \
+embodi bundle create \
   --model microsoft/phi-2 \
-  --output nova.iso \
+  --output embodi.iso \
   --target bare-metal
 ```
 
 #### Direct USB Image
 ```bash
-nova bundle create \
+embodi bundle create \
   --model microsoft/phi-2 \
-  --output nova.img \
+  --output embodi.img \
   --target bare-metal \
   --format usb
 ```
@@ -99,7 +99,7 @@ nova bundle create \
 lsblk
 
 # Write ISO to USB (replace sdX with your device)
-sudo nova bundle write nova.iso /dev/sdX --verify
+sudo embodi bundle write embodi.iso /dev/sdX --verify
 ```
 
 #### macOS
@@ -108,13 +108,13 @@ sudo nova bundle write nova.iso /dev/sdX --verify
 diskutil list
 
 # Write to USB (replace diskN with your device)
-sudo nova bundle write nova.iso /dev/diskN --verify
+sudo embodi bundle write embodi.iso /dev/diskN --verify
 ```
 
 #### Windows
 Use tools like Rufus or Etcher, or use WSL2:
 ```bash
-wsl nova bundle write nova.iso /dev/sdb
+wsl embodi bundle write embodi.iso /dev/sdb
 ```
 
 ### 5. Boot Configuration
@@ -135,12 +135,12 @@ wsl nova bundle write nova.iso /dev/sdb
 
 On successful boot, you'll see:
 ```
-NOVA Bootloader v0.1.0
+EMBODIOS Bootloader v0.1.0
 Loading AI model... [OK]
 Initializing hardware... [OK]
 Starting AI kernel...
 
-NOVA - Natural Language Operating System
+EMBODIOS - Natural Language Operating System
 Model: microsoft/phi-2 (4-bit quantized)
 Memory: 4GB available
 Hardware: GPIO, UART, Network enabled
@@ -154,23 +154,23 @@ Hardware: GPIO, UART, Network enabled
 
 ```bash
 # Create SD card image
-nova bundle create \
+embodi bundle create \
   --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-  --output nova-rpi4.img \
+  --output embodi-rpi4.img \
   --target bare-metal \
   --arch arm64 \
   --board rpi4
 
 # Write to SD card
-sudo dd if=nova-rpi4.img of=/dev/mmcblk0 bs=4M status=progress
+sudo dd if=embodi-rpi4.img of=/dev/mmcblk0 bs=4M status=progress
 ```
 
 ### NVIDIA Jetson
 
 ```bash
-nova bundle create \
+embodi bundle create \
   --model microsoft/phi-2 \
-  --output nova-jetson.img \
+  --output embodi-jetson.img \
   --target bare-metal \
   --arch arm64 \
   --board jetson-nano \
@@ -183,14 +183,14 @@ For multiple machines:
 
 ```bash
 # Create PXE bundle
-nova bundle create \
+embodi bundle create \
   --model microsoft/phi-2 \
-  --output nova-pxe \
+  --output embodi-pxe \
   --target pxe \
   --features network
 
 # Setup TFTP server
-sudo cp nova-pxe/* /srv/tftp/
+sudo cp embodi-pxe/* /srv/tftp/
 ```
 
 ## Troubleshooting
@@ -216,7 +216,7 @@ sudo cp nova-pxe/* /srv/tftp/
 
 Check supported hardware:
 ```bash
-# In NOVA console
+# In EMBODIOS console
 > show hardware
 AI: Detected hardware:
 - CPU: Intel Core i5-8250U (4 cores)
@@ -230,9 +230,9 @@ AI: Detected hardware:
 
 ```bash
 # Create optimized bundle
-nova bundle create \
+embodi bundle create \
   --model microsoft/phi-2 \
-  --output nova-optimized.iso \
+  --output embodi-optimized.iso \
   --optimize-for latency \
   --memory-reserved 512M \
   --cpu-governor performance
@@ -241,7 +241,7 @@ nova bundle create \
 ## Security Considerations
 
 1. **Secure Boot**: Currently requires disabling Secure Boot
-2. **Updates**: Use `nova bundle update` to rebuild with latest patches
+2. **Updates**: Use `embodi bundle update` to rebuild with latest patches
 3. **Network**: Enable firewall features if exposing to network
 4. **Access Control**: Set up authentication in Modelfile
 

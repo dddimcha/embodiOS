@@ -1,6 +1,6 @@
-# Contributing to NOVA
+# Contributing to EMBODIOS
 
-Thank you for your interest in contributing to NOVA! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to EMBODIOS! This document provides guidelines and instructions for contributing.
 
 ## Code of Conduct
 
@@ -19,9 +19,9 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
 
 1. **Fork the repository**
    ```bash
-   git clone https://github.com/yourusername/nova.git
-   cd nova
-   git remote add upstream https://github.com/nova-os/nova.git
+   git clone https://github.com/yourusername/embodi.git
+   cd embodi
+   git remote add upstream https://github.com/embodi-os/embodi.git
    ```
 
 2. **Create a feature branch**
@@ -95,7 +95,7 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
 ### Modelfile Format
 
 When adding new Modelfile directives:
-1. Update the parser in `src/nova/builder/modelfile.py`
+1. Update the parser in `src/embodi/builder/modelfile.py`
 2. Add documentation in `docs/modelfile-reference.md`
 3. Create an example in `examples/`
 4. Add tests in `tests/test_modelfile.py`
@@ -103,8 +103,8 @@ When adding new Modelfile directives:
 ## Project Structure
 
 ```
-nova/
-├── src/nova/          # Source code
+embodi/
+├── src/embodi/          # Source code
 │   ├── cli/          # CLI commands
 │   ├── core/         # Core OS components
 │   ├── builder/      # Build system
@@ -124,8 +124,8 @@ nova/
 
 ## Getting Help
 
-- Join our [Discord server](https://discord.gg/nova)
-- Check the [documentation](https://docs.nova.ai)
+- Join our [Discord server](https://discord.gg/embodi)
+- Check the [documentation](https://docs.embodi.ai)
 - Ask questions in GitHub Discussions
 
 ## Recognition
@@ -135,4 +135,4 @@ Contributors will be:
 - Mentioned in release notes
 - Given credit in documentation
 
-Thank you for contributing to NOVA!
+Thank you for contributing to EMBODIOS!
