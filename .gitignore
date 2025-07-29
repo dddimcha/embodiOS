@@ -9,13 +9,20 @@
 *.exe
 *.dll
 
-# NOVA specific
+# EMBODIOS specific
 *.aios
 *.nova
 /models/
 /images/
-/.nova/
+/.embodi/
 /runtime/
+embodi-cache/
+hardware-profiles/
+
+# Test artifacts
+test-bundle-*.iso
+test-bundle-*.json
+test-model.aios
 
 # IDE and editor files
 .vscode/
