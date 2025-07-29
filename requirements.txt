@@ -1,0 +1,19 @@
+# Core dependencies
+PyYAML>=6.0
+click>=8.0
+rich>=13.0
+requests>=2.28
+
+# Build dependencies
+docker>=6.0
+qemu-python>=0.1
+
+# Model handling
+numpy>=1.21
+safetensors>=0.3
+huggingface-hub>=0.16
+
+# Utilities
+psutil>=5.9
+tqdm>=4.65
+tabulate>=0.9

@@ -1,0 +1,76 @@
+# Build artifacts
+/build/
+/dist/
+/target/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.dll
+
+# NOVA specific
+*.aios
+*.nova
+/models/
+/images/
+/.nova/
+/runtime/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# C/C++
+*.d
+*.out
+*.app
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+
+# Documentation
+/docs/_build/
+/docs/site/
+*.log
+
+# Test artifacts
+/test-results/
+/coverage/
+*.gcov
+*.gcda
+*.gcno
+
+# Temporary files
+/tmp/
+/temp/
+*.tmp
+*.bak
+*.cache
+
+# OS generated
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.Spotlight-V100
+.Trashes
+
+# Credentials (never commit these!)
+*.pem
+*.key
+.env
+.env.local
+secrets/
