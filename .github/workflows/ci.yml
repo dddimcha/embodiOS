@@ -84,4 +84,4 @@ jobs:
     
     - name: Test Docker image
       run: |
-        docker run --rm embodi:test embodi --version
+        docker run --rm embodi:test --version
