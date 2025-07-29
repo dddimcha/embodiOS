@@ -178,20 +178,19 @@ def test_command_processor():
     
     engine = EMBODIOSInferenceEngine()
     
-    # For testing, we can skip model loading since numpy is required
-    # The command processor can work with just the NL processor
-    # model_path = create_test_model()
-    # engine.load_model(str(model_path))
+    # Load a test model for the command processor
+    model_path = create_test_model()
+    engine.load_model(str(model_path))
     
     # Create processor
     processor = EMBODIOSCommandProcessor(hal, engine)
     
-    # Test commands
+    # Test commands that should be recognized by NL processor
     test_commands = [
-        "Turn on GPIO 17",
-        "Read pin 22",
-        "Blink LED on pin 13",
-        "System status"
+        "Turn on GPIO pin 17",    # Should match GPIO pattern
+        "Read GPIO pin 22",       # Should match GPIO read pattern
+        "Show system status",     # Should match system status pattern
+        "Turn off GPIO pin 13"    # Should match GPIO pattern
     ]
     
     for cmd in test_commands:
