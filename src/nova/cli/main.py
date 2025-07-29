@@ -128,10 +128,15 @@ def images(ctx, all):
 @cli.command()
 @click.argument('model')
 @click.option('--source', default='huggingface', help='Model source')
+@click.option('--quantize', type=click.Choice(['4', '8']), help='Quantization bits')
+@click.option('--force', is_flag=True, help='Force re-download')
 @click.pass_context
-def pull(ctx, model, source):
+def pull(ctx, model, source, quantize, force):
     """Pull AI model"""
     console.print(f"[bold blue]Pulling {model} from {source}[/bold blue]")
+    
+    # Import model puller
+    from nova.models.huggingface import pull_model
     
     with Progress(
         SpinnerColumn(),
@@ -140,10 +145,17 @@ def pull(ctx, model, source):
     ) as progress:
         task = progress.add_task("Downloading...", total=None)
         
-        # Implementation would go here
+        # Pull model
+        quantization = int(quantize) if quantize else None
+        model_path = pull_model(f"{source}:{model}", quantization, force)
+        
         progress.update(task, description="Converting to NOVA format...")
         
-    console.print("[bold green]✓ Model pulled successfully[/bold green]")
+    if model_path:
+        console.print(f"[bold green]✓ Model pulled successfully: {model_path.name}[/bold green]")
+    else:
+        console.print("[bold red]✗ Failed to pull model[/bold red]")
+        sys.exit(1)
 
 @cli.command()
 @click.pass_context
@@ -239,6 +251,73 @@ ENV NOVA_DEBUG 0
     console.print("  1. Edit Modelfile to customize your AI-OS")
     console.print("  2. Run: [bold]nova build -f Modelfile -t my-os:latest[/bold]")
     console.print("  3. Run: [bold]nova run my-os:latest[/bold]")
+
+@cli.group()
+@click.pass_context
+def bundle(ctx):
+    """Manage NOVA bundles for bare metal deployment"""
+    pass
+
+@bundle.command('create')
+@click.option('--model', required=True, help='Model name or path')
+@click.option('--output', required=True, help='Output ISO file')
+@click.option('--target', default='bare-metal', type=click.Choice(['bare-metal', 'qemu', 'docker']))
+@click.option('--arch', default='x86_64', help='Target architecture')
+@click.option('--memory', default='2G', help='Memory allocation')
+@click.option('--features', multiple=True, help='Hardware features to enable')
+@click.option('--compress', is_flag=True, help='Compress output')
+@click.pass_context
+def bundle_create(ctx, model, output, target, arch, memory, features, compress):
+    """Create bootable NOVA bundle"""
+    console.print(f"[bold blue]Creating {target} bundle for {model}[/bold blue]")
+    
+    from nova.nova_installer.bundle.bundler import NOVABundler
+    
+    bundler = NOVABundler()
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Creating bundle...", total=None)
+        
+        success = bundler.create_bundle(
+            model=model,
+            output=Path(output),
+            target=target,
+            arch=arch,
+            memory=memory,
+            features=list(features) if features else None,
+            compress=compress
+        )
+        
+    if success:
+        console.print(f"[bold green]✓ Bundle created: {output}[/bold green]")
+        if target == 'bare-metal':
+            console.print("\nNext steps:")
+            console.print(f"  1. Write to USB: [bold]nova bundle write {output} /dev/sdX[/bold]")
+            console.print("  2. Boot from USB on target hardware")
+    else:
+        console.print("[bold red]✗ Bundle creation failed[/bold red]")
+        sys.exit(1)
+
+@bundle.command('write')
+@click.argument('bundle')
+@click.argument('device')
+@click.option('--verify', is_flag=True, help='Verify after writing')
+@click.pass_context
+def bundle_write(ctx, bundle, device, verify):
+    """Write bundle to USB device"""
+    from nova.nova_installer.bundle.bundler import NOVABundler
+    
+    bundler = NOVABundler()
+    
+    if bundler.write_bundle(bundle, device, verify):
+        console.print("[bold green]✓ Bundle written successfully[/bold green]")
+    else:
+        console.print("[bold red]✗ Failed to write bundle[/bold red]")
+        sys.exit(1)
 
 def main():
     """Main entry point"""

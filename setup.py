@@ -52,4 +52,8 @@ setup(
             "data/*",
         ],
     },
+    scripts=[
+        "nova-installer/iso/create_iso.py",
+        "nova-installer/bundle/bundler.py",
+    ],
 )
