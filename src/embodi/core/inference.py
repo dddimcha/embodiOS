@@ -73,10 +73,23 @@ class EMBODIOSInferenceEngine:
             self.architecture = json.loads(arch_json)
             
             # Memory-map weights for efficient access
-            f.seek(weights_offset)
-            self.weights_mmap = mmap.mmap(f.fileno(), weights_size, 
-                                         access=mmap.ACCESS_READ,
-                                         offset=weights_offset)
+            try:
+                # mmap requires page-aligned offset
+                page_size = mmap.PAGESIZE
+                aligned_offset = (weights_offset // page_size) * page_size
+                offset_diff = weights_offset - aligned_offset
+                
+                self.weights_mmap = mmap.mmap(f.fileno(), weights_size + offset_diff, 
+                                             access=mmap.ACCESS_READ,
+                                             offset=aligned_offset)
+                # Store the difference to adjust reads
+                self.weights_offset_diff = offset_diff
+            except (OSError, ValueError):
+                # Fallback: read weights into memory for small models or testing
+                f.seek(weights_offset)
+                self.weights_data = f.read(weights_size)
+                self.weights_mmap = None
+                self.weights_offset_diff = 0
             
             self.model_loaded = True
     
@@ -173,10 +186,19 @@ class EMBODIOSInferenceEngine:
         embedding_offset = 0
         embedding_size = vocab_size * hidden_size * 4  # float32
         
-        embeddings = np.frombuffer(
-            self.weights_mmap[embedding_offset:embedding_offset + embedding_size],
-            dtype=np.float32
-        ).reshape(vocab_size, hidden_size)
+        if self.weights_mmap is not None:
+            # Use memory-mapped weights
+            offset = embedding_offset + self.weights_offset_diff
+            embeddings = np.frombuffer(
+                self.weights_mmap[offset:offset + embedding_size],
+                dtype=np.float32
+            ).reshape(vocab_size, hidden_size)
+        else:
+            # Use in-memory weights (for small models/testing)
+            embeddings = np.frombuffer(
+                self.weights_data[embedding_offset:embedding_offset + embedding_size],
+                dtype=np.float32
+            ).reshape(vocab_size, hidden_size)
         
         # Look up embeddings
         return embeddings[tokens]

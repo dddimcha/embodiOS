@@ -1,0 +1,103 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Publish target'
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - pypi
+      version:
+        description: 'Version to publish (must match setup.py)'
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+    
+    - name: Run tests
+      run: |
+        pip install -e .
+        pytest tests/ -v
+    
+    - name: Verify version
+      run: |
+        PACKAGE_VERSION=$(python -c "import embodi; print(embodi.__version__)")
+        echo "Package version: $PACKAGE_VERSION"
+        echo "Requested version: ${{ github.event.inputs.version }}"
+        if [ "$PACKAGE_VERSION" != "${{ github.event.inputs.version }}" ]; then
+          echo "Error: Package version ($PACKAGE_VERSION) doesn't match requested version (${{ github.event.inputs.version }})"
+          echo "Please update __version__ in src/embodi/__init__.py"
+          exit 1
+        fi
+    
+    - name: Build package
+      run: |
+        python -m build
+        echo "Built packages:"
+        ls -la dist/
+    
+    - name: Check package
+      run: |
+        twine check dist/*
+        echo "Package is valid for upload"
+    
+    - name: Publish to Test PyPI
+      if: github.event.inputs.target == 'testpypi'
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+      run: |
+        echo "Publishing to Test PyPI..."
+        twine upload --repository testpypi dist/*
+        echo "✅ Published to Test PyPI!"
+        echo "Install with: pip install -i https://test.pypi.org/simple/ embodios==${{ github.event.inputs.version }}"
+    
+    - name: Publish to PyPI
+      if: github.event.inputs.target == 'pypi'
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      run: |
+        echo "Publishing to PyPI..."
+        twine upload dist/*
+        echo "✅ Published to PyPI!"
+        echo "Install with: pip install embodios==${{ github.event.inputs.version }}"
+    
+    - name: Create summary
+      run: |
+        echo "## 📦 Package Published" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Target**: ${{ github.event.inputs.target }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version**: ${{ github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ github.event.inputs.target }}" == "testpypi" ]; then
+          echo "### Installation" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "pip install -i https://test.pypi.org/simple/ embodios==${{ github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### Installation" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "pip install embodios==${{ github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi
