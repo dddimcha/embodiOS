@@ -1,4 +1,4 @@
-# NOVA - Natural Operating System with Voice AI
+# NOVA - Natural Language Operating System with Versatile AI
 
 <div align="center">
   <img src="docs/images/nova-logo.png" alt="NOVA Logo" width="200">
@@ -11,7 +11,9 @@
 
 ## 🌟 Overview
 
-NOVA is a revolutionary operating system where AI models serve as the kernel, enabling natural language control of hardware and system resources. Instead of traditional command-line interfaces or system calls, NOVA understands plain English.
+NOVA is a revolutionary operating system where AI models serve as the kernel, enabling natural language control of hardware and system resources through text commands. Instead of traditional command-line interfaces or system calls, NOVA understands plain English text input.
+
+**Note:** NOVA processes natural language as text. The "Voice AI" refers to the conversational nature of the interface, not audio processing. For actual voice input, see our [voice demo example](docs/voice-demo.md).
 
 ```bash
 > Turn on GPIO pin 17
