@@ -52,8 +52,4 @@ setup(
             "data/*",
         ],
     },
-    scripts=[
-        "embodi-installer/iso/create_iso.py",
-        "embodi-installer/bundle/bundler.py",
-    ],
 )
