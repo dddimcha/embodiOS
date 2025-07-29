@@ -140,7 +140,7 @@ make build
 
 ## Community
 
-- [Discord Server](https://discord.gg/embodi)
+- [Discord Server](https://discord.gg/xRsYfcdP)
 
 ## License
 
