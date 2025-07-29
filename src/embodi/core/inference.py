@@ -18,6 +18,10 @@ class EMBODIOSInferenceEngine:
         self.config = None
         self.hardware_tokens = self._init_hardware_tokens()
         self.memory_map = None
+        self.weights_mmap: Optional[mmap.mmap] = None
+        self.weights_data: Optional[bytes] = None
+        self.weights_offset_diff: int = 0
+        self.architecture: Optional[Dict] = None
         
     def _init_hardware_tokens(self) -> Dict[str, int]:
         """Initialize special tokens for hardware operations"""
