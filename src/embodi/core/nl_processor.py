@@ -437,7 +437,13 @@ class EMBODIOSCommandProcessor:
         
         if not commands:
             # Let the AI model handle it
-            return self._process_with_ai(text)
+            try:
+                return self._process_with_ai(text)
+            except RuntimeError as e:
+                if "No model loaded" in str(e):
+                    return f"I didn't understand that command. Try something like 'turn on gpio 17' or 'read temperature sensor'."
+                else:
+                    raise
         
         # Execute hardware commands
         results = self.executor.execute(commands)

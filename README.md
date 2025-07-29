@@ -24,8 +24,8 @@ AI: System Status Report
 
 ```bash
 # Install from source
-git clone https://github.com/embodiOS/core.git
-cd core
+git clone https://github.com/dddimcha/embodiOS.git
+cd embodiOS
 pip install -e .
 ```
 
@@ -157,7 +157,7 @@ If you want to help out or have ideas, that's awesome. Check the contributing gu
 
 ```bash
 # Clone the repository
-git clone https://github.com/embodiOS/core.git
+git clone https://github.com/dddimcha/embodiOS.git
 cd core
 
 # Install dependencies
