@@ -114,6 +114,7 @@ class BareMetalGPIO:
     def __init__(self):
         # Map GPIO registers
         self.gpio_mem = self._map_peripheral(self.GPIO_BASE, 0xB4)
+        self.pins = {}  # Track pin states
         
     def _map_peripheral(self, base_addr: int, size: int):
         """Map peripheral memory"""
@@ -144,6 +145,9 @@ class BareMetalGPIO:
         
         # Write back
         self._write32(reg_addr, current)
+        
+        # Track pin state
+        self.pins[pin] = {'mode': mode, 'value': False}
     
     def write(self, pin: int, value: bool):
         """Write digital value to pin"""
@@ -155,6 +159,10 @@ class BareMetalGPIO:
             # Set pin low - use CLR register
             reg = 0x28 + (pin // 32) * 4
             self._write32(self.gpio_mem + reg, 1 << (pin % 32))
+        
+        # Update tracked state
+        if pin in self.pins:
+            self.pins[pin]['value'] = value
     
     def read(self, pin: int) -> bool:
         """Read digital value from pin"""
@@ -182,6 +190,7 @@ class OSBasedGPIO:
     def __init__(self):
         self.exported_pins = set()
         self.gpio_path = Path('/sys/class/gpio')
+        self.pins = {}  # Track pin states
         
     def setup(self, pin: int, mode: str):
         """Set pin mode using sysfs"""
@@ -197,12 +206,19 @@ class OSBasedGPIO:
         pin_path = self.gpio_path / f'gpio{pin}'
         if pin_path.exists():
             (pin_path / 'direction').write_text(mode.replace('input', 'in').replace('output', 'out'))
+        
+        # Track pin state
+        self.pins[pin] = {'mode': mode, 'value': False}
     
     def write(self, pin: int, value: bool):
         """Write value using sysfs"""
         pin_path = self.gpio_path / f'gpio{pin}'
         if pin_path.exists():
             (pin_path / 'value').write_text('1' if value else '0')
+        
+        # Update tracked state
+        if pin in self.pins:
+            self.pins[pin]['value'] = value
     
     def read(self, pin: int) -> bool:
         """Read value using sysfs"""
