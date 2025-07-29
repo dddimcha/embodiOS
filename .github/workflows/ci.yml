@@ -34,11 +34,11 @@ jobs:
     
     - name: Type check with mypy
       run: |
-        mypy src/nova --ignore-missing-imports
+        mypy src/embodi --ignore-missing-imports
     
     - name: Test with pytest
       run: |
-        pytest tests/ -v --cov=nova --cov-report=xml
+        pytest tests/ -v --cov=embodi --cov-report=xml
     
     - name: Upload coverage
       uses: codecov/codecov-action@v3
@@ -80,8 +80,8 @@ jobs:
     
     - name: Build Docker image
       run: |
-        docker build -t nova:test .
+        docker build -t embodi:test .
     
     - name: Test Docker image
       run: |
-        docker run --rm nova:test nova --version
+        docker run --rm embodi:test embodi --version

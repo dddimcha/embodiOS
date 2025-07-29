@@ -1,6 +1,6 @@
-# Getting Started with NOVA
+# Getting Started with EMBODIOS
 
-Welcome to NOVA - Natural Operating System with Voice AI. This guide will help you get started with building and running your first AI-powered operating system.
+Welcome to EMBODIOS - Natural Operating System with Voice AI. This guide will help you get started with building and running your first AI-powered operating system.
 
 ## Prerequisites
 
@@ -14,15 +14,15 @@ Welcome to NOVA - Natural Operating System with Voice AI. This guide will help y
 ### Quick Install (Recommended)
 
 ```bash
-curl -fsSL https://get.nova.ai | bash
+curl -fsSL https://get.embodi.ai | bash
 ```
 
 ### Manual Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/nova-os/nova.git
-cd nova
+git clone https://github.com/embodi-os/embodi.git
+cd embodi
 
 # Install with pip
 pip install .
@@ -34,7 +34,7 @@ pip install -e .
 ### Verify Installation
 
 ```bash
-nova --version
+embodi --version
 ```
 
 ## Your First AI-OS
@@ -44,7 +44,7 @@ nova --version
 ```bash
 mkdir my-ai-os
 cd my-ai-os
-nova init
+embodi init
 ```
 
 This creates a basic `Modelfile`:
@@ -65,14 +65,14 @@ CAPABILITY hardware_control
 ### 2. Build the Image
 
 ```bash
-nova build -f Modelfile -t my-first-os:latest
+embodi build -f Modelfile -t my-first-os:latest
 ```
 
 You'll see output like:
 ```
-Building NOVA image from Modelfile
+Building EMBODIOS image from Modelfile
 Preparing model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-Converting to NOVA format...
+Converting to EMBODIOS format...
 Building kernel...
 Creating bootable image...
 ✓ Build successful!
@@ -81,12 +81,12 @@ Creating bootable image...
 ### 3. Run Your AI-OS
 
 ```bash
-nova run my-first-os:latest
+embodi run my-first-os:latest
 ```
 
 You'll be greeted with:
 ```
-NOVA v0.1.0
+EMBODIOS v0.1.0
 Model: TinyLlama 1.1B
 Ready for natural language input
 
@@ -98,8 +98,8 @@ Ready for natural language input
 Try these commands:
 
 ```
-> Hello NOVA
-AI: Hello! I'm NOVA, your AI-powered operating system. How can I help you?
+> Hello EMBODIOS
+AI: Hello! I'm EMBODIOS, your AI-powered operating system. How can I help you?
 
 > Turn on GPIO pin 17
 AI: Executing hardware control...
@@ -115,7 +115,7 @@ AI: System Status Report
 AI: The result is 131.88
 
 > Exit
-AI: Shutting down NOVA. Goodbye!
+AI: Shutting down EMBODIOS. Goodbye!
 ```
 
 ## Understanding Modelfiles
@@ -145,8 +145,8 @@ CAPABILITY networking
 CAPABILITY process_management
 
 # Environment configuration
-ENV NOVA_PROMPT "MyOS> "
-ENV NOVA_DEBUG 1
+ENV EMBODIOS_PROMPT "MyOS> "
+ENV EMBODIOS_DEBUG 1
 ```
 
 ## Common Use Cases
@@ -186,7 +186,7 @@ CAPABILITY home_automation voice_control
 
 - [Modelfile Reference](modelfile-reference.md) - Learn all Modelfile directives
 - [Hardware Guide](hardware.md) - Configure hardware interfaces
-- [Examples](https://github.com/nova-os/nova/tree/main/examples) - More example configurations
+- [Examples](https://github.com/embodi-os/embodi/tree/main/examples) - More example configurations
 - [API Documentation](api.md) - Programmatic usage
 
 ## Troubleshooting
@@ -195,13 +195,13 @@ CAPABILITY home_automation voice_control
 
 ```bash
 # Clean build cache
-rm -rf ~/.nova/build-cache
+rm -rf ~/.embodi/build-cache
 
 # Build with debug output
-nova build -f Modelfile --debug
+embodi build -f Modelfile --debug
 
 # Use specific platform
-nova build -f Modelfile --platform linux/arm64
+embodi build -f Modelfile --platform linux/arm64
 ```
 
 ### Model Download Issues
@@ -211,7 +211,7 @@ nova build -f Modelfile --platform linux/arm64
 MODEL local:/path/to/model.gguf
 
 # Specify different source
-MODEL custom:https://myserver/model.nova
+MODEL custom:https://myserver/model.embodi
 ```
 
 ### Performance Issues
@@ -222,8 +222,8 @@ MODEL custom:https://myserver/model.nova
 
 ## Getting Help
 
-- [Documentation](https://docs.nova.ai)
-- [Discord Community](https://discord.gg/nova)
-- [GitHub Issues](https://github.com/nova-os/nova/issues)
+- [Documentation](https://docs.embodi.ai)
+- [Discord Community](https://discord.gg/embodi)
+- [GitHub Issues](https://github.com/embodi-os/embodi/issues)
 
 Welcome to the future of operating systems!
