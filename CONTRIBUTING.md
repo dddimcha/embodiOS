@@ -19,9 +19,9 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
 
 1. **Fork the repository**
    ```bash
-   git clone https://github.com/yourusername/embodi.git
+   git clone https://github.com/yourusername/embodiOS.git
    cd embodi
-   git remote add upstream https://github.com/embodi-os/embodi.git
+   git remote add upstream https://github.com/dddimcha/embodiOS.git
    ```
 
 2. **Create a feature branch**
@@ -124,8 +124,8 @@ embodi/
 
 ## Getting Help
 
-- Join our [Discord server](https://discord.gg/embodi)
-- Check the [documentation](https://docs.embodi.ai)
+- Open an issue on [GitHub](https://github.com/dddimcha/embodiOS/issues)
+- Check the [documentation](https://github.com/dddimcha/embodiOS/tree/main/docs)
 - Ask questions in GitHub Discussions
 
 ## Recognition
