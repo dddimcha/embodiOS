@@ -7,7 +7,7 @@ import mmap
 import struct
 import fcntl
 import array
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Union, Any
 from pathlib import Path
 
 class HardwareAbstractionLayer:
@@ -86,11 +86,11 @@ class HardwareAbstractionLayer:
         """Register interrupt handler for bare metal mode"""
         self.interrupt_handlers[irq] = handler
     
-    def memory_map(self, physical_addr: int, size: int) -> mmap.mmap:
+    def memory_map(self, physical_addr: int, size: int) -> Union[mmap.mmap, 'SimulatedMemory']:
         """Map physical memory region"""
         if self.is_bare_metal:
-            # Direct physical access
-            return physical_addr
+            # Direct physical access - return simulated memory for bare metal
+            return SimulatedMemory(physical_addr, size)
         else:
             # Use /dev/mem for physical memory access
             try:
@@ -281,7 +281,7 @@ class BareMetalI2C:
         self._write32(self.i2c_mem + self.BSC_C, 0x8081)  # Read mode
         
         # Wait and collect data
-        data = []
+        data: List[int] = []
         while len(data) < length:
             if self._read32(self.i2c_mem + self.BSC_S) & 0x20:  # RXD
                 data.append(self._read32(self.i2c_mem + self.BSC_FIFO))
@@ -461,7 +461,7 @@ class OSBasedUART:
             try:
                 self.port_fd = os.open(port, os.O_RDWR | os.O_NOCTTY)
             except:
-                self.port_fd = None
+                self.port_fd = -1  # Use -1 instead of None for invalid file descriptor
     
     def write(self, data: bytes):
         """Write to serial port"""

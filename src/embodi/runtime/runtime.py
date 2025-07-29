@@ -3,7 +3,7 @@ EMBODIOS Runtime - Container runtime for EMBODIOS images
 """
 
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import json
 
 class EmbodiRuntime:
@@ -11,7 +11,7 @@ class EmbodiRuntime:
     
     def __init__(self, debug: bool = False):
         self.debug = debug
-        self.containers = {}
+        self.containers: Dict[str, Dict[str, Any]] = {}
         self.images_dir = Path.home() / '.embodi' / 'images'
         
     def run(self, image: str, detach: bool = False, name: Optional[str] = None,
@@ -45,7 +45,7 @@ class EmbodiRuntime:
             return True
         return False
         
-    def list_containers(self) -> List[Dict]:
+    def list_containers(self) -> List[Dict[str, Any]]:
         """List running containers"""
         return [
             {
@@ -59,9 +59,9 @@ class EmbodiRuntime:
             if c['status'] in ['running', 'detached']
         ]
         
-    def list_images(self, show_all: bool = False) -> List[Dict]:
+    def list_images(self, show_all: bool = False) -> List[Dict[str, Any]]:
         """List available images"""
-        images = []
+        images: List[Dict[str, Any]] = []
         
         if not self.images_dir.exists():
             return images

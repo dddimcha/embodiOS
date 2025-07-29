@@ -212,9 +212,9 @@ class EMBODIOSInferenceEngine:
         exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
         return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
     
-    def _process_hardware_tokens(self, tokens: List[int]) -> Dict:
+    def _process_hardware_tokens(self, tokens: List[int]) -> Dict[str, List]:
         """Process output tokens for hardware operations"""
-        operations = {
+        operations: Dict[str, List] = {
             'gpio': [],
             'memory': [],
             'i2c': [],
@@ -324,7 +324,7 @@ class BareMetalInference:
         """Write to memory-mapped I/O"""
         # In bare metal, this would be direct memory access
         ptr = ctypes.cast(addr, ctypes.POINTER(ctypes.c_uint32))
-        ptr.contents = value
+        ptr.contents = ctypes.c_uint32(value)
     
     def cpu_pause(self):
         """Pause CPU briefly"""

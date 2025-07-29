@@ -36,7 +36,7 @@ class SystemEvent:
 class EMBODIOSKernel:
     """Main EMBODIOS kernel - AI-powered operating system"""
     
-    def __init__(self, model_path: str, hardware_config: Dict = None):
+    def __init__(self, model_path: str, hardware_config: Optional[Dict] = None):
         self.model_path = model_path
         self.hardware_config = hardware_config or {}
         self.state = SystemState.BOOTING
@@ -48,10 +48,10 @@ class EMBODIOSKernel:
         self.nl_hal = None
         
         # System management
-        self.event_queue = queue.Queue()
-        self.threads = {}
-        self.interrupt_handlers = {}
-        self.system_memory = {}
+        self.event_queue: queue.Queue[SystemEvent] = queue.Queue()
+        self.threads: Dict[str, threading.Thread] = {}
+        self.interrupt_handlers: Dict[int, Callable] = {}
+        self.system_memory: Dict[str, Dict[str, int]] = {}
         
         # Statistics
         self.boot_time = time.time()
@@ -262,7 +262,10 @@ class EMBODIOSKernel:
         
         # Process through natural language processor
         try:
-            response = self.command_processor.process_input(command)
+            if self.command_processor:
+                response = self.command_processor.process_input(command)
+            else:
+                response = "Command processor not initialized"
             print(f"AI: {response}")
             
         except Exception as e:
@@ -367,7 +370,7 @@ class EMBODIOSKernel:
             # Simple processing for now
             pass
     
-    def _handle_interrupt(self, irq: int, data: Dict = None):
+    def _handle_interrupt(self, irq: int, data: Optional[Dict] = None):
         """Handle hardware interrupt"""
         
         if irq in self.interrupt_handlers:
@@ -376,36 +379,39 @@ class EMBODIOSKernel:
         else:
             print(f"Unhandled interrupt: IRQ {irq}")
     
-    def _handle_timer_interrupt(self, data: Dict):
+    def _handle_timer_interrupt(self, data: Optional[Dict]):
         """Handle timer interrupt"""
         pass
     
-    def _handle_keyboard_interrupt(self, data: Dict):
+    def _handle_keyboard_interrupt(self, data: Optional[Dict]):
         """Handle keyboard interrupt"""
         pass
     
-    def _handle_gpio_interrupt(self, data: Dict):
+    def _handle_gpio_interrupt(self, data: Optional[Dict]):
         """Handle GPIO interrupt"""
-        pin = data.get('pin', 0)
-        value = data.get('value', 0)
+        pin = data.get('pin', 0) if data else 0
+        value = data.get('value', 0) if data else 0
         
         # Let AI handle the interrupt
         event_text = f"GPIO interrupt on pin {pin}, value {value}"
-        response = self.command_processor.process_input(event_text)
+        if self.command_processor:
+            response = self.command_processor.process_input(event_text)
+        else:
+            response = "Command processor not initialized"
         
         print(f"\n[INTERRUPT] {event_text}")
         print(f"AI: {response}")
         print("> ", end='', flush=True)
     
-    def _handle_uart_interrupt(self, data: Dict):
+    def _handle_uart_interrupt(self, data: Optional[Dict]):
         """Handle UART interrupt"""
-        uart = self.hal.get_device('uart')
+        uart = self.hal.get_device('uart') if self.hal else None
         if uart and uart.available():
             data = uart.read(1)
             print(f"\n[UART RX] {data}")
             print("> ", end='', flush=True)
     
-    def _handle_i2c_interrupt(self, data: Dict):
+    def _handle_i2c_interrupt(self, data: Optional[Dict]):
         """Handle I2C interrupt"""
         pass
     
@@ -460,7 +466,7 @@ class EMBODIOSRunner:
     def __init__(self):
         self.kernel = None
     
-    def run_interactive(self, model_path: str, hardware_config: Dict = None):
+    def run_interactive(self, model_path: str, hardware_config: Optional[Dict] = None):
         """Run EMBODIOS in interactive mode"""
         
         hardware_config = hardware_config or {
