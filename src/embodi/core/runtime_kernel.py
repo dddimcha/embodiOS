@@ -406,10 +406,11 @@ class EMBODIOSKernel:
     def _handle_uart_interrupt(self, data: Optional[Dict]):
         """Handle UART interrupt"""
         uart = self.hal.get_device('uart') if self.hal else None
-        if uart and uart.available():
-            data = uart.read(1)
-            print(f"\n[UART RX] {data}")
-            print("> ", end='', flush=True)
+        if uart and hasattr(uart, 'available') and uart.available():
+            uart_data = uart.read(1) if hasattr(uart, 'read') else None
+            if uart_data:
+                print(f"\n[UART RX] {uart_data}")
+                print("> ", end='', flush=True)
     
     def _handle_i2c_interrupt(self, data: Optional[Dict]):
         """Handle I2C interrupt"""
