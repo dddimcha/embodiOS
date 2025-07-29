@@ -1,15 +1,6 @@
 # EMBODIOS - Embodied Intelligence Operating System
 
-<div align="center">
-  <img src="docs/images/embodi-logo.png" alt="EMBODIOS Logo" width="200">
-  
-  [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-  [![Build Status](https://img.shields.io/github/actions/workflow/status/yourusername/embodi/ci.yml?branch=main)](https://github.com/yourusername/embodi/actions)
-  [![Discord](https://img.shields.io/discord/1234567890?color=7289da&label=Discord&logo=discord&logoColor=white)](https://discord.gg/embodi)
-  [![Documentation](https://img.shields.io/badge/docs-embodi.ai-green)](https://embodi.ai)
-</div>
-
-## 🌟 Overview
+## Overview
 
 EMBODIOS is a revolutionary operating system where AI models serve as the kernel, enabling natural language control of hardware and system resources through text commands. Instead of traditional command-line interfaces or system calls, EMBODIOS understands plain English text input.
 
@@ -27,16 +18,15 @@ AI: System Status Report
 [SYSTEM] Hardware: GPIO, UART, Timers active
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Install EMBODIOS CLI
 
 ```bash
-# macOS/Linux
-curl -fsSL https://get.embodi.ai | bash
-
-# Or with Homebrew
-brew install embodi-os/tap/embodi
+# Install from source
+git clone https://github.com/embodiOS/core.git
+cd core
+pip install -e .
 ```
 
 ### Build Your First AI-OS
@@ -58,7 +48,7 @@ embodi build -f Modelfile -t my-ai-os:latest
 embodi run my-ai-os:latest
 ```
 
-## 🎯 Key Features
+## Key Features
 
 - **Natural Language OS**: Control everything with plain English
 - **AI as Kernel**: Language models directly manage hardware
@@ -67,7 +57,7 @@ embodi run my-ai-os:latest
 - **Real-time Performance**: Sub-10ms response times
 - **Minimal Footprint**: Runs in as little as 512MB RAM
 
-## 📚 Documentation
+## Documentation
 
 - [Getting Started](docs/getting-started.md)
 - [Modelfile Reference](docs/modelfile-reference.md)
@@ -75,7 +65,7 @@ embodi run my-ai-os:latest
 - [API Documentation](docs/api.md)
 - [Contributing Guide](CONTRIBUTING.md)
 
-## 🛠️ Use Cases
+## Use Cases
 
 ### Embedded Systems
 ```dockerfile
@@ -106,7 +96,7 @@ CAPABILITY home_automation voice_control
 HARDWARE wifi:enabled zigbee:enabled
 ```
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 User Input (Natural Language)
@@ -122,14 +112,14 @@ User Input (Natural Language)
 └─────────────────┘
 ```
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions! See our [Contributing Guide](CONTRIBUTING.md) for details.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/embodi.git
-cd embodi
+git clone https://github.com/embodiOS/core.git
+cd core
 
 # Install dependencies
 make deps
@@ -141,25 +131,22 @@ make test
 make build
 ```
 
-## 📊 Performance
+## Performance
 
 - **Boot Time**: ~800ms
 - **Inference Speed**: 154 tokens/sec (TinyLlama)
 - **Response Latency**: 6.5ms average
 - **Memory Usage**: 1.2GB (including model)
 
-## 🌍 Community
+## Community
 
 - [Discord Server](https://discord.gg/embodi)
-- [Forum](https://forum.embodi.ai)
-- [Twitter](https://twitter.com/embodi_os)
-- [Blog](https://blog.embodi.ai)
 
-## 📄 License
+## License
 
 EMBODIOS is open source software licensed under the [MIT License](LICENSE).
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 Built with inspiration from:
 - Linux kernel architecture
@@ -169,10 +156,6 @@ Built with inspiration from:
 
 ---
 
-<div align="center">
-  <b>EMBODIOS - Where Natural Language Meets Bare Metal</b>
-  <br>
-  <a href="https://embodi.ai">Website</a> •
-  <a href="docs/getting-started.md">Get Started</a> •
-  <a href="https://github.com/yourusername/embodi">GitHub</a>
-</div>
+---
+
+**EMBODIOS - Where Natural Language Meets Bare Metal**
