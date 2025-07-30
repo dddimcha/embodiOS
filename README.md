@@ -2,9 +2,9 @@
 
 ## Overview
 
-So, I've been working on this interesting project - EMBODIOS. It's basically an operating system, but with a twist. Instead of typing cryptic commands or dealing with complex system calls, you just... talk to it. Well, type to it, actually. The whole thing runs on language models that handle the kernel operations. Pretty neat way to control hardware when you think about it.
+EMBODIOS is an experimental operating system where AI models run directly on hardware as the OS kernel itself. Instead of traditional system calls and command-line interfaces, you control hardware through natural language commands. The entire OS is powered by language models that handle kernel operations, memory management, and hardware control.
 
-Quick heads up: When I say "conversational", I mean text-based conversations. The system reads what you type, not what you say out loud. Though if you're curious about voice stuff, there's a demo in the docs that shows how you could add that.
+**Key Innovation**: EMBODIOS includes a Python-to-Native compiler that transforms AI models and system code into bare-metal C/Assembly, enabling AI to run directly on hardware without a traditional OS layer.
 
 ```bash
 > Turn on GPIO pin 17
@@ -58,6 +58,7 @@ embodi bundle create --model my-ai-os:latest --output embodios.iso --target bare
 
 - **Natural Language Control**: Type commands in plain English - "turn on pin 17" instead of `gpio.write(17, HIGH)`
 - **AI-Powered Kernel**: Language models handle system operations, memory management, and hardware control
+- **Python-to-Native Compiler**: Transforms Python AI code to C/Assembly for bare-metal execution
 - **Bare Metal Performance**: Direct hardware access with <2ms response times
 - **Minimal Footprint**: Entire OS in ~16MB RAM (vs 100MB+ for traditional deployments)
 - **Hardware Abstraction**: Unified interface for GPIO, I2C, SPI, UART through natural language
@@ -150,6 +151,31 @@ Here's the thing - traditional operating systems have layers upon layers of abst
 Think about it - a typical Linux distro needs hundreds of MB just for the base system. EMBODIOS? The whole OS *is* the model. That's it. Your 1GB model handles everything from memory management to GPIO control.
 
 For IoT developers tired of stripping down Linux distributions, or anyone who wants their devices to actually understand what they're being asked to do - this might be worth a look.
+
+## Python-to-Native Compiler
+
+EMBODIOS includes a compiler that transforms Python AI code into native C/Assembly for bare-metal execution:
+
+```bash
+# Compile Python EMBODIOS to native code
+cd src/embodi/compiler
+python builder.py model.gguf output_dir/ native
+
+# Generated files:
+# - hal_gpio.c, hal_i2c.c, hal_uart.c - Hardware drivers
+# - nl_processor.c - Natural language processing
+# - kernel.c - Main kernel loop
+# - boot.S - Boot assembly
+# - weights.S - Model weights in assembly
+# - Makefile - Build configuration
+```
+
+The compiler:
+- Works without external dependencies (no NumPy, TVM, or Cython required)
+- Generates bootable kernel images
+- Embeds AI model weights directly in assembly
+- Creates hardware abstraction layer (HAL) in pure C
+- Produces ARM64 and x86-64 compatible code
 
 ## Contributing
 

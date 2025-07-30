@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Python-to-Native Compiler for bare-metal execution
+- Compiler transforms Python AI code to C/Assembly
+- Support for GGUF and SafeTensors model formats
+- Hardware abstraction layer (HAL) generation in C
+- Natural language processor transpilation
+- Model weight embedding in assembly
+- ARM64 and x86-64 boot code generation
+- Makefile and CMake build system generation
+- Works without external dependencies (no NumPy/TVM/Cython required)
+
+### Changed
+- Updated README with compiler information
+- Reorganized project structure documentation
+- Enhanced compiler module documentation
+
+### Fixed
+- Fixed compiler to work without NumPy dependency
+- Fixed assembly generation for ARM64 architecture
+- Fixed C code generation with proper headers
+
+## [0.2.0] - 2025-07-30
+
+### Added
+- Real AI model testing with TinyLlama integration
+- Model management system without storing models in git
+- `embodi pull` CLI command for downloading models from HuggingFace
+- Model manifest with version tracking and SHA256 verification
+- Comprehensive real model inference tests
+- Download scripts for automated model fetching
+- Interactive test mode with real model support
+
+### Changed
+- Replaced simulated performance data with real model benchmarks
+- Updated performance documentation with actual measurements:
+  - AI-OS: 361ms average response time (165 tokens/sec)
+  - Ollama: 1,809ms average response time (133 tokens/sec)
+  - 5x faster response time with 24% higher throughput
+- Improved .gitignore to support model metadata while excluding model files
+
+### Fixed
+- Removed duplicate `pull` command in CLI
+- Fixed model loading and inference pipeline
+- Corrected SHA256 checksums for model verification
+
+### Removed
+- Cleaned up test-embodi-package directory (1.9GB)
+- Removed simulated benchmark data
+
 ## [0.1.0] - 2025-07-29
 
 Initial release
@@ -49,4 +98,5 @@ Initial release
 - Limited to models that fit in available RAM
 - Some hardware features platform-dependent
 
+[0.2.0]: https://github.com/dddimcha/embodiOS/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dddimcha/embodiOS/releases/tag/v0.1.0
