@@ -12,7 +12,11 @@
 # EMBODIOS specific
 *.aios
 *.nova
-/models/
+# Ignore model files but not metadata
+/models/*/
+!/models/.gitkeep
+!/models/README.md
+!/models/manifest.json
 /images/
 /.embodi/
 /runtime/

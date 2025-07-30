@@ -29,7 +29,7 @@ except FileNotFoundError:
 
 setup(
     name="embodi-os",
-    version="0.1.0",
+    version="0.1.1",
     author="EMBODIOS Contributors",
     author_email="dddimcha@gmail.com",
     description="AI-powered operating system with natural language interface",
