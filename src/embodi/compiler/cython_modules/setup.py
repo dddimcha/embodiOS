@@ -6,10 +6,11 @@ from setuptools import setup, Extension
 from Cython.Build import cythonize
 import numpy as np
 import platform
+from typing import List
 
 # Compiler flags based on platform
 extra_compile_args = ['-O3', '-ffast-math']
-extra_link_args = []
+extra_link_args: List[str] = []
 
 if platform.system() == 'Darwin':  # macOS
     extra_compile_args.extend(['-std=c++11', '-mmacosx-version-min=10.9'])

@@ -25,7 +25,7 @@ except ImportError:
         def randn(*args):
             return FakeArray([])
             
-    class np:
+    class np:  # type: ignore
         ndarray = FakeArray
         
         @staticmethod
@@ -75,19 +75,19 @@ class TVMModelCompiler:
         if not HAS_TVM:
             return self._fallback_compile(model_path)
             
-        model_path = Path(model_path)
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model not found: {model_path}")
+        model_path_obj = Path(model_path)
+        if not model_path_obj.exists():
+            raise FileNotFoundError(f"Model not found: {model_path_obj}")
             
         # Load model based on format
-        if model_path.suffix == '.onnx':
-            mod, params = self._load_onnx_model(model_path)
-        elif model_path.suffix == '.gguf':
-            mod, params = self._load_gguf_model(model_path)
-        elif model_path.suffix in ['.pb', '.h5']:
-            mod, params = self._load_tensorflow_model(model_path)
+        if model_path_obj.suffix == '.onnx':
+            mod, params = self._load_onnx_model(model_path_obj)
+        elif model_path_obj.suffix == '.gguf':
+            mod, params = self._load_gguf_model(model_path_obj)
+        elif model_path_obj.suffix in ['.pb', '.h5']:
+            mod, params = self._load_tensorflow_model(model_path_obj)
         else:
-            raise ValueError(f"Unsupported model format: {model_path.suffix}")
+            raise ValueError(f"Unsupported model format: {model_path_obj.suffix}")
             
         # Set compilation target
         target = self._create_target(target_arch)
@@ -97,7 +97,7 @@ class TVMModelCompiler:
         lib = self._compile_relay_module(mod, params, target, opt_level)
         
         # Export to C files
-        return self._export_to_c(lib, model_path.stem)
+        return self._export_to_c(lib, model_path_obj.stem)
     
     def _load_onnx_model(self, model_path: Path) -> Tuple[Any, Dict]:
         """Load ONNX model into TVM"""
@@ -127,10 +127,10 @@ class TVMModelCompiler:
         # This is a simplified example - real implementation would be more complex
         return self._create_relay_from_weights(weights, metadata)
     
-    def _parse_gguf_file(self, model_path: Path) -> Tuple[Dict[str, np.ndarray], Dict]:
+    def _parse_gguf_file(self, model_path: Path) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """Parse GGUF file format"""
-        weights = {}
-        metadata = {}
+        weights: Dict[str, np.ndarray] = {}
+        metadata: Dict[str, Any] = {}
         
         with open(model_path, 'rb') as f:
             # Read GGUF header

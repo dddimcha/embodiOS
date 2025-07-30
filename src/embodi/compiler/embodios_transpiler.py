@@ -694,12 +694,13 @@ def transpile_embodios_component(component: str, code: str) -> Dict[str, str]:
         # Extract tokens from code
         import ast
         tree = ast.parse(code)
-        tokens = {}
+        tokens: Dict[str, int] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Dict):
                 for k, v in zip(node.keys, node.values):
                     if isinstance(k, ast.Constant) and isinstance(v, ast.Constant):
-                        tokens[k.value] = v.value
+                        if isinstance(k.value, str) and isinstance(v.value, int):
+                            tokens[k.value] = v.value
         return {"tokens.h": transpiler.transpile_hardware_tokens(tokens)}
         
     elif component == "hal":
