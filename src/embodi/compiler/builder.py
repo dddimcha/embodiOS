@@ -12,11 +12,11 @@ import json
 import logging
 
 try:
-    from .tvm_compiler import TVMModelCompiler
-    from .embodios_transpiler import EMBODIOSTranspiler, transpile_embodios_component
+    from .tvm_compiler import TVMModelCompiler  # type: ignore
+    from .embodios_transpiler import EMBODIOSTranspiler, transpile_embodios_component  # type: ignore
 except ImportError:
-    from tvm_compiler import TVMModelCompiler
-    from embodios_transpiler import EMBODIOSTranspiler, transpile_embodios_component
+    from tvm_compiler import TVMModelCompiler  # type: ignore
+    from embodios_transpiler import EMBODIOSTranspiler, transpile_embodios_component  # type: ignore
 
 class HybridCompiler:
     """Orchestrate the hybrid compilation process"""
@@ -34,7 +34,7 @@ class HybridCompiler:
             logging.basicConfig(level=logging.INFO)
             
         # Track generated files
-        self.generated_files = {
+        self.generated_files: Dict[str, List[str]] = {
             'c_files': [],
             'h_files': [],
             'asm_files': [],
@@ -203,7 +203,7 @@ class HybridCompiler:
         """Extract hardware token definitions from Python code"""
         import ast
         
-        tokens = {}
+        tokens: Dict[str, int] = {}
         try:
             tree = ast.parse(code)
             for node in ast.walk(tree):
@@ -216,7 +216,8 @@ class HybridCompiler:
                             elif isinstance(node.value, ast.Dict):
                                 for k, v in zip(node.value.keys, node.value.values):
                                     if isinstance(k, ast.Constant) and isinstance(v, ast.Constant):
-                                        tokens[k.value] = v.value
+                                        if isinstance(k.value, str) and isinstance(v.value, int):
+                                            tokens[k.value] = v.value
         except:
             # Fallback to default tokens
             tokens = {
@@ -263,7 +264,7 @@ class HybridCompiler:
                 return []
                 
             # Find generated .so/.pyd files
-            cython_files = []
+            cython_files: List[Path] = []
             for ext in ['*.so', '*.pyd']:
                 cython_files.extend(cython_dir.glob(ext))
                 

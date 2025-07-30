@@ -24,7 +24,7 @@ except ImportError:
             self.dtype = float
             self.flat = data
             
-    class np:
+    class np:  # type: ignore
         ndarray = ndarray
         
         @staticmethod
@@ -54,9 +54,9 @@ except ImportError:
         uint16 = int
 
 try:
-    from .tvm_compiler import TVMModelCompiler, HAS_TVM
+    from .tvm_compiler import TVMModelCompiler, HAS_TVM  # type: ignore
 except ImportError:
-    from tvm_compiler import TVMModelCompiler, HAS_TVM
+    from tvm_compiler import TVMModelCompiler, HAS_TVM  # type: ignore
 
 class ModelToNativeCompiler:
     """
@@ -81,24 +81,24 @@ class ModelToNativeCompiler:
         Returns:
             Dictionary with generated files
         """
-        model_path = Path(model_path)
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model not found: {model_path}")
+        model_path_obj = Path(model_path)
+        if not model_path_obj.exists():
+            raise FileNotFoundError(f"Model not found: {model_path_obj}")
         
         # Try TVM first if available
         if HAS_TVM:
             try:
-                return self.tvm_compiler.compile_model(str(model_path), architecture)
+                return self.tvm_compiler.compile_model(str(model_path_obj), architecture)
             except Exception as e:
                 self.logger.warning(f"TVM compilation failed, using custom: {e}")
         
         # Custom compilation fallback
-        if model_path.suffix == '.gguf':
-            weights, metadata = self.parse_gguf(model_path)
-        elif model_path.suffix in ['.safetensors', '.st']:
-            weights, metadata = self.parse_safetensors(model_path)
+        if model_path_obj.suffix == '.gguf':
+            weights, metadata = self.parse_gguf(model_path_obj)
+        elif model_path_obj.suffix in ['.safetensors', '.st']:
+            weights, metadata = self.parse_safetensors(model_path_obj)
         else:
-            raise ValueError(f"Unsupported model format: {model_path.suffix}")
+            raise ValueError(f"Unsupported model format: {model_path_obj.suffix}")
             
         # Generate assembly with embedded weights
         asm_file = self.generate_weight_assembly(weights, metadata)
@@ -107,9 +107,9 @@ class ModelToNativeCompiler:
         c_files = self.generate_inference_code(weights, metadata, architecture)
         
         return {
-            'asm_files': [str(asm_file)],
-            'c_files': c_files,
-            'metadata': metadata
+            'asm_files': str(asm_file),
+            'c_files': str(c_files[0]) if c_files else "",
+            'metadata': str(metadata)
         }
         
     def parse_gguf(self, model_path: Path) -> Tuple[Dict[str, Any], Dict]:
@@ -179,8 +179,8 @@ class ModelToNativeCompiler:
         except ImportError:
             raise ImportError("safetensors package required for .safetensors files")
             
-        weights = {}
-        metadata = {}
+        weights: Dict[str, Any] = {}
+        metadata: Dict[str, Any] = {}
         
         with safe_open(model_path, framework="np") as f:
             metadata = f.metadata() or {}
@@ -456,7 +456,22 @@ int generic_inference(const float* input, float* output, size_t input_size) {
         }
         
         dtype = type_map.get(tensor_type, np.float32)
-        size = np.prod(dims) * dtype().itemsize
+        # Calculate size based on dtype
+        if dtype == np.float32 or dtype == float:
+            itemsize = 4
+        elif dtype == np.float16:
+            itemsize = 2
+        elif dtype == np.int8 or dtype == np.uint8:
+            itemsize = 1
+        elif dtype == np.int16 or dtype == np.uint16:
+            itemsize = 2
+        elif dtype == np.int32 or dtype == np.uint32:
+            itemsize = 4
+        elif dtype == np.int64 or dtype == np.uint64:
+            itemsize = 8
+        else:
+            itemsize = 4  # default to float32
+        size = int(np.prod(dims) * itemsize)
         
         # Read data
         mmap_file.seek(offset)
