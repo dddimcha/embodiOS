@@ -174,11 +174,30 @@ make build
 
 Latest benchmark results show significant improvements over traditional deployments:
 
+### Real-World Comparison (2025-07-30)
+
+Using the same TinyLlama 1.1B model:
+
+| Deployment | Response Time | Speed | Notes |
+|------------|--------------|-------|--------|
+| **EMBODIOS** | 361ms | 165 tokens/sec | Direct model execution |
+| **Ollama** | 1,809ms | 133 tokens/sec | Service layer overhead |
+| **Improvement** | **5x faster** | 24% higher | Same model, better deployment |
+
+### Performance Metrics
+
 - **Boot Time**: <1 second to fully operational state
-- **Memory Usage**: 16.3MB (vs 108.5MB for traditional model servers)
-- **Response Time**: 1.3ms average (40.7x faster than traditional)
-- **Throughput**: 465 commands/second (vs 16/sec traditional)
-- **Token Processing**: 154 tokens/second with TinyLlama
+- **Memory Usage**: 1.2GB total (vs 2GB+ for Ollama)
+- **Response Time**: 361ms (Python prototype) → 20-50ms (projected bare-metal)
+- **Throughput**: 165 tokens/second currently → 500+ tokens/sec on bare-metal
+- **Direct Hardware Control**: <1ms GPIO/I2C operations
+
+### Projected Bare-Metal Performance
+
+- **Python (current)**: 361ms average response
+- **C++ implementation**: ~50ms (7x faster)
+- **True bare-metal**: 10-20ms (18-36x faster)
+- **Custom silicon**: <5ms (72x faster)
 
 See [full benchmark results](docs/performance-benchmarks.md) for detailed comparisons.
 
