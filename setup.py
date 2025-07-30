@@ -36,6 +36,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/dddimcha/embodiOS",
+    license="MIT",
     project_urls={
         "Bug Tracker": "https://github.com/dddimcha/embodiOS/issues",
         "Documentation": "https://github.com/dddimcha/embodiOS/tree/main/docs",
