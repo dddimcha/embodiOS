@@ -31,6 +31,65 @@ def cli(ctx, debug):
     ctx.obj['console'] = console
 
 @cli.command()
+@click.argument('model', required=True)
+@click.option('--output', '-o', help='Output directory (default: models/)')
+@click.option('--format', default='gguf', help='Model format (gguf, aios)')
+@click.option('--quantize', '-q', type=int, help='Quantization bits (4, 8)')
+@click.pass_context
+def pull(ctx, model, output, format, quantize):
+    """Pull a model from HuggingFace or other sources
+    
+    Examples:
+        embodi pull TinyLlama/TinyLlama-1.1B-Chat-v1.0
+        embodi pull microsoft/phi-2 --quantize 4
+        embodi pull https://huggingface.co/.../model.gguf
+    """
+    from embodi.models.huggingface import HuggingFaceDownloader
+    
+    output_dir = Path(output) if output else Path('models')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    console.print(f"[bold blue]Pulling model: {model}[/bold blue]")
+    
+    # Direct URL download
+    if model.startswith('http://') or model.startswith('https://'):
+        import urllib.request
+        filename = model.split('/')[-1]
+        output_path = output_dir / filename
+        
+        with Progress(console=console) as progress:
+            task = progress.add_task(f"Downloading {filename}...", total=None)
+            urllib.request.urlretrieve(model, output_path)
+            progress.update(task, completed=True)
+        
+        console.print(f"[green]✓ Downloaded to {output_path}[/green]")
+        return
+    
+    # HuggingFace model
+    downloader = HuggingFaceDownloader()
+    model_name = model.split('/')[-1].lower()
+    output_path = output_dir / f"{model_name}.{format}"
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Downloading from HuggingFace...", total=None)
+        
+        success = downloader.download_and_convert(
+            model, 
+            output_path,
+            quantization=quantize
+        )
+        
+        if success:
+            console.print(f"[green]✓ Model saved to {output_path}[/green]")
+        else:
+            console.print(f"[red]✗ Failed to download model[/red]")
+            sys.exit(1)
+
+@cli.command()
 @click.option('-f', '--file', required=True, help='Modelfile path')
 @click.option('-t', '--tag', help='Image tag (name:version)')
 @click.option('--no-cache', is_flag=True, help='Build without cache')
@@ -144,38 +203,6 @@ def images(ctx, all):
         )
     
     console.print(table)
-
-@cli.command()
-@click.argument('model')
-@click.option('--source', default='huggingface', help='Model source')
-@click.option('--quantize', type=click.Choice(['4', '8']), help='Quantization bits')
-@click.option('--force', is_flag=True, help='Force re-download')
-@click.pass_context
-def pull(ctx, model, source, quantize, force):
-    """Pull AI model"""
-    console.print(f"[bold blue]Pulling {model} from {source}[/bold blue]")
-    
-    # Import model puller
-    from embodi.models.huggingface import pull_model
-    
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Downloading...", total=None)
-        
-        # Pull model
-        quantization = int(quantize) if quantize else None
-        model_path = pull_model(f"{source}:{model}", quantization, force)
-        
-        progress.update(task, description="Converting to EMBODIOS format...")
-        
-    if model_path:
-        console.print(f"[bold green]✓ Model pulled successfully: {model_path.name}[/bold green]")
-    else:
-        console.print("[bold red]✗ Failed to pull model[/bold red]")
-        sys.exit(1)
 
 @cli.command()
 @click.pass_context
