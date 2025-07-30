@@ -2,7 +2,7 @@
 EMBODIOS - Natural Operating System with Voice AI
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "EMBODIOS Contributors"
 __license__ = "MIT"
 
