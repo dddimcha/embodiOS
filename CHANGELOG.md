@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Python-to-Native Compiler for bare-metal execution
+- Compiler transforms Python AI code to C/Assembly
+- Support for GGUF and SafeTensors model formats
+- Hardware abstraction layer (HAL) generation in C
+- Natural language processor transpilation
+- Model weight embedding in assembly
+- ARM64 and x86-64 boot code generation
+- Makefile and CMake build system generation
+- Works without external dependencies (no NumPy/TVM/Cython required)
+
+### Changed
+- Updated README with compiler information
+- Reorganized project structure documentation
+- Enhanced compiler module documentation
+
+### Fixed
+- Fixed compiler to work without NumPy dependency
+- Fixed assembly generation for ARM64 architecture
+- Fixed C code generation with proper headers
+
 ## [0.2.0] - 2025-07-30
 
 ### Added
