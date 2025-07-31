@@ -86,3 +86,18 @@ char uart_getchar(void)
     /* Read character */
     return (char)(mmio_read32(UART_DR) & 0xFF);
 }
+
+/* Simple string output for early boot */
+void uart_puts(const char* str)
+{
+    while (*str) {
+        uart_putchar(*str++);
+    }
+}
+
+/* Early boot test */
+void uart_early_test(void)
+{
+    uart_init();
+    uart_puts("EMBODIOS ARM64 booting...\n");
+}

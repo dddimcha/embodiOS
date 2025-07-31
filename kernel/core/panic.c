@@ -35,11 +35,11 @@ static void panic_log(const char* fmt, ...)
                 {
                     uintptr_t val = __builtin_va_arg(args, uintptr_t);
                     char hex[17];
-                    int i = 0;
                     
                     if (val == 0) {
                         panic_buffer[panic_buffer_pos++] = '0';
                     } else {
+                        int i = 0;
                         while (val && i < 16) {
                             int digit = val & 0xF;
                             hex[i++] = digit < 10 ? '0' + digit : 'A' + digit - 10;
@@ -55,7 +55,6 @@ static void panic_log(const char* fmt, ...)
                 {
                     int val = __builtin_va_arg(args, int);
                     char num[12];
-                    int i = 0;
                     
                     if (val < 0) {
                         panic_buffer[panic_buffer_pos++] = '-';
@@ -65,6 +64,7 @@ static void panic_log(const char* fmt, ...)
                     if (val == 0) {
                         panic_buffer[panic_buffer_pos++] = '0';
                     } else {
+                        int i = 0;
                         while (val && i < 11) {
                             num[i++] = '0' + (val % 10);
                             val /= 10;

@@ -26,6 +26,7 @@ SECTIONS
         /* Model weights section */
         _model_weights_start = .;
         *(.model_weights)
+        *(__DATA.__model_weights)
         _model_weights_end = .;
     }
     
