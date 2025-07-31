@@ -93,12 +93,15 @@ static void panic_log(const char* fmt, ...)
 /* Stack trace helper */
 static void dump_stack_trace(void)
 {
-    void** frame;
+    void** frame = NULL;
     
 #ifdef __x86_64__
     __asm__ volatile("mov %%rbp, %0" : "=r"(frame));
 #elif defined(__aarch64__)
     __asm__ volatile("mov %0, x29" : "=r"(frame));
+#else
+    /* Architecture not supported for stack traces */
+    return;
 #endif
     
     console_printf("\nStack trace:\n");
@@ -110,10 +113,17 @@ static void dump_stack_trace(void)
         /* Move to next frame */
         frame = (void**)*frame;
         
-        /* Basic sanity check */
-        if ((uintptr_t)frame < 0x1000 || (uintptr_t)frame > 0xFFFFFFFFFFFF0000UL) {
+        /* Basic sanity check - check if pointer is in reasonable range */
+        if ((uintptr_t)frame < 0x1000) {
             break;
         }
+        
+        /* On 64-bit systems, check upper bound */
+#ifdef __x86_64__
+        if ((uintptr_t)frame > 0xFFFFFFFFFFFF0000UL) {
+            break;
+        }
+#endif
     }
 }
 

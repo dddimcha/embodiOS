@@ -42,10 +42,8 @@ void kernel_main(void)
     console_printf("Kernel: %p - %p\n", _kernel_start, _kernel_end);
     
     /* Clear BSS (should be done in boot code, but ensure it's clean) */
-    size_t bss_size = _bss_end - _bss_start;
-    for (size_t i = 0; i < bss_size; i++) {
-        _bss_start[i] = 0;
-    }
+    size_t bss_size = (uintptr_t)_bss_end - (uintptr_t)_bss_start;
+    memset(_bss_start, 0, bss_size);
     
     /* CPU initialization */
     console_printf("Initializing CPU features...\n");
@@ -64,7 +62,7 @@ void kernel_main(void)
     arch_interrupt_init();
     
     /* Load AI model if embedded */
-    size_t model_size = _model_weights_end - _model_weights_start;
+    size_t model_size = (uintptr_t)_model_weights_end - (uintptr_t)_model_weights_start;
     if (model_size > 0) {
         console_printf("Loading AI model (%zu bytes)...\n", model_size);
         ai_model = model_load(_model_weights_start, model_size);

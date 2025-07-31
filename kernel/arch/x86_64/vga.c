@@ -1,6 +1,7 @@
 /* x86_64 VGA Text Mode Driver */
 #include <arch/vga.h>
 #include <embodios/mm.h>
+#include "vga_io.h"
 
 /* VGA state */
 static struct {
@@ -21,21 +22,10 @@ static void update_cursor(void)
     uint16_t pos = vga_state.cursor_y * VGA_WIDTH + vga_state.cursor_x;
     
     /* Send cursor position to VGA controller */
-    __asm__ volatile(
-        "movb $0x0F, %%al\n"
-        "movw $0x3D4, %%dx\n"
-        "outb %%al, %%dx\n"
-        "movb %b0, %%al\n"
-        "movw $0x3D5, %%dx\n"
-        "outb %%al, %%dx\n"
-        "movb $0x0E, %%al\n"
-        "movw $0x3D4, %%dx\n"
-        "outb %%al, %%dx\n"
-        "movb %h0, %%al\n"
-        "movw $0x3D5, %%dx\n"
-        "outb %%al, %%dx"
-        : : "r"(pos) : "al", "dx"
-    );
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t)(pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
 }
 
 /* Scroll screen up one line */
@@ -65,21 +55,10 @@ void vga_init(void)
     vga_clear();
     
     /* Enable cursor */
-    __asm__ volatile(
-        "movb $0x0A, %%al\n"
-        "movw $0x3D4, %%dx\n"
-        "outb %%al, %%dx\n"
-        "movb $0x00, %%al\n"
-        "movw $0x3D5, %%dx\n"
-        "outb %%al, %%dx\n"
-        "movb $0x0B, %%al\n"
-        "movw $0x3D4, %%dx\n"
-        "outb %%al, %%dx\n"
-        "movb $0x0F, %%al\n"
-        "movw $0x3D5, %%dx\n"
-        "outb %%al, %%dx"
-        : : : "al", "dx"
-    );
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x00);
+    outb(0x3D4, 0x0B);
+    outb(0x3D5, 0x0F);
 }
 
 /* Put character to screen */
