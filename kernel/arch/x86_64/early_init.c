@@ -148,6 +148,7 @@ void arch_early_init(void)
     /* Initialize TSS */
     init_tss();
     
+#ifdef __x86_64__
     /* Enable write protection in kernel mode */
     uint64_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -159,6 +160,7 @@ void arch_early_init(void)
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
     cr4 |= (1 << 20);  /* SMEP bit */
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+#endif
 }
 
 /* Initialize interrupt system */
@@ -172,17 +174,23 @@ void arch_interrupt_init(void)
 /* Enable interrupts */
 void arch_enable_interrupts(void)
 {
+#ifdef __x86_64__
     __asm__ volatile("sti");
+#endif
 }
 
 /* Disable interrupts */
 void arch_disable_interrupts(void)
 {
+#ifdef __x86_64__
     __asm__ volatile("cli");
+#endif
 }
 
 /* Halt CPU */
 void arch_halt(void)
 {
+#ifdef __x86_64__
     __asm__ volatile("hlt");
+#endif
 }
