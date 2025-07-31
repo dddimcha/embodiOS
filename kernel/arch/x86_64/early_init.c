@@ -88,9 +88,12 @@ static void init_gdt(void)
     gdt_desc.limit = sizeof(gdt) - 1;
     gdt_desc.base = (uint64_t)&gdt;
     
+#ifdef __x86_64__
     __asm__ volatile("lgdt %0" : : "m"(gdt_desc));
+#endif
     
     /* Reload segments */
+#ifdef __x86_64__
     __asm__ volatile(
         "mov $0x10, %%ax\n"
         "mov %%ax, %%ds\n"
@@ -104,6 +107,7 @@ static void init_gdt(void)
         "1:\n"
         : : : "ax"
     );
+#endif
 }
 
 /* Initialize TSS */
@@ -124,13 +128,15 @@ static void init_tss(void)
     tss_entry->base_low = tss_base & 0xFFFF;
     tss_entry->base_middle = (tss_base >> 16) & 0xFF;
     tss_entry->access = 0x89;  /* Present, TSS */
-    tss_entry->granularity = ((tss_limit >> 16) & 0x0F) | 0x00;
+    tss_entry->granularity = (tss_limit >> 16) & 0x0F;
     tss_entry->base_high = (tss_base >> 24) & 0xFF;
     tss_entry->base_upper = (tss_base >> 32) & 0xFFFFFFFF;
     tss_entry->reserved = 0;
     
     /* Load TSS */
+#ifdef __x86_64__
     __asm__ volatile("ltr %%ax" : : "a"(0x28));
+#endif
 }
 
 /* Early architecture initialization */

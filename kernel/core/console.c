@@ -128,12 +128,11 @@ void console_printf(const char* fmt, ...)
 size_t console_readline(char* buffer, size_t max_len)
 {
     size_t pos = 0;
-    int c;
     
     if (!buffer || max_len == 0) return 0;
     
     while (pos < max_len - 1) {
-        c = console_getchar();
+        int c = console_getchar();
         
         if (c == -1) {
             /* No input available, wait or return */

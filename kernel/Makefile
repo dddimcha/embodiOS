@@ -114,7 +114,11 @@ ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS)
 all: embodios.elf embodios.bin
 
 embodios.elf: $(ALL_OBJS)
+ifeq ($(BUILD_OS),Darwin)
+	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS) -e _start -static
+else
 	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
+endif
 
 embodios.bin: embodios.elf
 	$(OBJCOPY) -O binary $< $@
