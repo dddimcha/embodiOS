@@ -11,6 +11,9 @@ _start:
     ldr x0, =stack_top
     mov sp, x0
     
+    /* Early UART test */
+    bl _uart_early_test
+    
     /* Clear BSS section */
     ldr x0, =_bss_start
     ldr x1, =_bss_end
@@ -22,7 +25,7 @@ _start:
 2:
     
     /* Call kernel main */
-    bl kernel_main
+    bl _kernel_main
     
     /* Hang if kernel returns */
 3:
@@ -34,3 +37,11 @@ _start:
 stack_bottom:
     .space 0x4000    /* 16KB stack */
 stack_top:
+
+/* Provide BSS symbols for macOS build */
+.global _bss_start
+.global _bss_end
+_bss_start:
+    .quad 0
+_bss_end:
+    .quad 0

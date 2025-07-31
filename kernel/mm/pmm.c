@@ -303,12 +303,8 @@ size_t pmm_available_pages(void)
 /* Print PMM statistics */
 void pmm_print_stats(void)
 {
-    console_printf("Physical Memory Manager:
-");
-    console_printf("  Total memory: %zu MB
-", pmm_state.total_pages * PAGE_SIZE / (1024 * 1024));
-    console_printf("  Free memory:  %zu MB
-", pmm_state.free_pages * PAGE_SIZE / (1024 * 1024));
-    console_printf("  Used memory:  %zu MB
-", (pmm_state.total_pages - pmm_state.free_pages) * PAGE_SIZE / (1024 * 1024));
+    console_printf("Physical Memory Manager:\n");
+    console_printf("  Total memory: %zu MB\n", pmm_state.total_pages * PAGE_SIZE / (1024 * 1024));
+    console_printf("  Free memory:  %zu MB\n", pmm_state.free_pages * PAGE_SIZE / (1024 * 1024));
+    console_printf("  Used memory:  %zu MB\n", (pmm_state.total_pages - pmm_state.free_pages) * PAGE_SIZE / (1024 * 1024));
 }

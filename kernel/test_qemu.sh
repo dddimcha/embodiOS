@@ -22,14 +22,19 @@ echo "Creating test binary..."
 ld -arch arm64 -o embodios_test.elf \
     arch/aarch64/boot.o \
     arch/aarch64/cpu.o \
+    arch/aarch64/uart.o \
     arch/aarch64/early_init.o \
     core/kernel.o \
     core/console.o \
     core/panic.o \
     core/stubs.o \
+    core/interrupt.o \
+    core/task.o \
     mm/pmm.o \
     mm/vmm.o \
     mm/slab.o \
+    mm/heap.o \
+    ai/model_runtime.o \
     lib/string.o \
     lib/stdlib.o \
     -e _start \

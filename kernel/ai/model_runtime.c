@@ -4,6 +4,7 @@
 #include "embodios/kernel.h"
 #include "embodios/console.h"
 #include "embodios/model.h"
+#include "embodios/mm.h"
 
 /* Model runtime state */
 typedef struct {
@@ -28,7 +29,7 @@ void model_runtime_init(void)
 }
 
 /* Load model from memory */
-void* model_load(const void* data, size_t size)
+struct embodios_model* model_load(const void* data, size_t size)
 {
     if (!runtime.initialized) {
         console_printf("AI Runtime: Not initialized\n");
@@ -78,17 +79,17 @@ void* model_load(const void* data, size_t size)
     return model;
 }
 
-/* Simple tensor structure for inference */
-typedef struct {
+/* Simple tensor structure for inference - internal use only */
+typedef struct ai_tensor {
     float *data;
     size_t size;
     int dims[4];  /* [batch, seq_len, hidden_dim, vocab_size] */
-} tensor_t;
+} ai_tensor_t;
 
 /* Allocate tensor */
-tensor_t* tensor_create(int batch, int seq_len, int hidden_dim)
+static ai_tensor_t* ai_tensor_create(int batch, int seq_len, int hidden_dim)
 {
-    tensor_t *tensor = kmalloc(sizeof(tensor_t));
+    ai_tensor_t *tensor = kmalloc(sizeof(ai_tensor_t));
     if (!tensor) return NULL;
     
     tensor->dims[0] = batch;
@@ -108,7 +109,7 @@ tensor_t* tensor_create(int batch, int seq_len, int hidden_dim)
 }
 
 /* Free tensor */
-void tensor_free(tensor_t *tensor)
+static void ai_tensor_free(ai_tensor_t *tensor)
 {
     if (tensor) {
         if (tensor->data) kfree(tensor->data);
@@ -128,7 +129,7 @@ int model_inference(const int *input_tokens, int num_tokens,
     console_printf("AI Runtime: Running inference with %d tokens\n", num_tokens);
     
     /* Create input tensor */
-    tensor_t *input = tensor_create(1, num_tokens, 512);  /* Assuming 512 hidden dim */
+    ai_tensor_t *input = ai_tensor_create(1, num_tokens, 512);  /* Assuming 512 hidden dim */
     if (!input) {
         console_printf("AI Runtime: Failed to allocate input tensor\n");
         return -1;
@@ -141,7 +142,7 @@ int model_inference(const int *input_tokens, int num_tokens,
         output_tokens[i] = input_tokens[i];
     }
     
-    tensor_free(input);
+    ai_tensor_free(input);
     
     console_printf("AI Runtime: Inference complete, generated %d tokens\n", output_len);
     return output_len;
@@ -154,8 +155,14 @@ struct embodios_model* get_current_model(void)
 }
 
 /* Unload model */
-void model_unload(void)
+void model_unload(struct embodios_model* model)
 {
+    /* For now, we only support one loaded model */
+    if (model != runtime.model) {
+        console_printf("AI Runtime: Model not loaded\n");
+        return;
+    }
+    
     if (runtime.workspace) {
         kfree(runtime.workspace);
         runtime.workspace = NULL;
