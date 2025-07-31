@@ -87,7 +87,12 @@ ifeq ($(ARCH),x86_64)
 endif
 
 ifeq ($(ARCH),aarch64)
-    ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S
+    UNAME_S := $(shell uname -s)
+    ifeq ($(UNAME_S),Darwin)
+        ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S
+    else
+        ARCH_AS_SOURCES = $(ARCH_DIR)/boot_linux.S
+    endif
     ARCH_C_SOURCES = \
         $(ARCH_DIR)/cpu.c \
         $(ARCH_DIR)/uart.c \

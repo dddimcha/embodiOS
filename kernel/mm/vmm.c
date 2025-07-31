@@ -133,7 +133,7 @@ void vmm_init(void)
     /* Get current PML4 from CR3 */
     uintptr_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    vmm_state.kernel_pml4 = (struct page_table*)(cr3 + KERNEL_BASE);
+    vmm_state.kernel_pml4 = (struct page_table*)cr3;
 #else
     /* ARM64: Initialize page tables */
     /* TODO: Implement ARM64 page table initialization */
@@ -141,8 +141,8 @@ void vmm_init(void)
 #endif
     
     /* Set up kernel heap */
-    vmm_state.vmm_heap_start = (void*)(KERNEL_BASE + 0x10000000);  /* +256MB */
-    vmm_state.vmm_heap_end = (void*)(KERNEL_BASE + 0x20000000);    /* +512MB */
+    vmm_state.vmm_heap_start = (void*)0x10000000;  /* 256MB */
+    vmm_state.vmm_heap_end = (void*)0x20000000;    /* 512MB */
     vmm_state.vmm_heap_used = 0;
     
     vmm_state.initialized = true;

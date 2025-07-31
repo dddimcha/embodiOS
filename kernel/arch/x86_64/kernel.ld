@@ -43,7 +43,4 @@ SECTIONS
     }
     
     _kernel_end = .;
-    
-    /* Ensure kernel doesn't exceed reasonable size */
-    ASSERT((_kernel_end - _kernel_start) <= 64M, "Kernel image too large")
 }

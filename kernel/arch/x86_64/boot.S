@@ -83,7 +83,7 @@ start64:
 higher_half_start:
     /* Reload stack pointer to higher half */
     mov $kernel_stack_top, %rsp
-    add $0xFFFFFFFF80000000, %rsp
+    /* Stack is already set up at physical address */
     
     /* Call kernel main */
     call kernel_main
