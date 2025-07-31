@@ -2,8 +2,15 @@
 
 #include "embodios/model.h"
 
+/* Platform-specific section attributes */
+#ifdef __APPLE__
+    #define MODEL_SECTION "__DATA,__model_weights"
+#else
+    #define MODEL_SECTION ".model_weights"
+#endif
+
 /* Simple example model data */
-const struct embodios_model example_model __attribute__((section("__DATA,__model_weights"))) = {
+const struct embodios_model example_model __attribute__((section(MODEL_SECTION))) = {
     .magic = 0x454D424F,  /* 'EMBO' */
     .version_major = 1,
     .version_minor = 0,
@@ -17,7 +24,7 @@ const struct embodios_model example_model __attribute__((section("__DATA,__model
 };
 
 /* Example weight data (just for testing) */
-const float example_weights[] __attribute__((section("__DATA,__model_weights"))) = {
+const float example_weights[] __attribute__((section(MODEL_SECTION))) = {
     0.1f, 0.2f, 0.3f, 0.4f,  /* Example weight values */
     /* ... more weights would go here ... */
 };

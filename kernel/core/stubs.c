@@ -8,6 +8,7 @@
 #include "embodios/ai.h"
 #include "embodios/interrupt.h"
 #include "embodios/task.h"
+#include "embodios/tvm.h"
 
 /* String function declarations */
 int strcmp(const char* s1, const char* s2);
@@ -40,6 +41,7 @@ void process_command(const char* command)
         console_printf("  tasks     - List running tasks\n");
         console_printf("  model     - Show loaded model info\n");
         console_printf("  infer <text> - Run AI inference\n");
+        console_printf("  tvm       - Show TVM runtime status\n");
         console_printf("  reboot    - Reboot the system\n");
     } else if (strcmp(command, "mem") == 0) {
         /* Show PMM stats */
@@ -90,6 +92,8 @@ void process_command(const char* command)
             }
             console_printf("\n");
         }
+    } else if (strcmp(command, "tvm") == 0) {
+        tvm_runtime_stats();
     } else if (strcmp(command, "reboot") == 0) {
         console_printf("Rebooting...\n");
         arch_reboot();

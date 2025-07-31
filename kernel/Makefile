@@ -79,6 +79,7 @@ KERNEL_C_SOURCES = \
     mm/slab.c \
     mm/heap.c \
     ai/model_runtime.c \
+    ai/tvm_runtime.c \
     lib/string.c \
     lib/stdlib.c
 
@@ -108,7 +109,18 @@ KERNEL_OBJS = $(KERNEL_C_SOURCES:.c=.o)
 ARCH_AS_OBJS = $(ARCH_AS_SOURCES:.S=.o)
 ARCH_C_OBJS = $(ARCH_C_SOURCES:.c=.o)
 
-ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS)
+# Model embedding support
+ifeq ($(MODEL),embedded)
+    ifdef MODEL_ASM
+        MODEL_OBJS = $(MODEL_ASM:.S=.o)
+    else
+        MODEL_OBJS = ai/example_model.o
+    endif
+else
+    MODEL_OBJS = ai/example_model.o
+endif
+
+ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS) $(MODEL_OBJS)
 
 # Targets
 all: embodios.elf embodios.bin
