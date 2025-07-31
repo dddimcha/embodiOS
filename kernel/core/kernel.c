@@ -108,19 +108,3 @@ void kernel_loop(void)
         schedule();
     }
 }
-
-void kernel_panic(const char* msg, ...)
-{
-    /* Disable interrupts */
-    arch_disable_interrupts();
-    
-    /* Print panic message */
-    console_printf("\n*** KERNEL PANIC ***\n");
-    console_printf("Message: %s\n", msg);
-    console_printf("Kernel version: %s\n", kernel_version);
-    
-    /* Halt the system */
-    while (1) {
-        arch_halt();
-    }
-}
