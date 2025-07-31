@@ -99,9 +99,30 @@ size_t strlen(const char* s)
 
 char* strcpy(char* dest, const char* src)
 {
+    /* Note: This is provided for compatibility but strlcpy is preferred */
     char* d = dest;
     while ((*d++ = *src++));
     return dest;
+}
+
+/* Safer string copy with size limit */
+size_t strlcpy(char* dest, const char* src, size_t size)
+{
+    size_t len = 0;
+    
+    if (size == 0) return strlen(src);
+    
+    while (*src && size > 1) {
+        *dest++ = *src++;
+        size--;
+        len++;
+    }
+    *dest = '\0';
+    
+    /* Count remaining source chars */
+    while (*src++) len++;
+    
+    return len;
 }
 
 char* strncpy(char* dest, const char* src, size_t n)
@@ -133,10 +154,28 @@ int strncmp(const char* s1, const char* s2, size_t n)
 
 char* strcat(char* dest, const char* src)
 {
+    /* Note: This is provided for compatibility but strlcat is preferred */
     char* d = dest;
     while (*d) d++;
     while ((*d++ = *src++));
     return dest;
+}
+
+/* Safer string concatenation with size limit */
+size_t strlcat(char* dest, const char* src, size_t size)
+{
+    size_t dest_len = strlen(dest);
+    size_t src_len = strlen(src);
+    
+    if (dest_len >= size) return size + src_len;
+    
+    size_t copy_len = size - dest_len - 1;
+    if (copy_len > src_len) copy_len = src_len;
+    
+    memcpy(dest + dest_len, src, copy_len);
+    dest[dest_len + copy_len] = '\0';
+    
+    return dest_len + src_len;
 }
 
 char* strchr(const char* s, int c)
