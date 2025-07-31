@@ -10,10 +10,12 @@ AS ?= as
 LD ?= ld
 OBJCOPY ?= objcopy
 
+# Detect build OS early
+BUILD_OS := $(shell uname -s)
+
 # Cross-compilation prefix for ARM64
 ifeq ($(ARCH),aarch64)
-    UNAME_S := $(shell uname -s)
-    ifeq ($(UNAME_S),Darwin)
+    ifeq ($(BUILD_OS),Darwin)
         # macOS ARM64 - use native tools
         CC := clang
         AS := as
@@ -22,10 +24,10 @@ ifeq ($(ARCH),aarch64)
     else
         # Linux - use cross-compiler
         CROSS_PREFIX ?= aarch64-linux-gnu-
-        CC := $(CROSS_PREFIX)gcc
-        AS := $(CROSS_PREFIX)as
-        LD := $(CROSS_PREFIX)ld
-        OBJCOPY := $(CROSS_PREFIX)objcopy
+        CC ?= $(CROSS_PREFIX)gcc
+        AS ?= $(CROSS_PREFIX)as
+        LD ?= $(CROSS_PREFIX)ld
+        OBJCOPY ?= $(CROSS_PREFIX)objcopy
     endif
 endif
 
@@ -51,8 +53,7 @@ endif
 
 ifeq ($(ARCH),aarch64)
     # ARM64-specific flags
-    UNAME_S := $(shell uname -s)
-    ifeq ($(UNAME_S),Darwin)
+    ifeq ($(BUILD_OS),Darwin)
         # macOS ARM64 flags
         CFLAGS += -target arm64-apple-macos11 -arch arm64
         ASFLAGS = -arch arm64
@@ -87,8 +88,7 @@ ifeq ($(ARCH),x86_64)
 endif
 
 ifeq ($(ARCH),aarch64)
-    UNAME_S := $(shell uname -s)
-    ifeq ($(UNAME_S),Darwin)
+    ifeq ($(BUILD_OS),Darwin)
         ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S
     else
         ARCH_AS_SOURCES = $(ARCH_DIR)/boot_linux.S
