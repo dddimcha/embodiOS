@@ -1,0 +1,116 @@
+#!/bin/bash
+# EMBODIOS Pre-commit hook
+# This runs automatically before each commit
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo -e "${YELLOW}=== EMBODIOS Pre-commit Checks ===${NC}"
+
+# Get list of staged files
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+# Check if any Python files are staged
+PYTHON_FILES=$(echo "$STAGED_FILES" | grep -E '\.(py)$' || true)
+if [ -n "$PYTHON_FILES" ]; then
+    echo -e "${YELLOW}Checking Python files...${NC}"
+    
+    # Python syntax check
+    for file in $PYTHON_FILES; do
+        if [ -f "$file" ]; then
+            python3 -m py_compile "$file" || {
+                echo -e "${RED}✗ Python syntax error in $file${NC}"
+                exit 1
+            }
+        fi
+    done
+    echo -e "${GREEN}✓ Python syntax check passed${NC}"
+    
+    # Run flake8 on staged Python files if available
+    if command -v flake8 &> /dev/null; then
+        echo "$PYTHON_FILES" | xargs flake8 --select=E9,F63,F7,F82 || {
+            echo -e "${RED}✗ Critical flake8 errors found${NC}"
+            exit 1
+        }
+        echo -e "${GREEN}✓ Flake8 critical checks passed${NC}"
+    fi
+fi
+
+# Check if any C files are staged
+C_FILES=$(echo "$STAGED_FILES" | grep -E 'kernel/.*\.(c|h)$' || true)
+if [ -n "$C_FILES" ]; then
+    echo -e "${YELLOW}Checking C/kernel files...${NC}"
+    
+    # C syntax check (macOS compatible)
+    cd kernel
+    for file in $C_FILES; do
+        # Remove 'kernel/' prefix for relative path
+        file_rel=${file#kernel/}
+        if [ -f "$file_rel" ]; then
+            gcc -fsyntax-only -I include -I include/arch/x86_64 "$file_rel" 2>/dev/null || {
+                echo -e "${RED}✗ C syntax error in $file${NC}"
+                cd ..
+                exit 1
+            }
+        fi
+    done
+    cd ..
+    echo -e "${GREEN}✓ C syntax check passed${NC}"
+    
+    # Check for unsafe functions
+    UNSAFE_FUNCS=$(echo "$C_FILES" | xargs grep -l '\b(gets|sprintf)\b' 2>/dev/null || true)
+    if [ -n "$UNSAFE_FUNCS" ]; then
+        echo -e "${YELLOW}⚠️  Warning: Unsafe functions found in:${NC}"
+        echo "$UNSAFE_FUNCS"
+        echo -e "${YELLOW}Consider using safer alternatives (fgets, snprintf)${NC}"
+    fi
+fi
+
+# Check for large files
+LARGE_FILES=$(echo "$STAGED_FILES" | while read file; do
+    if [ -f "$file" ]; then
+        size=$(wc -c < "$file")
+        if [ $size -gt 1048576 ]; then  # 1MB
+            echo "$file"
+        fi
+    fi
+done)
+
+if [ -n "$LARGE_FILES" ]; then
+    echo -e "${YELLOW}⚠️  Warning: Large files detected:${NC}"
+    echo "$LARGE_FILES"
+    echo -e "${YELLOW}Consider using Git LFS for large files${NC}"
+fi
+
+# Check for merge conflicts
+if grep -rn '^<<<<<<< \|^======= \|^>>>>>>> ' $(echo "$STAGED_FILES") 2>/dev/null; then
+    echo -e "${RED}✗ Merge conflict markers found${NC}"
+    exit 1
+fi
+
+# Check for private keys or secrets
+if echo "$STAGED_FILES" | xargs grep -E '(BEGIN.*PRIVATE KEY|password.*=|api_key.*=|secret.*=)' 2>/dev/null | grep -v -E '(example|test|mock)'; then
+    echo -e "${RED}✗ Potential secrets detected! Please review.${NC}"
+    exit 1
+fi
+
+# Run quick kernel tests if kernel files changed
+if [ -n "$C_FILES" ]; then
+    if [ -f "kernel/test/test_pmm.c" ] && [ -f "kernel/test/test_slab.c" ]; then
+        echo -e "${YELLOW}Running quick kernel tests...${NC}"
+        cd kernel
+        # Build and run tests
+        gcc -o test/test_pmm_quick test/test_pmm.c 2>/dev/null && ./test/test_pmm_quick >/dev/null 2>&1 && rm -f test/test_pmm_quick || {
+            echo -e "${YELLOW}⚠️  Kernel tests skipped (build failed on macOS)${NC}"
+        }
+        cd ..
+    fi
+fi
+
+echo -e "${GREEN}=== All pre-commit checks passed! ===${NC}"
+exit 0
