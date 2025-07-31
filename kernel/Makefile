@@ -10,13 +10,14 @@ AS ?= as
 LD ?= ld
 OBJCOPY ?= objcopy
 
-# Flags
+# Common flags for all architectures
 CFLAGS = -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector
-CFLAGS += -fno-pic -mno-red-zone -Wall -Wextra -O2
+CFLAGS += -fno-pic -Wall -Wextra -O2
 CFLAGS += -I include -I include/arch/$(ARCH)
 
+# Architecture-specific flags
 ifeq ($(ARCH),x86_64)
-    CFLAGS += -mcmodel=kernel -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
+    CFLAGS += -mno-red-zone -mcmodel=kernel -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
     # Check if we're on Linux or macOS
     UNAME_S := $(shell uname -s)
     ifeq ($(UNAME_S),Linux)
@@ -27,6 +28,13 @@ ifeq ($(ARCH),x86_64)
         ASFLAGS = -arch x86_64
         LDFLAGS = -arch x86_64
     endif
+endif
+
+ifeq ($(ARCH),aarch64)
+    # ARM64-specific flags
+    CFLAGS += -march=armv8-a -mgeneral-regs-only
+    ASFLAGS = -march=armv8-a
+    LDFLAGS = -m aarch64elf
 endif
 
 # Source files
@@ -46,6 +54,13 @@ ifeq ($(ARCH),x86_64)
     ARCH_C_SOURCES = \
         $(ARCH_DIR)/cpu.c \
         $(ARCH_DIR)/vga.c \
+        $(ARCH_DIR)/early_init.c
+endif
+
+ifeq ($(ARCH),aarch64)
+    ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S
+    ARCH_C_SOURCES = \
+        $(ARCH_DIR)/cpu.c \
         $(ARCH_DIR)/early_init.c
 endif
 
