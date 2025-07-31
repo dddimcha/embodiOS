@@ -51,6 +51,7 @@ KERNEL_C_SOURCES = \
     core/kernel.c \
     core/console.c \
     core/panic.c \
+    core/stubs.c \
     mm/pmm.c \
     mm/vmm.c \
     mm/slab.c \

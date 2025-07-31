@@ -2,6 +2,7 @@
 #include <embodios/cpu.h>
 #include <embodios/types.h>
 #include <embodios/console.h>
+#include "vga_io.h"
 
 /* CPUID functions */
 #define CPUID_VENDOR        0x00000000
@@ -175,4 +176,19 @@ void cpu_flush_cache(void)
 void cpu_invalidate_cache(void)
 {
     __asm__ volatile("invd" ::: "memory");
+}
+
+/* Reboot the system */
+void arch_reboot(void)
+{
+    /* Disable interrupts */
+    __asm__ volatile("cli");
+    
+    /* Try keyboard controller reset */
+    outb(0x64, 0xFE);
+    
+    /* If that doesn't work, halt */
+    while (1) {
+        __asm__ volatile("hlt");
+    }
 }
