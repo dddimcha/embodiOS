@@ -10,6 +10,15 @@ AS ?= as
 LD ?= ld
 OBJCOPY ?= objcopy
 
+# Cross-compilation prefix for ARM64
+ifeq ($(ARCH),aarch64)
+    CROSS_PREFIX ?= aarch64-linux-gnu-
+    CC := $(CROSS_PREFIX)gcc
+    AS := $(CROSS_PREFIX)as
+    LD := $(CROSS_PREFIX)ld
+    OBJCOPY := $(CROSS_PREFIX)objcopy
+endif
+
 # Common flags for all architectures
 CFLAGS = -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector
 CFLAGS += -fno-pic -Wall -Wextra -O2

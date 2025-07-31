@@ -118,7 +118,7 @@ jobs:
         if [ "${{ matrix.arch }}" = "x86_64" ]; then
           make ARCH=x86_64 CC=${{ env.CC }} || exit 1
         else
-          make ARCH=aarch64 CC=aarch64-linux-gnu-gcc || exit 1
+          make ARCH=aarch64 CC=aarch64-linux-gnu-gcc AS=aarch64-linux-gnu-as LD=aarch64-linux-gnu-ld || exit 1
         fi
         
     - name: Check kernel binary
