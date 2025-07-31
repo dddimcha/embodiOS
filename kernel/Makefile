@@ -90,6 +90,7 @@ ifeq ($(ARCH),aarch64)
     ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S
     ARCH_C_SOURCES = \
         $(ARCH_DIR)/cpu.c \
+        $(ARCH_DIR)/uart.c \
         $(ARCH_DIR)/early_init.c
 endif
 

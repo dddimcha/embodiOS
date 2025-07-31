@@ -5,6 +5,7 @@ ENTRY(_start)
 SECTIONS
 {
     . = 0x40000000;  /* Typical ARM64 kernel load address */
+    _kernel_start = .;
     
     .text : {
         *(.text.boot)
