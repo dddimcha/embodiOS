@@ -161,6 +161,14 @@ void arch_early_init(void)
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
 }
 
+/* Initialize interrupt system */
+void arch_interrupt_init(void)
+{
+    /* TODO: Initialize IDT (Interrupt Descriptor Table) */
+    /* TODO: Initialize PIC or APIC */
+    /* For now, just a stub */
+}
+
 /* Enable interrupts */
 void arch_enable_interrupts(void)
 {
