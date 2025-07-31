@@ -1,5 +1,5 @@
 /* EMBODIOS x86_64 Boot Code - Extended from compiler version */
-.section __TEXT,__multiboot2
+.section .multiboot2
     .align 8
 multiboot2_header:
     .long 0xe85250d6                /* Magic number */
@@ -20,7 +20,7 @@ multiboot2_header:
     .long 8                         /* Size */
 multiboot2_header_end:
 
-.section __TEXT,__text_boot
+.section .text.boot
 .global _start
 .extern kernel_main
 
@@ -79,7 +79,7 @@ start64:
     mov $higher_half_start, %rax
     jmp *%rax
 
-.section __TEXT,__text
+.section .text
 higher_half_start:
     /* Reload stack pointer to higher half */
     mov $kernel_stack_top, %rsp
@@ -94,7 +94,7 @@ higher_half_start:
     jmp 1b
 
 /* Check for CPUID support */
-.section __TEXT,__text_boot
+.section .text.boot
 .code32
 check_cpuid:
     pushfl
@@ -239,7 +239,7 @@ enable_cpu_features:
     ret
 
 /* Global Descriptor Table */
-.section __TEXT,__rodata
+.section .rodata
 .align 16
 gdt64:
     .quad 0                         /* Null descriptor */
@@ -256,8 +256,8 @@ no_cpuid_msg:       .asciz "ERROR: CPUID not supported"
 no_long_mode_msg:   .asciz "ERROR: 64-bit mode not supported"
 
 /* BSS section */
-.section __DATA,__bss
-.align 12
+.section .bss
+.align 4096
 pml4_table:     .space 4096
 pdpt_table:     .space 4096
 pdt_table:      .space 4096
@@ -276,7 +276,7 @@ kernel_stack_bottom:
 kernel_stack_top:
 
 /* Data section */
-.section __DATA,__data
+.section .data
 .align 8
 multiboot_magic:    .long 0
 multiboot_info:     .long 0
