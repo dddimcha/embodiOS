@@ -1,0 +1,131 @@
+name: Code Coverage
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  python-coverage:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install -e .
+    
+    - name: Run tests with coverage
+      run: |
+        pytest tests/ -v --cov=embodi --cov-report=xml --cov-report=html
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        flags: python
+        name: python-coverage
+    
+    - name: Upload coverage HTML report
+      uses: actions/upload-artifact@v4
+      with:
+        name: python-coverage-report
+        path: htmlcov/
+
+  kernel-coverage:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install coverage tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc gcovr lcov
+    
+    - name: Build kernel with coverage
+      working-directory: kernel
+      run: |
+        # Create coverage build
+        make clean || true
+        
+        # Compile with coverage flags
+        for file in mm/pmm.c mm/slab.c mm/vmm.c lib/string.c lib/stdlib.c; do
+          gcc -coverage -fprofile-arcs -ftest-coverage \
+            -I include -I include/arch/x86_64 \
+            -c $file -o ${file%.c}.gcov.o
+        done
+    
+    - name: Run unit tests with coverage
+      working-directory: kernel
+      run: |
+        # Build test with coverage
+        gcc -coverage -fprofile-arcs -ftest-coverage \
+          -o test/test_pmm_cov test/test_pmm.c \
+          -I include
+          
+        gcc -coverage -fprofile-arcs -ftest-coverage \
+          -o test/test_slab_cov test/test_slab.c \
+          -I include
+        
+        # Run tests
+        ./test/test_pmm_cov
+        ./test/test_slab_cov
+        
+        # Generate coverage report
+        gcovr --xml coverage.xml --html-details coverage.html \
+          --exclude 'test/*' --exclude 'arch/*'
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: kernel/coverage.xml
+        flags: kernel
+        name: kernel-coverage
+    
+    - name: Upload coverage HTML report
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-coverage-report
+        path: kernel/coverage.html*
+
+  coverage-summary:
+    runs-on: ubuntu-latest
+    needs: [python-coverage, kernel-coverage]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: coverage-reports
+    
+    - name: Generate combined report
+      run: |
+        echo "# EMBODIOS Coverage Report" > coverage-summary.md
+        echo "" >> coverage-summary.md
+        echo "## Python Coverage" >> coverage-summary.md
+        echo "See artifacts for detailed HTML report" >> coverage-summary.md
+        echo "" >> coverage-summary.md
+        echo "## Kernel Coverage" >> coverage-summary.md
+        echo "See artifacts for detailed HTML report" >> coverage-summary.md
+        
+        # In a real scenario, you might parse the coverage files
+        # and generate a nice summary here
+    
+    - name: Upload summary
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-summary
+        path: coverage-summary.md
