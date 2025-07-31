@@ -88,9 +88,12 @@ static void init_gdt(void)
     gdt_desc.limit = sizeof(gdt) - 1;
     gdt_desc.base = (uint64_t)&gdt;
     
+#ifdef __x86_64__
     __asm__ volatile("lgdt %0" : : "m"(gdt_desc));
+#endif
     
     /* Reload segments */
+#ifdef __x86_64__
     __asm__ volatile(
         "mov $0x10, %%ax\n"
         "mov %%ax, %%ds\n"
@@ -104,6 +107,7 @@ static void init_gdt(void)
         "1:\n"
         : : : "ax"
     );
+#endif
 }
 
 /* Initialize TSS */
@@ -124,13 +128,15 @@ static void init_tss(void)
     tss_entry->base_low = tss_base & 0xFFFF;
     tss_entry->base_middle = (tss_base >> 16) & 0xFF;
     tss_entry->access = 0x89;  /* Present, TSS */
-    tss_entry->granularity = ((tss_limit >> 16) & 0x0F) | 0x00;
+    tss_entry->granularity = (tss_limit >> 16) & 0x0F;
     tss_entry->base_high = (tss_base >> 24) & 0xFF;
     tss_entry->base_upper = (tss_base >> 32) & 0xFFFFFFFF;
     tss_entry->reserved = 0;
     
     /* Load TSS */
+#ifdef __x86_64__
     __asm__ volatile("ltr %%ax" : : "a"(0x28));
+#endif
 }
 
 /* Early architecture initialization */
@@ -142,6 +148,7 @@ void arch_early_init(void)
     /* Initialize TSS */
     init_tss();
     
+#ifdef __x86_64__
     /* Enable write protection in kernel mode */
     uint64_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -153,22 +160,37 @@ void arch_early_init(void)
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
     cr4 |= (1 << 20);  /* SMEP bit */
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+#endif
+}
+
+/* Initialize interrupt system */
+void arch_interrupt_init(void)
+{
+    /* TODO: Initialize IDT (Interrupt Descriptor Table) */
+    /* TODO: Initialize PIC or APIC */
+    /* For now, just a stub */
 }
 
 /* Enable interrupts */
 void arch_enable_interrupts(void)
 {
+#ifdef __x86_64__
     __asm__ volatile("sti");
+#endif
 }
 
 /* Disable interrupts */
 void arch_disable_interrupts(void)
 {
+#ifdef __x86_64__
     __asm__ volatile("cli");
+#endif
 }
 
 /* Halt CPU */
 void arch_halt(void)
 {
+#ifdef __x86_64__
     __asm__ volatile("hlt");
+#endif
 }

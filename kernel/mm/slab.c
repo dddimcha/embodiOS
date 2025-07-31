@@ -56,7 +56,7 @@ static int get_cache_index(size_t size)
 }
 
 /* Initialize a slab */
-static void init_slab(struct slab* slab, struct slab_cache* cache)
+static void init_slab(struct slab* slab, const struct slab_cache* cache)
 {
     slab->next = NULL;
     slab->in_use = 0;
@@ -219,7 +219,7 @@ void kfree(void* ptr)
         for (int i = 0; i < SLAB_NUM_SIZES; i++) {
             size_t obj_size = slab_state.caches[i].obj_size;
             void* slab_start = (void*)(slab + 1);
-            void* slab_end = (void*)((char*)slab + PAGE_SIZE);
+            const void* slab_end = (void*)((char*)slab + PAGE_SIZE);
             
             if (ptr >= slab_start && ptr < slab_end &&
                 ((uintptr_t)ptr - (uintptr_t)slab_start) % obj_size == 0) {
