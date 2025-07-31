@@ -22,7 +22,7 @@
 #define PTE_NX          (1UL << 63)
 
 /* Virtual memory regions */
-#define KERNEL_BASE     0xFFFFFFFF80000000UL
+#define KERNEL_BASE     0x100000UL
 #define KERNEL_SIZE     0x40000000UL  /* 1GB */
 #define USER_BASE       0x0000000000400000UL
 #define USER_MAX        0x00007FFFFFFFFFFFUL

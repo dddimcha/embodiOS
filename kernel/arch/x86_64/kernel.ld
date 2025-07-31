@@ -3,23 +3,23 @@ ENTRY(_start)
 
 SECTIONS
 {
-    /* Kernel starts at 1MB */
-    . = 0xFFFFFFFF80100000;
+    /* Physical load address */
+    . = 0x100000;
     
     _kernel_start = .;
     
-    .multiboot2 ALIGN(4K) : AT(ADDR(.multiboot2) - 0xFFFFFFFF80000000)
+    .multiboot2 ALIGN(4K) :
     {
         KEEP(*(.multiboot2))
     }
     
-    .text ALIGN(4K) : AT(ADDR(.text) - 0xFFFFFFFF80000000)
+    .text ALIGN(4K) :
     {
         *(.text.boot)
         *(.text*)
     }
     
-    .rodata ALIGN(4K) : AT(ADDR(.rodata) - 0xFFFFFFFF80000000)
+    .rodata ALIGN(4K) :
     {
         *(.rodata*)
         
@@ -29,12 +29,12 @@ SECTIONS
         _model_weights_end = .;
     }
     
-    .data ALIGN(4K) : AT(ADDR(.data) - 0xFFFFFFFF80000000)
+    .data ALIGN(4K) :
     {
         *(.data*)
     }
     
-    .bss ALIGN(4K) : AT(ADDR(.bss) - 0xFFFFFFFF80000000)
+    .bss ALIGN(4K) :
     {
         _bss_start = .;
         *(.bss*)

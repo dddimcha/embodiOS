@@ -10,7 +10,7 @@ static struct {
     uint16_t cursor_y;
     uint8_t color;
 } vga_state = {
-    .buffer = (uint16_t*)(VGA_BUFFER + 0xFFFFFFFF80000000UL),  /* Higher half */
+    .buffer = (uint16_t*)VGA_BUFFER,
     .cursor_x = 0,
     .cursor_y = 0,
     .color = VGA_COLOR(7, 0)  /* Light gray on black */

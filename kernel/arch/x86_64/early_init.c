@@ -29,8 +29,8 @@ struct gdt_descriptor {
     uint64_t base;
 } __packed;
 
-/* GDT */
-static struct gdt_entry gdt[5];
+/* GDT - need 7 entries: null, kernel code, kernel data, user code, user data, TSS (2 entries) */
+static struct gdt_entry gdt[7];
 static struct gdt_descriptor gdt_desc;
 
 /* TSS structure for x86_64 */
