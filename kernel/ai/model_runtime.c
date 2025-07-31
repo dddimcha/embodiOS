@@ -5,6 +5,7 @@
 #include "embodios/console.h"
 #include "embodios/model.h"
 #include "embodios/mm.h"
+#include "embodios/tvm.h"
 
 /* Model runtime state */
 typedef struct {
@@ -26,6 +27,10 @@ void model_runtime_init(void)
 {
     runtime.initialized = true;
     console_printf("AI Runtime: Initialized\n");
+    
+    /* Initialize TVM backend */
+    tvm_runtime_init();
+    console_printf("AI Runtime: TVM backend ready\n");
 }
 
 /* Load model from memory */
