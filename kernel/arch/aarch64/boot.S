@@ -2,7 +2,8 @@
  * Minimal boot stub for ARM64 architecture
  */
 
-.section .text.boot
+.text
+.align 4
 .global _start
 
 _start:
@@ -28,8 +29,8 @@ _start:
     wfe
     b 3b
 
-.section .bss
-.align 16
+.data
+.align 4
 stack_bottom:
-    .skip 0x4000    /* 16KB stack */
+    .space 0x4000    /* 16KB stack */
 stack_top:

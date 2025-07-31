@@ -12,11 +12,21 @@ OBJCOPY ?= objcopy
 
 # Cross-compilation prefix for ARM64
 ifeq ($(ARCH),aarch64)
-    CROSS_PREFIX ?= aarch64-linux-gnu-
-    CC := $(CROSS_PREFIX)gcc
-    AS := $(CROSS_PREFIX)as
-    LD := $(CROSS_PREFIX)ld
-    OBJCOPY := $(CROSS_PREFIX)objcopy
+    UNAME_S := $(shell uname -s)
+    ifeq ($(UNAME_S),Darwin)
+        # macOS ARM64 - use native tools
+        CC := clang
+        AS := as
+        LD := ld
+        OBJCOPY := objcopy
+    else
+        # Linux - use cross-compiler
+        CROSS_PREFIX ?= aarch64-linux-gnu-
+        CC := $(CROSS_PREFIX)gcc
+        AS := $(CROSS_PREFIX)as
+        LD := $(CROSS_PREFIX)ld
+        OBJCOPY := $(CROSS_PREFIX)objcopy
+    endif
 endif
 
 # Common flags for all architectures
@@ -41,9 +51,18 @@ endif
 
 ifeq ($(ARCH),aarch64)
     # ARM64-specific flags
-    CFLAGS += -march=armv8-a -mgeneral-regs-only
-    ASFLAGS = -march=armv8-a
-    LDFLAGS = -m aarch64elf
+    UNAME_S := $(shell uname -s)
+    ifeq ($(UNAME_S),Darwin)
+        # macOS ARM64 flags
+        CFLAGS += -target arm64-apple-macos11 -arch arm64
+        ASFLAGS = -arch arm64
+        LDFLAGS = -arch arm64
+    else
+        # Linux ARM64 flags
+        CFLAGS += -march=armv8-a -mgeneral-regs-only
+        ASFLAGS = -march=armv8-a
+        LDFLAGS = -m aarch64elf
+    endif
 endif
 
 # Source files

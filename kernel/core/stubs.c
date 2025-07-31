@@ -1,6 +1,6 @@
 /* Temporary stub implementations for missing functions */
 
-#include <stddef.h>
+#include "embodios/types.h"
 #include "embodios/kernel.h"
 #include "embodios/console.h"
 #include "embodios/cpu.h"
@@ -27,7 +27,7 @@ void* model_load(const void* data, size_t size)
 }
 
 /* Command processor stub */
-void command_processor_init(void* model)
+void command_processor_init(struct embodios_model* model)
 {
     (void)model;
     /* TODO: Implement command processor initialization */

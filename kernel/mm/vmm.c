@@ -89,7 +89,12 @@ static bool map_page(struct page_table* pml4, uintptr_t vaddr, uintptr_t paddr, 
     pt->entries[PT_INDEX(vaddr)] = paddr | flags | PTE_PRESENT;
     
     /* Invalidate TLB */
+#ifdef __x86_64__
     __asm__ volatile("invlpg (%0)" : : "r"(vaddr) : "memory");
+#else
+    /* ARM64: Invalidate TLB entry */
+    /* TODO: Implement ARM64 TLB invalidation */
+#endif
     
     return true;
 }
@@ -111,7 +116,12 @@ static void unmap_page(struct page_table* pml4, uintptr_t vaddr)
     pt->entries[PT_INDEX(vaddr)] = 0;
     
     /* Invalidate TLB */
+#ifdef __x86_64__
     __asm__ volatile("invlpg (%0)" : : "r"(vaddr) : "memory");
+#else
+    /* ARM64: Invalidate TLB entry */
+    /* TODO: Implement ARM64 TLB invalidation */
+#endif
 }
 
 /* Initialize virtual memory manager */
@@ -119,10 +129,16 @@ void vmm_init(void)
 {
     console_printf("VMM: Initializing virtual memory\n");
     
+#ifdef __x86_64__
     /* Get current PML4 from CR3 */
     uintptr_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     vmm_state.kernel_pml4 = (struct page_table*)(cr3 + KERNEL_BASE);
+#else
+    /* ARM64: Initialize page tables */
+    /* TODO: Implement ARM64 page table initialization */
+    vmm_state.kernel_pml4 = NULL;
+#endif
     
     /* Set up kernel heap */
     vmm_state.vmm_heap_start = (void*)(KERNEL_BASE + 0x10000000);  /* +256MB */
