@@ -3,6 +3,7 @@
 #include "embodios/types.h"
 #include "embodios/kernel.h"
 #include "embodios/console.h"
+#include "embodios/mm.h"
 
 #define MAX_TASKS 16
 #define TASK_STACK_SIZE 8192
@@ -109,7 +110,7 @@ void schedule(void)
     }
     
     /* Find a ready task */
-    task_t *start = next;
+    const task_t *start = next;
     while (next && next->state != TASK_READY) {
         next = next->next;
         if (!next) {

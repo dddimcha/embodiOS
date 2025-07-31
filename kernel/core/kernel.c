@@ -13,12 +13,22 @@ const char* kernel_version = "EMBODIOS v0.1.0-native";
 const char* kernel_build = __DATE__ " " __TIME__;
 
 /* External symbols from linker script */
+#ifdef __APPLE__
+/* On macOS, we'll define dummy symbols for now */
+char _kernel_start[1] = {0};
+char _kernel_end[1] = {0};
+char _bss_start[1] = {0};
+char _bss_end[1] = {0};
+char _model_weights_start[1] = {0};
+char _model_weights_end[1] = {0};
+#else
 extern char _kernel_start[];
 extern char _kernel_end[];
 extern char _bss_start[];
 extern char _bss_end[];
 extern char _model_weights_start[];
 extern char _model_weights_end[];
+#endif
 
 /* Architecture-specific initialization */
 extern void arch_early_init(void);

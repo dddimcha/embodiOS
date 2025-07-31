@@ -20,3 +20,9 @@ void arch_console_putchar(char c)
     /* TODO: Write to UART or other console device */
     (void)c;  /* Suppress unused parameter warning */
 }
+
+void arch_interrupt_init(void)
+{
+    /* ARM64 interrupt initialization */
+    /* TODO: Initialize GIC */
+}
