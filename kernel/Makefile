@@ -17,8 +17,16 @@ CFLAGS += -I include -I include/arch/$(ARCH)
 
 ifeq ($(ARCH),x86_64)
     CFLAGS += -mcmodel=kernel -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
-    ASFLAGS = --64
-    LDFLAGS = -m elf_x86_64
+    # Check if we're on Linux or macOS
+    UNAME_S := $(shell uname -s)
+    ifeq ($(UNAME_S),Linux)
+        ASFLAGS = --64
+        LDFLAGS = -m elf_x86_64
+    else
+        # macOS flags
+        ASFLAGS = -arch x86_64
+        LDFLAGS = -arch x86_64
+    endif
 endif
 
 # Source files
