@@ -72,9 +72,13 @@ KERNEL_C_SOURCES = \
     core/console.c \
     core/panic.c \
     core/stubs.c \
+    core/interrupt.c \
+    core/task.c \
     mm/pmm.c \
     mm/vmm.c \
     mm/slab.c \
+    mm/heap.c \
+    ai/model_runtime.c \
     lib/string.c \
     lib/stdlib.c
 

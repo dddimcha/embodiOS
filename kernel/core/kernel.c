@@ -4,6 +4,9 @@
 #include <embodios/mm.h>
 #include <embodios/cpu.h>
 #include <embodios/model.h>
+#include <embodios/interrupt.h>
+#include <embodios/task.h>
+#include <embodios/ai.h>
 
 /* Kernel version info */
 const char* kernel_version = "EMBODIOS v0.1.0-native";
@@ -56,6 +59,18 @@ void kernel_main(void)
     pmm_init(mem_start, mem_size);
     vmm_init();
     slab_init();
+    
+    /* Initialize heap for AI workloads */
+    console_printf("Initializing heap allocator...\n");
+    heap_init();
+    
+    /* Initialize task scheduler */
+    console_printf("Initializing task scheduler...\n");
+    scheduler_init();
+    
+    /* Initialize AI runtime */
+    console_printf("Initializing AI runtime...\n");
+    model_runtime_init();
     
     /* Interrupt handling */
     console_printf("Initializing interrupts...\n");
