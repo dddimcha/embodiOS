@@ -36,6 +36,9 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
    pip install -r requirements.txt
    pip install -r requirements-dev.txt
    pip install -e .
+   
+   # Install pre-commit hooks
+   ./scripts/setup-hooks.sh
    ```
 
 4. **Make your changes**
@@ -70,6 +73,17 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
    Then create a pull request on GitHub.
 
 ## Development Guidelines
+
+### Pre-commit Hooks
+
+We use pre-commit hooks to ensure code quality. They run automatically before each commit:
+
+- **Python**: Syntax check, flake8, mypy
+- **C/Kernel**: Compilation check, unsafe function detection
+- **Security**: Scans for secrets and private keys
+- **Files**: Checks for large files and merge conflicts
+
+To skip hooks temporarily: `git commit --no-verify`
 
 ### Code Style
 
