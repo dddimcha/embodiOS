@@ -5,10 +5,10 @@ ARCH ?= x86_64
 ARCH_DIR = arch/$(ARCH)
 
 # Tools
-CC = gcc
-AS = as
-LD = ld
-OBJCOPY = objcopy
+CC ?= gcc
+AS ?= as
+LD ?= ld
+OBJCOPY ?= objcopy
 
 # Flags
 CFLAGS = -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector

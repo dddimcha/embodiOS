@@ -31,6 +31,8 @@ test-*.iso
 test-*.iso.json
 .coverage
 coverage.xml
+kernel/test/test_*
+!kernel/test/test_*.c
 
 # IDE and editor files
 .vscode/
