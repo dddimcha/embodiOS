@@ -1,6 +1,6 @@
 /* EMBODIOS ARM64 CPU functions */
 
-#include <stdint.h>
+#include "embodios/types.h"
 
 void cpu_init(void)
 {

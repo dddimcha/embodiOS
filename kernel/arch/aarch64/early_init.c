@@ -1,6 +1,6 @@
 /* EMBODIOS ARM64 Early Initialization */
 
-#include <stdint.h>
+#include "embodios/types.h"
 
 void arch_early_init(void)
 {
