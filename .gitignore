@@ -90,4 +90,4 @@ Desktop.ini
 *.key
 .env
 .env.local
-secrets/
+secrets/models/tinystories-15m.bin
