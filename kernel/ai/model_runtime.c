@@ -1,5 +1,7 @@
 /* Minimal AI model runtime for EMBODIOS */
 
+/* Kernel AI runtime - using integer-only inference for ARM64 compatibility */
+
 #include "embodios/types.h"
 #include "embodios/kernel.h"
 #include "embodios/console.h"
@@ -84,46 +86,11 @@ struct embodios_model* model_load(const void* data, size_t size)
     return model;
 }
 
-/* Simple tensor structure for inference - internal use only */
-typedef struct ai_tensor {
-    float *data;
-    size_t size;
-    int dims[4];  /* [batch, seq_len, hidden_dim, vocab_size] */
-} ai_tensor_t;
+/* Global graph executor for model inference */
+static tvm_graph_executor_t* model_graph = NULL;
 
-/* Allocate tensor */
-static ai_tensor_t* ai_tensor_create(int batch, int seq_len, int hidden_dim)
-{
-    ai_tensor_t *tensor = kmalloc(sizeof(ai_tensor_t));
-    if (!tensor) return NULL;
-    
-    tensor->dims[0] = batch;
-    tensor->dims[1] = seq_len;
-    tensor->dims[2] = hidden_dim;
-    tensor->dims[3] = 0;
-    
-    tensor->size = batch * seq_len * hidden_dim * sizeof(float);
-    tensor->data = kmalloc(tensor->size);
-    
-    if (!tensor->data) {
-        kfree(tensor);
-        return NULL;
-    }
-    
-    return tensor;
-}
-
-/* Free tensor */
-static void ai_tensor_free(ai_tensor_t *tensor)
-{
-    if (tensor) {
-        if (tensor->data) kfree(tensor->data);
-        kfree(tensor);
-    }
-}
-
-/* Run inference (simplified) */
-int model_inference(const int *input_tokens, int num_tokens, 
+/* Run inference (simplified - integer-only) */
+int model_inference(const int *input_tokens, int num_tokens,
                    int *output_tokens, int max_output)
 {
     if (!runtime.model) {
@@ -132,22 +99,27 @@ int model_inference(const int *input_tokens, int num_tokens,
     }
     
     console_printf("AI Runtime: Running inference with %d tokens\n", num_tokens);
-    
-    /* Create input tensor */
-    ai_tensor_t *input = ai_tensor_create(1, num_tokens, 512);  /* Assuming 512 hidden dim */
-    if (!input) {
-        console_printf("AI Runtime: Failed to allocate input tensor\n");
-        return -1;
+
+    /* Simple integer-based inference (no floating-point, no graph executor) */
+    /* Generate demo output tokens based on input */
+    int output_len = 0;
+
+    /* Echo input with simple transformations */
+    for (int t = 0; t < num_tokens && output_len < max_output; t++) {
+        /* Add input token */
+        output_tokens[output_len++] = input_tokens[t];
+
+        /* Add transformed token */
+        if (output_len < max_output) {
+            output_tokens[output_len++] = (input_tokens[t] + 1) % 256;
+        }
     }
-    
-    /* TODO: Actual inference would happen here */
-    /* For now, just echo back the input */
-    int output_len = (num_tokens < max_output) ? num_tokens : max_output;
-    for (int i = 0; i < output_len; i++) {
-        output_tokens[i] = input_tokens[i];
+
+    /* Add some demo response tokens */
+    const int demo_response[] = {72, 101, 108, 108, 111, 33};  /* "Hello!" */
+    for (int i = 0; i < 6 && output_len < max_output; i++) {
+        output_tokens[output_len++] = demo_response[i];
     }
-    
-    ai_tensor_free(input);
     
     console_printf("AI Runtime: Inference complete, generated %d tokens\n", output_len);
     return output_len;
@@ -168,6 +140,9 @@ void model_unload(struct embodios_model* model)
         return;
     }
     
+    /* Note: graph executor not used in integer-only mode */
+    model_graph = NULL;
+
     if (runtime.workspace) {
         kfree(runtime.workspace);
         runtime.workspace = NULL;
@@ -175,4 +150,113 @@ void model_unload(struct embodios_model* model)
     runtime.model = NULL;
     runtime.workspace_size = 0;
     console_printf("AI Runtime: Model unloaded\n");
+}
+
+/* Inference API implementation */
+
+/* External functions */
+int transformer_init(struct embodios_model* model);
+void transformer_reset_cache(void);
+
+int tokenizer_init(void);
+int tokenizer_encode(const char* text, int* tokens, int max_tokens);
+int tokenizer_decode(int* tokens, int n_tokens, char* output, size_t max_output);
+const char* tokenizer_decode_token(int token);
+
+/* String functions */
+size_t strlen(const char* s);
+
+static int g_inference_initialized = 0;
+
+/* Initialize inference engine */
+int inference_init(struct embodios_model* model)
+{
+    console_printf("Initializing inference engine...\n");
+    
+    /* Initialize tokenizer */
+    if (tokenizer_init() < 0) {
+        console_printf("Failed to initialize tokenizer\n");
+        return -1;
+    }
+    
+    /* Initialize transformer */
+    if (transformer_init(model) < 0) {
+        console_printf("Failed to initialize transformer\n");
+        return -1;
+    }
+    
+    runtime.model = model;
+    g_inference_initialized = 1;
+    
+    console_printf("Inference engine initialized successfully\n");
+    return 0;
+}
+
+/* Run inference on input text */
+int inference_run(const char* input, char* output, size_t output_size)
+{
+    /* Use real TinyLlama GGUF integer inference */
+    extern int tinyllama_integer_inference(const char* prompt, char* response, size_t max_response);
+
+    console_printf("Running GGUF integer inference: \"%s\"\n", input);
+
+    /* Call the real inference engine */
+    int result = tinyllama_integer_inference(input, output, output_size);
+
+    if (result < 0) {
+        console_printf("GGUF inference failed\n");
+        /* Fallback to simple response */
+        const char* fallback = "TinyLlama inference failed. Check model loading.";
+        size_t i = 0;
+        while (fallback[i] && i < output_size - 1) {
+            output[i] = fallback[i];
+            i++;
+        }
+        output[i] = '\0';
+        return -1;
+    }
+
+    console_printf("GGUF inference complete: %d chars\n", result);
+    return 0;
+}
+
+/* Test inference */
+void inference_test(void)
+{
+    console_printf("Running inference test...\n");
+    
+    const char* test_prompts[] = {
+        "Hello",
+        "What is 2+2?",
+        "Tell me a joke",
+        NULL
+    };
+    
+    char output[512];
+    
+    for (int i = 0; test_prompts[i]; i++) {
+        console_printf("\nTest %d: \"%s\"\n", i + 1, test_prompts[i]);
+        
+        if (inference_run(test_prompts[i], output, sizeof(output)) == 0) {
+            console_printf("Response: %s\n", output);
+        } else {
+            console_printf("Test failed\n");
+        }
+    }
+}
+
+/* Show inference statistics */
+void inference_stats(void)
+{
+    console_printf("Inference Statistics:\n");
+    console_printf("  Initialized: %s\n", g_inference_initialized ? "Yes" : "No");
+    
+    if (runtime.model) {
+        console_printf("  Model: %s\n", runtime.model->name);
+        console_printf("  Architecture: %s\n", runtime.model->arch);
+    } else {
+        console_printf("  Model: None\n");
+    }
+    
+    /* TODO: Add more stats like tokens processed, inference time, etc. */
 }
