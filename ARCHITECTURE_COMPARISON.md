@@ -333,7 +333,6 @@ Speedup: 26.5x faster!
 ---
 
 **See also**:
-- `PROOF_NO_OS_OVERHEAD.md` - Detailed evidence and code references
 - `benchmark_vs_traditional_os.sh` - Automated performance testing
 - `kernel/core/kernel.c:46-135` - Kernel entry point with AI
 - `.github/workflows/build-embodios.yml` - CI/CD testing

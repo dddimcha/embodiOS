@@ -2,7 +2,7 @@ name: Kernel CI
 
 on:
   push:
-    branches: [ main, 'feat/kernel*' ]
+    branches: [ main, 'feat/kernel*', 'feat/embodios-ai*', 'feat/tvm*' ]
     paths:
       - 'kernel/**'
       - '.github/workflows/kernel-ci.yml'
