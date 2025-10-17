@@ -117,3 +117,6 @@ ISR_NOERRCODE 44   /* IRQ12 */
 ISR_NOERRCODE 45   /* IRQ13 */
 ISR_NOERRCODE 46   /* IRQ14 */
 ISR_NOERRCODE 47   /* IRQ15 */
+
+/* Mark stack as non-executable */
+.section .note.GNU-stack,"",@progbits

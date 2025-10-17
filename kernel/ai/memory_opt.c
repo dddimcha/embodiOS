@@ -80,7 +80,17 @@ void matvec_prefetch(const fixed_t* mat, const fixed_t* vec, fixed_t* out,
             prefetch(&mat[(r + 1) * cols]);
         }
 
-        /* Use SIMD for dot product */
+        /* Compute dot product */
+#ifdef __aarch64__
+        /* Use ARM NEON SIMD for dot product */
         out[r] = vec_dot_neon(&mat[r * cols], vec, cols);
+#else
+        /* Scalar fallback for x86_64 */
+        int64_t sum = 0;
+        for (size_t c = 0; c < cols; c++) {
+            sum += (int64_t)mat[r * cols + c] * (int64_t)vec[c];
+        }
+        out[r] = (fixed_t)(sum >> 16);
+#endif
     }
 }

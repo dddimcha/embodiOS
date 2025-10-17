@@ -93,6 +93,17 @@ ifeq ($(ARCH),aarch64)
 endif
 
 # Source files
+# Architecture-specific AI SIMD sources
+ifeq ($(ARCH),aarch64)
+    # ARM NEON SIMD optimization files
+    AI_SIMD_SOURCES = \
+        ai/simd_ops.c \
+        ai/quantized_matmul_simd.c
+else
+    # x86_64 - no SIMD for now (scalar fallback)
+    AI_SIMD_SOURCES =
+endif
+
 KERNEL_C_SOURCES = \
     core/kernel.c \
     core/console.c \
@@ -113,10 +124,9 @@ KERNEL_C_SOURCES = \
     ai/quantized_inference.c \
     ai/tinyllama_integer_inference.c \
     ai/tinystories_inference.c \
-    ai/simd_ops.c \
+    $(AI_SIMD_SOURCES) \
     ai/kv_cache.c \
     ai/memory_opt.c \
-    ai/quantized_matmul_simd.c \
     lib/string.c \
     lib/stdlib.c
 
@@ -206,13 +216,19 @@ ifneq ($(BUILD_OS),Darwin)
 core/stubs.o: core/stubs.c
 	$(CC) $(filter-out -mgeneral-regs-only,$(CFLAGS)) -c $< -o $@
 
-# SIMD files need vector register support
+# ARM NEON SIMD files need vector register support (only compiled on ARM64)
 ai/simd_ops.o: ai/simd_ops.c
 	$(CC) $(filter-out -mgeneral-regs-only,$(CFLAGS)) -c $< -o $@
 
 ai/quantized_matmul_simd.o: ai/quantized_matmul_simd.c
 	$(CC) $(filter-out -mgeneral-regs-only,$(CFLAGS)) -c $< -o $@
 endif
+endif
+
+# x86_64 needs SSE for FP returns
+ifeq ($(ARCH),x86_64)
+core/stubs.o: core/stubs.c
+	$(CC) $(filter-out -mno-sse -mno-sse2,$(CFLAGS)) -c $< -o $@
 endif
 
 # Clean

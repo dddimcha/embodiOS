@@ -15,6 +15,11 @@ static inline uint16_t vga_entry(unsigned char uc, uint8_t color)
     return (uint16_t)uc | (uint16_t)color << 8;
 }
 
+void vga_init(void)
+{
+    vga_clear();
+}
+
 void vga_clear(void)
 {
     for (size_t y = 0; y < VGA_HEIGHT; y++) {
@@ -72,17 +77,4 @@ void vga_write(const char* data, size_t size)
     }
 }
 
-void console_init(void)
-{
-    vga_clear();
-}
-
-void console_putchar(char c)
-{
-    vga_putchar(c);
-}
-
-void console_write(const char* str, size_t len)
-{
-    vga_write(str, len);
-}
+/* Console API is implemented in core/console.c which calls vga_* functions */

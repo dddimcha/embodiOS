@@ -148,6 +148,11 @@ void idt_init(void)
     console_printf("IDT initialized\n");
 }
 
+void arch_interrupt_init(void)
+{
+    idt_init();
+}
+
 void interrupt_handler(void* regs)
 {
     (void)regs;
