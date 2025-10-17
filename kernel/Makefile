@@ -199,6 +199,22 @@ embodios.bin: embodios.elf
 %.o: %.S
 	$(AS) $(ASFLAGS) $< -o $@
 
+# Special rules for files needing FP/SIMD support
+ifeq ($(ARCH),aarch64)
+ifneq ($(BUILD_OS),Darwin)
+# stubs.c needs FP for sqrtf/expf
+core/stubs.o: core/stubs.c
+	$(CC) $(filter-out -mgeneral-regs-only,$(CFLAGS)) -c $< -o $@
+
+# SIMD files need vector register support
+ai/simd_ops.o: ai/simd_ops.c
+	$(CC) $(filter-out -mgeneral-regs-only,$(CFLAGS)) -c $< -o $@
+
+ai/quantized_matmul_simd.o: ai/quantized_matmul_simd.c
+	$(CC) $(filter-out -mgeneral-regs-only,$(CFLAGS)) -c $< -o $@
+endif
+endif
+
 # Clean
 clean:
 	rm -f $(ALL_OBJS) embodios.elf embodios.bin

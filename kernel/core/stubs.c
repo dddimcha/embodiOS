@@ -132,11 +132,7 @@ int real_tinyllama_inference(const char* prompt, char* response, size_t max_resp
 }
 
 /* Basic math function stubs for TinyStories (simplified implementations) */
-
-#ifdef __aarch64__
-#pragma GCC push_options
-#pragma GCC target("arch=armv8-a+fp+simd")
-#endif
+/* NOTE: This file is compiled without -mgeneral-regs-only on ARM64 to allow FP */
 
 /* Simple square root using Newton's method */
 float sqrtf(float x)
@@ -171,7 +167,3 @@ float expf(float x)
 
     return result;
 }
-
-#ifdef __aarch64__
-#pragma GCC pop_options
-#endif
