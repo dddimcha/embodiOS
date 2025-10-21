@@ -81,12 +81,36 @@ void kernel_main(void)
     /* Initialize AI runtime */
     console_printf("Initializing AI runtime...\n");
     model_runtime_init();
-    
+
+    /* Try loading embedded GGUF model first */
+#if 0
+    /* Temporarily disabled - model embedding not configured */
+    extern const uint8_t _binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_start[];
+    extern const uint8_t _binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_end[];
+    extern int gguf_integer_load(void* data, size_t size);
+
+    size_t gguf_size = (size_t)(_binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_end -
+                                 _binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_start);
+    if (gguf_size > 0) {
+        console_printf("Loading GGUF model (%zu MB)...\n", gguf_size / (1024*1024));
+
+        if (gguf_integer_load((void*)_binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_start, gguf_size) == 0) {
+            console_printf("GGUF model loaded successfully!\n");
+        } else {
+            console_printf("Failed to load GGUF model\n");
+        }
+    } else {
+        console_printf("No embedded GGUF model found\n");
+    }
+#else
+    console_printf("GGUF model embedding not configured\n");
+#endif
+
     /* Interrupt handling */
     console_printf("Initializing interrupts...\n");
     arch_interrupt_init();
-    
-    /* Load AI model if embedded */
+
+    /* Load AI model if embedded (EMBODIOS format) */
     size_t model_size = (uintptr_t)_model_weights_end - (uintptr_t)_model_weights_start;
     if (model_size > 0) {
         console_printf("Loading AI model (%zu bytes)...\n", model_size);
@@ -97,8 +121,6 @@ void kernel_main(void)
         } else {
             console_printf("Failed to load AI model\n");
         }
-    } else {
-        console_printf("No embedded AI model found\n");
     }
     
     /* Initialize command processor */
