@@ -60,7 +60,7 @@ ifeq ($(ARCH),x86_64)
     # Check if we're on Linux or macOS
     UNAME_S := $(shell uname -s)
     ifeq ($(UNAME_S),Linux)
-        ASFLAGS = --64
+        ASFLAGS = -m64
         LDFLAGS = -m elf_x86_64
     else
         # macOS flags
@@ -197,7 +197,7 @@ embodios.bin: embodios.elf
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 %.o: %.S
-	$(AS) $(ASFLAGS) $< -o $@
+	$(CC) $(ASFLAGS) -c $< -o $@
 
 # Clean
 clean:

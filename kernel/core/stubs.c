@@ -132,8 +132,12 @@ int real_tinyllama_inference(const char* prompt, char* response, size_t max_resp
 }
 
 /* Basic math function stubs for TinyStories (simplified implementations) */
+/* NOTE: Floating-point math functions are disabled because kernel is built with
+ * -mno-sse -mno-sse2 flags. The AI inference uses integer-only operations instead.
+ * If floating-point is needed in the future, compile these separately or use soft-float.
+ */
 
-/* Simple square root using Newton's method */
+/* Disabled due to SSE incompatibility with kernel flags
 float sqrtf(float x)
 {
     if (x <= 0.0f) return 0.0f;
@@ -145,14 +149,11 @@ float sqrtf(float x)
     return guess;
 }
 
-/* Simple exponential function using Taylor series (limited precision) */
 float expf(float x)
 {
-    /* Clamp to prevent overflow */
-    if (x > 10.0f) return 22026.0f;  /* e^10 */
-    if (x < -10.0f) return 0.000045f; /* e^-10 */
+    if (x > 10.0f) return 22026.0f;
+    if (x < -10.0f) return 0.000045f;
 
-    /* Taylor series: e^x = 1 + x + x^2/2! + x^3/3! + ... */
     float result = 1.0f;
     float term = 1.0f;
 
@@ -160,9 +161,9 @@ float expf(float x)
         term *= x / (float)i;
         result += term;
 
-        /* Stop if term becomes very small */
         if (term < 0.0001f && term > -0.0001f) break;
     }
 
     return result;
 }
+*/

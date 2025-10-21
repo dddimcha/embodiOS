@@ -5,22 +5,19 @@
 
 #include <embodios/types.h>
 
-#ifdef __aarch64__
-#include <arm_neon.h>
-#endif
-
 #define QK_K 256
 #define FIXED_SHIFT 16
 
-/* Q4_K block structure */
+#ifdef __aarch64__
+#include <arm_neon.h>
+
+/* Q4_K block structure - ARM version with float16_t */
 struct block_q4_k {
     float16_t d;           /* Delta (scale) */
     float16_t dmin;        /* Min delta */
     uint8_t scales[12];    /* Quantized scales */
     uint8_t qs[QK_K/2];    /* 4-bit quantized values */
 } __attribute__((packed));
-
-#ifdef __aarch64__
 /* SIMD-optimized Q4_K matrix-vector multiply */
 void q4_k_matvec_neon(const void* weight_data, const fixed_t* input,
                       fixed_t* output, size_t rows, size_t cols) {
@@ -88,7 +85,16 @@ void q4_k_matvec_neon(const void* weight_data, const fixed_t* input,
     }
 }
 #else
-/* Scalar fallback */
+/* Scalar fallback for non-ARM platforms */
+
+/* Q4_K block structure - generic version using uint16_t instead of float16_t */
+struct block_q4_k {
+    uint16_t d;            /* Delta (scale) as uint16 */
+    uint16_t dmin;         /* Min delta as uint16 */
+    uint8_t scales[12];    /* Quantized scales */
+    uint8_t qs[QK_K/2];    /* 4-bit quantized values */
+} __attribute__((packed));
+
 void q4_k_matvec_neon(const void* weight_data, const fixed_t* input,
                       fixed_t* output, size_t rows, size_t cols) {
     const struct block_q4_k* blocks = (const struct block_q4_k*)weight_data;
@@ -116,4 +122,4 @@ void q4_k_matvec_neon(const void* weight_data, const fixed_t* input,
         output[row] = (fixed_t)(sum >> FIXED_SHIFT);
     }
 }
-#endif
+#endif /* __aarch64__ */

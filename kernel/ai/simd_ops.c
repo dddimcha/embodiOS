@@ -4,6 +4,8 @@
  */
 
 #include <embodios/types.h>
+
+#ifdef __aarch64__
 #include <arm_neon.h>
 
 /* Vector dot product using NEON (4x faster than scalar) */
@@ -131,3 +133,68 @@ void elem_add_neon(fixed_t* out, const fixed_t* a, const fixed_t* b, size_t n) {
         out[i] = a[i] + b[i];
     }
 }
+
+#else /* !__aarch64__ */
+
+/* Fallback scalar implementations for non-ARM platforms */
+
+fixed_t vec_dot_neon(const fixed_t* a, const fixed_t* b, size_t n) {
+    int64_t sum = 0;
+    for (size_t i = 0; i < n; i++) {
+        sum += (int64_t)a[i] * (int64_t)b[i];
+    }
+    return (fixed_t)(sum >> 16);
+}
+
+void matvec_neon(const fixed_t* mat, const fixed_t* vec, fixed_t* out,
+                 size_t rows, size_t cols) {
+    for (size_t r = 0; r < rows; r++) {
+        out[r] = vec_dot_neon(&mat[r * cols], vec, cols);
+    }
+}
+
+void rms_norm_neon(fixed_t* out, const fixed_t* x, const fixed_t* weight, size_t size) {
+    int64_t sum_sq = 0;
+    for (size_t i = 0; i < size; i++) {
+        sum_sq += ((int64_t)x[i] * (int64_t)x[i]) >> 16;
+    }
+    fixed_t rms = (fixed_t)(sum_sq / size);
+
+    for (size_t i = 0; i < size; i++) {
+        int64_t normalized = ((int64_t)x[i] << 16) / (rms + (1 << 10));
+        out[i] = ((normalized * weight[i]) >> 16);
+    }
+}
+
+void softmax_neon(fixed_t* x, size_t size) {
+    fixed_t max_val = x[0];
+    for (size_t i = 1; i < size; i++) {
+        if (x[i] > max_val) max_val = x[i];
+    }
+
+    int64_t sum = 0;
+    for (size_t i = 0; i < size; i++) {
+        fixed_t shifted = x[i] - max_val;
+        fixed_t exp_val = (1 << 16) + shifted + ((shifted * shifted) >> 17);
+        x[i] = exp_val;
+        sum += exp_val;
+    }
+
+    for (size_t i = 0; i < size; i++) {
+        x[i] = (fixed_t)(((int64_t)x[i] << 16) / sum);
+    }
+}
+
+void elem_mul_neon(fixed_t* out, const fixed_t* a, const fixed_t* b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        out[i] = (fixed_t)(((int64_t)a[i] * (int64_t)b[i]) >> 16);
+    }
+}
+
+void elem_add_neon(fixed_t* out, const fixed_t* a, const fixed_t* b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        out[i] = a[i] + b[i];
+    }
+}
+
+#endif /* __aarch64__ */
