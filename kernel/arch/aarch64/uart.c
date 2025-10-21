@@ -16,6 +16,7 @@
 /* Flag register bits */
 #define UART_FR_TXFF    (1 << 5)  /* Transmit FIFO full */
 #define UART_FR_RXFE    (1 << 4)  /* Receive FIFO empty */
+#define UART_FR_BUSY    (1 << 3)  /* UART busy transmitting */
 
 /* Control register bits */
 #define UART_CR_UARTEN  (1 << 0)  /* UART enable */
@@ -82,9 +83,17 @@ char uart_getchar(void)
     while (mmio_read32(UART_FR) & UART_FR_RXFE) {
         __asm__ volatile("nop");
     }
-    
+
     /* Read character */
     return (char)(mmio_read32(UART_DR) & 0xFF);
+}
+
+void uart_flush(void)
+{
+    /* Wait for TX FIFO to be empty */
+    while (mmio_read32(UART_FR) & UART_FR_BUSY) {
+        __asm__ volatile("nop");
+    }
 }
 
 /* Simple string output for early boot */

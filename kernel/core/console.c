@@ -7,10 +7,16 @@
 #include <arch/vga.h>
 static void arch_console_init(void) { vga_init(); }
 static void arch_console_putchar(char c) { vga_putchar(c); }
+static int arch_console_getchar(void) { return -1; /* TODO: VGA keyboard input */ }
+static void arch_console_flush(void) { /* No-op for VGA */ }
 #elif defined(__aarch64__)
 #include <arch/uart.h>
+extern char uart_getchar(void);
+extern void uart_flush(void);
 static void arch_console_init(void) { uart_init(); }
 static void arch_console_putchar(char c) { uart_putchar(c); }
+static int arch_console_getchar(void) { return (int)uart_getchar(); }
+static void arch_console_flush(void) { uart_flush(); }
 #endif
 
 /* Console state */
@@ -125,20 +131,29 @@ void console_printf(const char* fmt, ...)
     __builtin_va_end(args);
 }
 
+void console_flush(void)
+{
+    if (!console_state.initialized) return;
+    arch_console_flush();
+}
+
 size_t console_readline(char* buffer, size_t max_len)
 {
     size_t pos = 0;
-    
+
     if (!buffer || max_len == 0) return 0;
-    
+
+    /* Flush any pending output before waiting for input */
+    console_flush();
+
     while (pos < max_len - 1) {
         int c = console_getchar();
-        
+
         if (c == -1) {
             /* No input available, wait or return */
             continue;
         }
-        
+
         if (c == '\n' || c == '\r') {
             console_putchar('\n');
             break;
@@ -154,15 +169,15 @@ size_t console_readline(char* buffer, size_t max_len)
             console_putchar((char)c);
         }
     }
-    
+
     buffer[pos] = '\0';
     return pos;
 }
 
 int console_getchar(void)
 {
-    /* TODO: Implement based on architecture */
-    return -1;
+    if (!console_state.initialized) return -1;
+    return arch_console_getchar();
 }
 
 void console_clear(void)

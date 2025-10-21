@@ -9,35 +9,9 @@
 #include "embodios/console.h"
 #include "embodios/mm.h"
 #include "embodios/model.h"
+#include "embodios/tvm.h"
 
-/* TVM Runtime Data Structures */
-
-/* Tensor descriptor */
-typedef struct {
-    void* data;
-    int64_t* shape;
-    int ndim;
-    int dtype;  /* 0=float32, 1=int32, 2=int8, etc */
-    int64_t* strides;
-    uint64_t byte_offset;
-} TVMTensor;
-
-/* Function handle */
-typedef struct {
-    const char* name;
-    void (*func_ptr)(TVMTensor** args, int* type_codes, int num_args, TVMTensor* ret);
-    int num_inputs;
-    int num_outputs;
-} TVMFunction;
-
-/* Module containing compiled functions */
-typedef struct {
-    const char* name;
-    TVMFunction* functions;
-    int num_functions;
-    void* module_data;  /* Compiled code/data */
-    size_t module_size;
-} TVMModule;
+/* TVM Runtime Data Structures are defined in tvm.h */
 
 /* Global runtime state */
 static struct {
@@ -53,10 +27,10 @@ static struct {
 };
 
 /* Initialize TVM runtime */
-void tvm_runtime_init(void)
+int tvm_runtime_init(void)
 {
     if (tvm_runtime.initialized) {
-        return;
+        return 0;
     }
     
     /* Allocate default workspace (16MB) */
@@ -65,12 +39,13 @@ void tvm_runtime_init(void)
     
     if (!tvm_runtime.workspace) {
         console_printf("TVM Runtime: Failed to allocate workspace\n");
-        return;
+        return -1;
     }
     
     tvm_runtime.initialized = true;
     console_printf("TVM Runtime: Initialized with %zu MB workspace\n", 
                    tvm_runtime.workspace_size / (1024 * 1024));
+    return 0;
 }
 
 /* Create a tensor */
@@ -223,4 +198,10 @@ void tvm_runtime_stats(void)
         console_printf("  Module name: %s\n", tvm_runtime.loaded_module->name);
         console_printf("  Functions: %d\n", tvm_runtime.loaded_module->num_functions);
     }
+}
+
+/* Get runtime instance */
+TVMRuntime* tvm_get_runtime(void)
+{
+    return (TVMRuntime*)&tvm_runtime;
 }

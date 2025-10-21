@@ -16,6 +16,7 @@ int console_getchar(void);
 size_t console_readline(char* buffer, size_t max_len);
 
 /* Console control */
+void console_flush(void);
 void console_clear(void);
 void console_set_color(uint8_t fg, uint8_t bg);
 

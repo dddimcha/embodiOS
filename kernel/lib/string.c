@@ -197,3 +197,22 @@ char* strrchr(const char* s, int c)
     if (c == 0) return (char*)s;
     return (char*)last;
 }
+
+char* strstr(const char* haystack, const char* needle)
+{
+    if (!*needle) return (char*)haystack;
+
+    for (; *haystack; haystack++) {
+        const char* h = haystack;
+        const char* n = needle;
+
+        while (*h && *n && (*h == *n)) {
+            h++;
+            n++;
+        }
+
+        if (!*n) return (char*)haystack;
+    }
+
+    return NULL;
+}

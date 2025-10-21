@@ -20,6 +20,9 @@ struct embodios_model {
     size_t memory_required;     /* Required workspace memory */
     uint32_t capabilities;      /* Bitmask of MODEL_CAP_* */
     uint32_t tokenizer_type;    /* 0=none, 1=ascii, 2=bpe, etc */
+    void* data;                 /* Raw model data */
+    size_t size;                /* Total size */
+    void* tensor_data;          /* Tensor data start */
     uint32_t reserved[8];       /* Reserved for future use */
 };
 
@@ -44,5 +47,15 @@ void tensor_fill(struct tensor* t, float value);
 /* Natural language processing */
 int tokenize(const char* text, int* tokens, size_t max_tokens);
 char* detokenize(const int* tokens, size_t count);
+
+/* Additional model functions */
+struct embodios_model* get_current_model(void);
+int model_inference(const int* input_tokens, int num_tokens,
+                   int* output_tokens, int max_output);
+
+/* EMBODIOS format functions */
+int embodios_model_validate(const void* data, size_t size);
+struct embodios_model* embodios_model_prepare(const void* data, size_t size);
+void* embodios_model_create_test(size_t* out_size);
 
 #endif /* EMBODIOS_MODEL_H */
