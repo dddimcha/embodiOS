@@ -1,0 +1,147 @@
+name: Model Inference Testing
+
+on:
+  push:
+    branches: [ main, 'feat/**' ]
+    paths:
+      - 'src/embodi/**'
+      - 'kernel/ai/**'
+      - 'tests/**'
+      - 'models/**'
+      - '.github/workflows/model-inference-test.yml'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  test-inference:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install llama-cpp-python
+        pip install -e .
+
+    - name: Download test model (if not exists)
+      run: |
+        mkdir -p models/tinyllama
+        # Check if model exists in repo
+        if [ ! -f "models/tinyllama/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf" ]; then
+          echo "Model not in repo, would need to download"
+          echo "Skipping actual inference test (model too large for CI)"
+        fi
+
+    - name: Test model inference (smoke test)
+      run: |
+        # Run smoke tests that don't require the full model
+        python -c "
+import sys
+try:
+    from llama_cpp import Llama
+    print('✓ llama-cpp-python installed successfully')
+except ImportError as e:
+    print(f'✗ Failed to import llama-cpp-python: {e}')
+    sys.exit(1)
+
+# Test EMBODIOS imports
+try:
+    from embodi import __version__
+    print(f'✓ embodi {__version__} imported successfully')
+except ImportError as e:
+    print(f'✗ Failed to import embodi: {e}')
+    sys.exit(1)
+
+print('✓ All inference dependencies available')
+        "
+
+    - name: Run inference comparison tests (if model available)
+      run: |
+        if [ -f "models/tinyllama/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf" ]; then
+          echo "Running full inference comparison test"
+          python test_model_comparison.py
+        else
+          echo "Model not available, skipping full test"
+          echo "To test locally: embodi pull TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        fi
+
+    - name: Verify kernel build supports inference
+      run: |
+        cd kernel
+
+        # Check that required AI source files exist
+        echo "Verifying AI inference implementation files..."
+        test -f ai/quantized_inference.c || (echo "Missing: quantized_inference.c" && exit 1)
+        test -f ai/simd_ops.c || (echo "Missing: simd_ops.c" && exit 1)
+        test -f ai/gguf_integer_loader.c || (echo "Missing: gguf_integer_loader.c" && exit 1)
+        test -f ai/tinyllama_integer_inference.c || (echo "Missing: tinyllama_integer_inference.c" && exit 1)
+
+        echo "✓ All required AI inference files present"
+
+    - name: Test kernel inference engine builds
+      run: |
+        cd kernel
+
+        # Install build dependencies
+        sudo apt-get update -qq
+        sudo apt-get install -y build-essential nasm gcc-aarch64-linux-gnu
+
+        # Test x86_64 build
+        echo "Building kernel with AI inference (x86_64)..."
+        make clean
+        make ARCH=x86_64 CC=gcc 2>&1 | tee build_x86.log
+
+        if [ -f embodios.elf ]; then
+          echo "✓ x86_64 kernel with AI inference built successfully"
+          size embodios.elf
+        else
+          echo "✗ x86_64 kernel build failed"
+          cat build_x86.log
+          exit 1
+        fi
+
+        # Test ARM64 build
+        echo "Building kernel with AI inference (ARM64)..."
+        make clean
+        make ARCH=aarch64 CC=aarch64-linux-gnu-gcc AS=aarch64-linux-gnu-as LD=aarch64-linux-gnu-ld OBJCOPY=aarch64-linux-gnu-objcopy 2>&1 | tee build_arm64.log
+
+        if [ -f embodios.elf ]; then
+          echo "✓ ARM64 kernel with AI inference built successfully"
+          aarch64-linux-gnu-size embodios.elf
+        else
+          echo "✗ ARM64 kernel build failed"
+          cat build_arm64.log
+          exit 1
+        fi
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-with-ai
+        path: |
+          kernel/embodios.elf
+          kernel/embodios.bin
+
+    - name: Test summary
+      run: |
+        echo "================================"
+        echo "Model Inference Test Summary"
+        echo "================================"
+        echo "✓ llama-cpp-python dependencies OK"
+        echo "✓ embodi package imports OK"
+        echo "✓ Kernel AI inference files present"
+        echo "✓ Kernel builds with AI inference (x86_64)"
+        echo "✓ Kernel builds with AI inference (ARM64)"
+        echo ""
+        echo "Note: Full model inference test requires TinyLlama model"
+        echo "      Run locally: python test_model_comparison.py"
