@@ -41,11 +41,6 @@ CFLAGS += -I llama_cpp/include -I llama_cpp/ggml
 # Allow compiler builtin headers for GGML (needs stdbool.h, stdint.h, etc.)
 CFLAGS += -isystem $(shell $(CC) -print-file-name=include)
 
-# ARM NEON optimizations
-ifeq ($(ARCH),aarch64)
-    CFLAGS += -march=armv8-a+simd -mtune=cortex-a57 -ffast-math
-endif
-
 # C++ flags for llama.cpp - needs standard headers but not stdlib
 # Start from scratch instead of inheriting CFLAGS to allow standard headers
 CXXFLAGS = -ffreestanding -nostdlib -fno-builtin -fno-stack-protector
@@ -78,15 +73,15 @@ ifeq ($(ARCH),aarch64)
         ASFLAGS = -march=armv8-a
         LDFLAGS = -m aarch64elf
     else ifeq ($(BUILD_OS),Darwin)
-        # macOS ARM64 flags
-        CFLAGS += -target arm64-apple-macos11 -arch arm64
-        CXXFLAGS += -target arm64-apple-macos11 -arch arm64
+        # macOS ARM64 flags with SIMD support
+        CFLAGS += -target arm64-apple-macos11 -arch arm64 -march=armv8-a+simd
+        CXXFLAGS += -target arm64-apple-macos11 -arch arm64 -march=armv8-a+simd
         ASFLAGS = -arch arm64
         LDFLAGS = -arch arm64 -static -e _start
     else
-        # Linux ARM64 flags - no FP/SIMD for soft-float compatibility
-        CFLAGS += -march=armv8-a -mgeneral-regs-only -mstrict-align
-        CXXFLAGS += -march=armv8-a -mgeneral-regs-only -mstrict-align
+        # Linux ARM64 cross-compile flags with SIMD support
+        CFLAGS += -march=armv8-a+simd -mtune=cortex-a57
+        CXXFLAGS += -march=armv8-a+simd -mtune=cortex-a57
         ASFLAGS = -march=armv8-a
         LDFLAGS = -m aarch64elf
     endif
