@@ -122,30 +122,43 @@ jobs:
 
         # Create models directory in parent
         mkdir -p ../models
-
-        # Download model using python -m to ensure it's in PATH
         cd ../models
-        python -m huggingface_hub.cli.download roneneldan/TinyStories --local-dir . --include "*15M.bin" || {
-          echo "Error: Failed to download model from Hugging Face"
-          exit 1
-        }
 
-        # Rename if needed (Hugging Face might use different names)
-        if [ -f "stories15M.bin" ]; then
-          mv stories15M.bin tinystories-15m.bin
-          echo "Renamed stories15M.bin to tinystories-15m.bin"
-        fi
+        # Download using Python API (more reliable than CLI)
+        python << 'PYEOF'
+import sys
+from huggingface_hub import hf_hub_download
+import os
 
-        # Verify the model file exists
-        if [ ! -f "tinystories-15m.bin" ]; then
-          echo "Error: Model file not found after download!"
-          echo "Contents of models directory:"
-          ls -lah
-          exit 1
-        fi
+try:
+    print("Downloading TinyStories-15M model from Hugging Face...")
 
-        echo "✅ Model downloaded successfully:"
-        ls -lh tinystories-15m.bin
+    # Download the model file
+    downloaded_path = hf_hub_download(
+        repo_id="roneneldan/TinyStories",
+        filename="stories15M.bin",
+        local_dir=".",
+        local_dir_use_symlinks=False
+    )
+
+    print(f"Downloaded to: {downloaded_path}")
+
+    # Rename to expected name
+    if os.path.exists("stories15M.bin"):
+        os.rename("stories15M.bin", "tinystories-15m.bin")
+        print("Renamed stories15M.bin -> tinystories-15m.bin")
+
+    if os.path.exists("tinystories-15m.bin"):
+        size_mb = os.path.getsize("tinystories-15m.bin") / (1024 * 1024)
+        print(f"✅ Model file ready: tinystories-15m.bin ({size_mb:.1f} MB)")
+    else:
+        print("❌ Error: Model file not found after download!")
+        sys.exit(1)
+
+except Exception as e:
+    print(f"❌ Error downloading model: {e}")
+    sys.exit(1)
+PYEOF
 
     - name: Build kernel
       working-directory: kernel
