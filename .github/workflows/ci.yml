@@ -118,16 +118,34 @@ jobs:
     - name: Download TinyStories model from Hugging Face
       run: |
         echo "Downloading TinyStories-15M model..."
-        pip install huggingface-hub
+        python -m pip install --upgrade huggingface-hub
+
+        # Create models directory in parent
         mkdir -p ../models
+
+        # Download model using python -m to ensure it's in PATH
         cd ../models
-        huggingface-cli download roneneldan/TinyStories --local-dir . --include "*15M.bin"
-        # Rename if needed
-        if [ -f "stories15M.bin" ] && [ ! -f "tinystories-15m.bin" ]; then
+        python -m huggingface_hub.cli.download roneneldan/TinyStories --local-dir . --include "*15M.bin" || {
+          echo "Error: Failed to download model from Hugging Face"
+          exit 1
+        }
+
+        # Rename if needed (Hugging Face might use different names)
+        if [ -f "stories15M.bin" ]; then
           mv stories15M.bin tinystories-15m.bin
+          echo "Renamed stories15M.bin to tinystories-15m.bin"
         fi
+
+        # Verify the model file exists
+        if [ ! -f "tinystories-15m.bin" ]; then
+          echo "Error: Model file not found after download!"
+          echo "Contents of models directory:"
+          ls -lah
+          exit 1
+        fi
+
+        echo "✅ Model downloaded successfully:"
         ls -lh tinystories-15m.bin
-        echo "Model downloaded successfully"
 
     - name: Build kernel
       working-directory: kernel
