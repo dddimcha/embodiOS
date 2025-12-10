@@ -91,3 +91,6 @@ Desktop.ini
 .env
 .env.local
 secrets/
+
+# External dependencies (use submodules instead)
+llama.c/
