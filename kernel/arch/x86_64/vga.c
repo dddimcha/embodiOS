@@ -3,6 +3,26 @@
 #include <embodios/mm.h>
 #include "vga_io.h"
 
+/* Serial port output for QEMU -nographic mode */
+#define SERIAL_COM1 0x3F8
+
+static void serial_init(void)
+{
+    outb(SERIAL_COM1 + 1, 0x00);    /* Disable interrupts */
+    outb(SERIAL_COM1 + 3, 0x80);    /* Enable DLAB */
+    outb(SERIAL_COM1 + 0, 0x03);    /* 38400 baud */
+    outb(SERIAL_COM1 + 1, 0x00);
+    outb(SERIAL_COM1 + 3, 0x03);    /* 8N1 */
+    outb(SERIAL_COM1 + 2, 0xC7);    /* FIFO */
+    outb(SERIAL_COM1 + 4, 0x0B);    /* IRQs enabled, RTS/DSR set */
+}
+
+static void serial_putchar(char c)
+{
+    while ((inb(SERIAL_COM1 + 5) & 0x20) == 0);
+    outb(SERIAL_COM1, c);
+}
+
 /* VGA state */
 static struct {
     uint16_t* buffer;
@@ -51,9 +71,12 @@ static void scroll(void)
 /* Initialize VGA driver */
 void vga_init(void)
 {
+    /* Initialize serial for QEMU -nographic mode */
+    serial_init();
+
     /* Clear screen */
     vga_clear();
-    
+
     /* Enable cursor */
     outb(0x3D4, 0x0A);
     outb(0x3D5, 0x00);
@@ -64,6 +87,9 @@ void vga_init(void)
 /* Put character to screen */
 void vga_putchar(char c)
 {
+    /* Also output to serial for QEMU -nographic mode */
+    serial_putchar(c);
+
     switch (c) {
     case '\n':
         vga_state.cursor_x = 0;

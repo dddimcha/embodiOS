@@ -5,9 +5,27 @@
 /* Architecture-specific console drivers */
 #ifdef __x86_64__
 #include <arch/vga.h>
-static void arch_console_init(void) { vga_init(); }
-static void arch_console_putchar(char c) { vga_putchar(c); }
-static int arch_console_getchar(void) { return -1; /* TODO: VGA keyboard input */ }
+extern int keyboard_getchar_poll(void);
+extern void serial_init(void);
+extern int serial_getchar(void);
+extern void serial_putc(char c);
+
+static void arch_console_init(void) {
+    vga_init();
+    serial_init();  /* Also initialize serial for QEMU -nographic */
+}
+
+static void arch_console_putchar(char c) {
+    vga_putchar(c);  /* VGA handles serial output internally */
+}
+
+static int arch_console_getchar(void) {
+    /* Try serial first (for QEMU -nographic), then keyboard */
+    int c = serial_getchar();
+    if (c != -1) return c;
+    return keyboard_getchar_poll();
+}
+
 static void arch_console_flush(void) { /* No-op for VGA */ }
 #elif defined(__aarch64__)
 #include <arch/uart.h>
