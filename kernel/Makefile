@@ -35,7 +35,7 @@ endif
 
 # Common flags for all architectures
 CFLAGS = -ffreestanding -nostdlib -fno-builtin -fno-stack-protector
-CFLAGS += -fno-pic -Wall -Wextra -O3
+CFLAGS += -fno-pic -Wall -Wextra -O2
 CFLAGS += -I include -I include/arch/$(ARCH)
 CFLAGS += -I llama_cpp/include -I llama_cpp/ggml
 # Allow compiler builtin headers for GGML (needs stdbool.h, stdint.h, etc.)
@@ -51,7 +51,9 @@ CXXFLAGS += -I llama_cpp/include -I llama_cpp/ggml -I llama_cpp/src
 
 # Architecture-specific flags
 ifeq ($(ARCH),x86_64)
-    CFLAGS += -mno-red-zone -mcmodel=kernel -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
+    CFLAGS += -mno-red-zone -mcmodel=kernel
+    # NOTE: SSE2 enabled for AI inference SIMD and math functions (sqrtf, expf, etc.)
+    CFLAGS += -msse2 -mfpmath=sse
     # Check if we're on Linux or macOS
     UNAME_S := $(shell uname -s)
     ifeq ($(UNAME_S),Linux)
@@ -101,7 +103,6 @@ KERNEL_C_SOURCES = \
     mm/heap.c \
     ai/model_runtime.c \
     ai/tvm_runtime.c \
-    ai/embodios_format.c \
     ai/tokenizer.c \
     ai/gguf_integer_loader.c \
     ai/quantized_ops.c \
@@ -113,10 +114,10 @@ KERNEL_C_SOURCES = \
     ai/memory_opt.c \
     ai/quantized_matmul_simd.c \
     lib/string.c \
-    lib/stdlib.c
+    lib/stdlib.c \
+    lib/math.c
 
-# Temporarily disabled - contain floating-point code or depend on removed modules
-# lib/math.c - has floating-point functions (sqrtf, expf, logf, etc.)
+# Math library enabled (SSE enabled for AI inference)
 # ai/tvm_graph_executor.c \
 # ai/tvm_tinyllama.c \
 # ai/tensor_ops.c \
@@ -142,7 +143,9 @@ ifeq ($(ARCH),x86_64)
         $(ARCH_DIR)/vga.c \
         $(ARCH_DIR)/early_init.c \
         $(ARCH_DIR)/idt.c \
-        $(ARCH_DIR)/paging.c
+        $(ARCH_DIR)/paging.c \
+        $(ARCH_DIR)/keyboard.c \
+        $(ARCH_DIR)/serial.c
 endif
 
 ifeq ($(ARCH),aarch64)
@@ -165,9 +168,20 @@ ARCH_AS_OBJS = $(ARCH_AS_SOURCES:.S=.o)
 ARCH_C_OBJS = $(ARCH_C_SOURCES:.c=.o)
 
 # Model embedding support
-# NOTE: Model embedding disabled on macOS (objcopy not available)
-# TinyStories model would be embedded here in Linux build
-MODEL_OBJS =
+# TinyStories model path (relative to kernel directory)
+TINYSTORIES_MODEL = ../models/tinystories-15m.bin
+TINYSTORIES_TOKENIZER = ../models/tokenizer.bin
+
+# Enable model embedding for x86_64 builds on Linux
+ifeq ($(ARCH),x86_64)
+    ifneq ($(BUILD_OS),Darwin)
+        MODEL_OBJS = ai/tinystories_model.o ai/tinystories_tokenizer.o
+    else
+        MODEL_OBJS =
+    endif
+else
+    MODEL_OBJS =
+endif
 
 ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS) $(LLAMA_CPP_OBJS) $(GGML_C_OBJS) $(MODEL_OBJS)
 
@@ -201,11 +215,40 @@ clean:
 # Embed TinyStories model as binary object
 ai/tinystories_model.o: $(TINYSTORIES_MODEL)
 	@echo "Embedding TinyStories-15M model into kernel..."
+ifeq ($(ARCH),x86_64)
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+		--redefine-sym _binary____models_tinystories_15m_bin_start=_binary_tinystories_15m_bin_start \
+		--redefine-sym _binary____models_tinystories_15m_bin_end=_binary_tinystories_15m_bin_end \
+		--redefine-sym _binary____models_tinystories_15m_bin_size=_binary_tinystories_15m_bin_size \
+		$< $@
+else
 	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
-		--redefine-sym _binary___models_tinystories_15m_bin_start=_binary_tinystories_15m_bin_start \
-		--redefine-sym _binary___models_tinystories_15m_bin_end=_binary_tinystories_15m_bin_end \
+		--redefine-sym _binary____models_tinystories_15m_bin_start=_binary_tinystories_15m_bin_start \
+		--redefine-sym _binary____models_tinystories_15m_bin_end=_binary_tinystories_15m_bin_end \
+		--redefine-sym _binary____models_tinystories_15m_bin_size=_binary_tinystories_15m_bin_size \
 		$< $@
+endif
+
+# Embed tokenizer as binary object
+ai/tinystories_tokenizer.o: $(TINYSTORIES_TOKENIZER)
+	@echo "Embedding TinyStories tokenizer into kernel..."
+ifeq ($(ARCH),x86_64)
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+		--redefine-sym _binary____models_tokenizer_bin_start=_binary_tokenizer_bin_start \
+		--redefine-sym _binary____models_tokenizer_bin_end=_binary_tokenizer_bin_end \
+		--redefine-sym _binary____models_tokenizer_bin_size=_binary_tokenizer_bin_size \
+		$< $@
+else
+	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+		--redefine-sym _binary____models_tokenizer_bin_start=_binary_tokenizer_bin_start \
+		--redefine-sym _binary____models_tokenizer_bin_end=_binary_tokenizer_bin_end \
+		--redefine-sym _binary____models_tokenizer_bin_size=_binary_tokenizer_bin_size \
+		$< $@
+endif
 
 # ISO for x86_64
 ifeq ($(ARCH),x86_64)

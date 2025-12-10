@@ -27,37 +27,105 @@ multiboot2_header_end:
 _start:
     /* We're in 32-bit mode initially */
     .code32
-    
+
     /* Disable interrupts */
     cli
-    
+
+    /* Initialize serial port for early debug output */
+    mov $0x3F8+1, %dx
+    mov $0x00, %al
+    outb %al, %dx          /* Disable interrupts */
+    mov $0x3F8+3, %dx
+    mov $0x80, %al
+    outb %al, %dx          /* Enable DLAB */
+    mov $0x3F8+0, %dx
+    mov $0x03, %al
+    outb %al, %dx          /* 38400 baud lo */
+    mov $0x3F8+1, %dx
+    mov $0x00, %al
+    outb %al, %dx          /* 38400 baud hi */
+    mov $0x3F8+3, %dx
+    mov $0x03, %al
+    outb %al, %dx          /* 8N1 */
+    mov $0x3F8+2, %dx
+    mov $0xC7, %al
+    outb %al, %dx          /* FIFO */
+    mov $0x3F8+4, %dx
+    mov $0x0B, %al
+    outb %al, %dx          /* RTS/DSR set */
+
+    /* Output 'B' for Boot started */
+    mov $0x3F8+5, %dx
+.wait_serial1:
+    inb %dx, %al
+    test $0x20, %al
+    jz .wait_serial1
+    mov $0x3F8, %dx
+    mov $'B', %al
+    outb %al, %dx
+
     /* Save multiboot info */
     mov %eax, multiboot_magic
     mov %ebx, multiboot_info
-    
+
     /* Set up temporary stack */
     mov $boot_stack_top, %esp
-    
+
     /* Clear direction flag */
     cld
-    
+
     /* Check CPU features */
     call check_cpuid
     call check_long_mode
-    
+
+    /* Output '1' for checks done */
+    mov $0x3F8+5, %dx
+.wait_serial2:
+    inb %dx, %al
+    test $0x20, %al
+    jz .wait_serial2
+    mov $0x3F8, %dx
+    mov $'1', %al
+    outb %al, %dx
+
     /* Set up paging for 64-bit mode */
     call setup_page_tables
     call enable_paging
-    
+
+    /* Output '2' for paging done */
+    mov $0x3F8+5, %dx
+.wait_serial3:
+    inb %dx, %al
+    test $0x20, %al
+    jz .wait_serial3
+    mov $0x3F8, %dx
+    mov $'2', %al
+    outb %al, %dx
+
     /* Load GDT */
     lgdt gdt64_descriptor
-    
+
     /* Jump to 64-bit code */
     ljmp $0x08, $start64
 
 .code64
 .global start64
 start64:
+    /* Output '3' on serial immediately - we reached 64-bit! */
+    mov $0x3F8+5, %dx
+.wait_serial64_1:
+    inb %dx, %al
+    test $0x20, %al
+    jz .wait_serial64_1
+    mov $0x3F8, %dx
+    mov $'3', %al
+    outb %al, %dx
+
+    /* Print '64' to show we reached 64-bit mode */
+    mov $0xb8000, %rdi
+    movw $0x0f36, (%rdi)      /* '6' */
+    movw $0x0f34, 2(%rdi)     /* '4' */
+
     /* Reload segment registers */
     mov $0x10, %ax
     mov %ax, %ds
@@ -65,29 +133,62 @@ start64:
     mov %ax, %fs
     mov %ax, %gs
     mov %ax, %ss
-    
+
+    /* Print 'S' for segments loaded */
+    movw $0x0f53, 4(%rdi)
+
     /* Set up kernel stack */
     mov $kernel_stack_top, %rsp
-    
+
+    /* Output '4' - stack setup */
+    mov $0x3F8+5, %dx
+.wait_serial64_2:
+    inb %dx, %al
+    test $0x20, %al
+    jz .wait_serial64_2
+    mov $0x3F8, %dx
+    mov $'4', %al
+    outb %al, %dx
+
     /* Clear frame pointer */
     xor %rbp, %rbp
-    
+
+    /* Output '5' - before CPU features */
+    mov $0x3F8+5, %dx
+.wait_serial64_3:
+    inb %dx, %al
+    test $0x20, %al
+    jz .wait_serial64_3
+    mov $0x3F8, %dx
+    mov $'5', %al
+    outb %al, %dx
+
     /* Enable CPU features for AI workloads */
     call enable_cpu_features
-    
-    /* Jump to higher half */
-    mov $higher_half_start, %rax
-    jmp *%rax
 
-.section .text
-higher_half_start:
-    /* Reload stack pointer to higher half */
-    mov $kernel_stack_top, %rsp
-    /* Stack is already set up at physical address */
-    
-    /* Call kernel main */
+    /* Output '6' - before kernel_main */
+    mov $0x3F8+5, %dx
+.wait_serial64_4:
+    inb %dx, %al
+    test $0x20, %al
+    jz .wait_serial64_4
+    mov $0x3F8, %dx
+    mov $'6', %al
+    outb %al, %dx
+
+    /* Call kernel main (we're identity-mapped, no higher half needed) */
     call kernel_main
-    
+
+    /* Output 'X' - kernel_main returned (shouldn't happen) */
+    mov $0x3F8+5, %dx
+.wait_serial64_5:
+    inb %dx, %al
+    test $0x20, %al
+    jz .wait_serial64_5
+    mov $0x3F8, %dx
+    mov $'X', %al
+    outb %al, %dx
+
     /* Should not return */
     cli
 1:  hlt
@@ -138,32 +239,30 @@ no_long_mode:
 setup_page_tables:
     /* Clear page tables */
     mov $pml4_table, %edi
-    mov %edi, %cr3
     xor %eax, %eax
-    mov $4096*5, %ecx
+    mov $1024, %ecx  /* Clear 4KB (1024 dwords) for each table */
     rep stosl
-    mov %cr3, %edi
-    
+
+    mov $pdpt_table, %edi
+    mov $1024, %ecx
+    rep stosl
+
+    mov $pdt_table, %edi
+    mov $1024, %ecx
+    rep stosl
+
+    mov $pml4_table, %edi
+
     /* PML4[0] -> PDPT (identity map) */
     mov $pdpt_table, %eax
     or $0x03, %eax
     mov %eax, (%edi)
-    
-    /* PML4[511] -> PDPT (higher half) */
-    mov $pdpt_table, %eax
-    or $0x03, %eax
-    mov %eax, 511*8(%edi)
-    
+
     /* PDPT[0] -> PDT */
     mov $pdt_table, %eax
     or $0x03, %eax
     mov %eax, pdpt_table
-    
-    /* PDPT[510] -> PDT (for higher half) */
-    mov $pdt_table, %eax
-    or $0x03, %eax
-    mov %eax, pdpt_table + 510*8
-    
+
     /* Map first 1GB using 2MB pages */
     mov $pdt_table, %edi
     mov $0x83, %eax  /* Present + Writable + Huge */
@@ -173,7 +272,11 @@ setup_page_tables:
     add $0x200000, %eax
     add $8, %edi
     loop .map_pages
-    
+
+    /* Load page table address into CR3 */
+    mov $pml4_table, %eax
+    mov %eax, %cr3
+
     ret
 
 /* Enable paging and long mode */

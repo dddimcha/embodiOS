@@ -41,9 +41,31 @@ void process_command(const char* command)
         console_printf("  heap      - Show heap statistics\n");
         console_printf("  tasks     - List running tasks\n");
         console_printf("  model     - Show loaded model info\n");
+        console_printf("  ai <prompt> - Generate text with TinyStories AI\n");
         console_printf("  infer <text> - Run AI inference\n");
         console_printf("  tvm       - Show TVM runtime status\n");
         console_printf("  reboot    - Reboot the system\n");
+    } else if (strncmp(command, "ai ", 3) == 0) {
+        /* TinyStories interactive inference */
+        const char* prompt = command + 3;
+
+        extern int tinystories_infer(const char* prompt, char* output, size_t max_len);
+        extern bool tinystories_is_loaded(void);
+
+        if (!tinystories_is_loaded()) {
+            console_printf("ERROR: TinyStories model not loaded!\n");
+            return;
+        }
+
+        char output[512];
+        console_printf("\nGenerating text (this may take a while)...\n");
+        int result = tinystories_infer(prompt, output, sizeof(output));
+
+        if (result > 0) {
+            console_printf("\nGenerated: %s\n\n", output);
+        } else {
+            console_printf("ERROR: Inference failed\n");
+        }
     } else if (strcmp(command, "mem") == 0) {
         /* Show PMM stats */
         pmm_print_stats();

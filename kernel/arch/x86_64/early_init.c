@@ -154,12 +154,19 @@ void arch_early_init(void)
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
     cr0 |= (1 << 16);  /* WP bit */
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
-    
-    /* Enable SMEP if available */
-    uint64_t cr4;
-    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1 << 20);  /* SMEP bit */
-    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+
+    /* Check if SMEP is available before enabling */
+    /* CPUID.07H:EBX.SMEP[bit 7] indicates SMEP support */
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
+
+    if (ebx & (1 << 7)) {
+        /* SMEP is supported, enable it */
+        uint64_t cr4;
+        __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+        cr4 |= (1 << 20);  /* SMEP bit */
+        __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+    }
 #endif
 }
 

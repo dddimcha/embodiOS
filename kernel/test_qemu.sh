@@ -1,60 +1,20 @@
 #!/bin/bash
+# Test EMBODIOS in QEMU with timeout
 
-# QEMU test script for EMBODIOS kernel
+echo "Starting QEMU test..."
+echo "Press Ctrl+C or wait 15 seconds to exit"
+echo "=========================================="
 
-echo "=== EMBODIOS QEMU Testing ==="
+# Run QEMU in background
+qemu-system-x86_64 -cdrom embodios_uefi.iso -m 512M -serial stdio 2>&1 &
+QEMU_PID=$!
 
-# Check if QEMU is installed
-if ! command -v qemu-system-aarch64 &> /dev/null; then
-    echo "Error: qemu-system-aarch64 not found"
-    echo "Install with: brew install qemu"
-    exit 1
-fi
+# Wait 15 seconds
+sleep 15
 
-# Build kernel for ARM64
-echo "Building ARM64 kernel..."
-make clean
-make ARCH=aarch64 || exit 1
+# Kill QEMU
+kill -9 $QEMU_PID 2>/dev/null
 
-# Create a simple flat binary for testing
-echo "Creating test binary..."
-# For now, just use the object files
-ld -arch arm64 -o embodios_test.elf \
-    arch/aarch64/boot.o \
-    arch/aarch64/cpu.o \
-    arch/aarch64/uart.o \
-    arch/aarch64/early_init.o \
-    core/kernel.o \
-    core/console.o \
-    core/panic.o \
-    core/stubs.o \
-    core/interrupt.o \
-    core/task.o \
-    mm/pmm.o \
-    mm/vmm.o \
-    mm/slab.o \
-    mm/heap.o \
-    ai/model_runtime.o \
-    lib/string.o \
-    lib/stdlib.o \
-    -e _start \
-    -static || exit 1
-
-# Convert to raw binary
-objcopy -O binary embodios_test.elf embodios_test.bin || {
-    echo "Note: objcopy might not be available on macOS"
-    echo "Using dd to extract binary..."
-    dd if=embodios_test.elf of=embodios_test.bin bs=4096 skip=1 2>/dev/null
-}
-
-echo "Running in QEMU..."
-qemu-system-aarch64 \
-    -M virt \
-    -cpu cortex-a72 \
-    -m 256M \
-    -nographic \
-    -kernel embodios_test.elf \
-    -serial mon:stdio \
-    -append "console=ttyAMA0"
-
+echo ""
+echo "=========================================="
 echo "QEMU test completed"

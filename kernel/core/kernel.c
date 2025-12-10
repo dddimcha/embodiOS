@@ -54,9 +54,9 @@ void kernel_main(void)
     console_printf("Build: %s\n", kernel_build);
     console_printf("Kernel: %p - %p\n", _kernel_start, _kernel_end);
     
-    /* Clear BSS (should be done in boot code, but ensure it's clean) */
-    size_t bss_size = (uintptr_t)_bss_end - (uintptr_t)_bss_start;
-    memset(_bss_start, 0, bss_size);
+    /* Note: BSS is NOT cleared here because boot stack is in .bss and is in use.
+     * The multiboot loader should have already zeroed BSS.
+     * If needed, clear specific subsections before use. */
     
     /* CPU initialization */
     console_printf("Initializing CPU features...\n");
@@ -82,6 +82,10 @@ void kernel_main(void)
     console_printf("Initializing AI runtime...\n");
     model_runtime_init();
 
+    /* Load TinyStories-15M model for interactive use */
+    extern void tinystories_interactive_init(void);
+    tinystories_interactive_init();
+
     /* Try loading embedded GGUF model first */
 #if 0
     /* Temporarily disabled - model embedding not configured */
@@ -106,9 +110,9 @@ void kernel_main(void)
     console_printf("GGUF model embedding not configured\n");
 #endif
 
-    /* Interrupt handling */
-    console_printf("Initializing interrupts...\n");
-    arch_interrupt_init();
+    /* Interrupt handling - DISABLED for UEFI compatibility */
+    console_printf("Interrupts disabled for UEFI boot compatibility\n");
+    /* arch_interrupt_init(); */  /* Causes crash in UEFI mode */
 
     /* Load AI model if embedded (EMBODIOS format) */
     size_t model_size = (uintptr_t)_model_weights_end - (uintptr_t)_model_weights_start;
@@ -128,11 +132,11 @@ void kernel_main(void)
         console_printf("Initializing AI command processor...\n");
         command_processor_init(ai_model);
     }
-    
-    /* Enable interrupts */
-    arch_enable_interrupts();
-    
-    console_printf("\nEMBODIOS Ready.\n");
+
+    /* Enable interrupts - DISABLED for UEFI */
+    /* arch_enable_interrupts(); */
+
+    console_printf("\nEMBODIOS Ready (polling mode - no interrupts).\n");
     console_printf("Type 'help' for available commands.\n\n");
     
     /* Main kernel loop */

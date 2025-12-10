@@ -48,17 +48,31 @@ void idt_init(void)
     idtp.limit = sizeof(idt) - 1;
     idtp.base = (uint64_t)&idt;
 
-    /* Clear IDT */
-    memset(&idt, 0, sizeof(idt));
-
-    /* Set up exception handlers (0-31) */
-    for (int i = 0; i < 32; i++) {
-        idt_set_gate(i, (uint64_t)interrupt_stub_table[i], 0x08, 0x8E);
+    /* Clear IDT - use simple loop instead of memset to avoid potential issues */
+    for (int i = 0; i < 256; i++) {
+        idt[i].offset_low = 0;
+        idt[i].selector = 0;
+        idt[i].ist = 0;
+        idt[i].type_attr = 0;
+        idt[i].offset_mid = 0;
+        idt[i].offset_high = 0;
+        idt[i].zero = 0;
     }
 
-    /* Set up IRQ handlers (32-47) */
-    for (int i = 32; i < 48; i++) {
-        idt_set_gate(i, (uint64_t)interrupt_stub_table[i], 0x08, 0x8E);
+    /* Set up exception handlers (0-31) - check if stub table is valid */
+    if (interrupt_stub_table != NULL) {
+        for (int i = 0; i < 32; i++) {
+            if (interrupt_stub_table[i] != NULL) {
+                idt_set_gate(i, (uint64_t)interrupt_stub_table[i], 0x08, 0x8E);
+            }
+        }
+
+        /* Set up IRQ handlers (32-47) */
+        for (int i = 32; i < 48; i++) {
+            if (interrupt_stub_table[i] != NULL) {
+                idt_set_gate(i, (uint64_t)interrupt_stub_table[i], 0x08, 0x8E);
+            }
+        }
     }
 
     /* Load IDT */

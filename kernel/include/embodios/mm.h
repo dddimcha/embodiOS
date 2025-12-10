@@ -43,8 +43,10 @@ void* memset(void* s, int c, size_t n);
 void* memmove(void* dest, const void* src, size_t n);
 int memcmp(const void* s1, const void* s2, size_t n);
 
-/* Heap allocator (separate from slab) */
+/* Heap allocator (separate from slab) - for AI workloads */
 void heap_init(void);
+void* heap_alloc(size_t size);
+void heap_free(void* ptr);
 void heap_stats(void);
 
 /* PMM statistics */
