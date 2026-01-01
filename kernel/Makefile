@@ -120,6 +120,8 @@ KERNEL_C_SOURCES = \
     ai/kv_cache_benchmark.c \
     ai/model_loader.c \
     ai/transformer_full.c \
+    ai/transformer_inference.c \
+    ai/inference_test.c \
     ai/tensor_ops.c \
     lib/string.c \
     lib/stdlib.c \
