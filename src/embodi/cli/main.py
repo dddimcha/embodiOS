@@ -318,7 +318,7 @@ def bundle_create(ctx, model, output, target, arch, memory, features, compress):
     """Create bootable EMBODIOS bundle"""
     console.print(f"[bold blue]Creating {target} bundle for {model}[/bold blue]")
     
-    from embodi_installer.bundle.bundler import EMBODIOSBundler
+    from embodi.installer.bundle.bundler import EMBODIOSBundler
     
     bundler = EMBODIOSBundler()
     
@@ -356,7 +356,7 @@ def bundle_create(ctx, model, output, target, arch, memory, features, compress):
 @click.pass_context
 def bundle_write(ctx, bundle, device, verify):
     """Write bundle to USB device"""
-    from embodi_installer.bundle.bundler import EMBODIOSBundler
+    from embodi.installer.bundle.bundler import EMBODIOSBundler
     
     bundler = EMBODIOSBundler()
     

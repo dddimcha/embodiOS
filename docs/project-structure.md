@@ -8,35 +8,23 @@ EMBODIOS is organized into several key components that work together to create a
 
 ```
 embodios/
-├── src/embodi/             # Main source code
-│   ├── compiler/          # Python-to-Native compiler
+├── src/embodi/           # Main Python source code
 │   ├── core/             # Core OS components
 │   ├── builder/          # Container and image builders
 │   ├── cli/              # Command-line interface
 │   ├── runtime/          # Runtime environment
 │   ├── models/           # Model management
-│   └── demos/            # Demo applications
-├── docs/                  # Documentation
-├── tests/                 # Test suite
+│   └── installer/        # Bundle and ISO creation
+├── kernel/               # Bare-metal kernel (C/Assembly)
+├── docs/                 # Documentation
 ├── models/               # Model storage
 ├── scripts/              # Utility scripts
-└── embodi-installer/     # Installation tools
+└── examples/             # Example Modelfiles
 ```
 
 ## Key Components
 
-### 1. Compiler (`src/embodi/compiler/`)
-
-The Python-to-Native compiler transforms EMBODIOS Python code into bare-metal C/Assembly:
-
-- `embodios_transpiler.py` - Main transpiler for EMBODIOS-specific code
-- `model_compiler.py` - Compiles AI models to native code
-- `tvm_compiler.py` - TVM integration (with fallback)
-- `builder.py` - Orchestrates the compilation process
-- `native/` - Pre-written C components (boot.S, memory.c)
-- `cython_modules/` - Performance-critical operations
-
-### 2. Core OS (`src/embodi/core/`)
+### 1. Core OS (`src/embodi/core/`)
 
 The heart of EMBODIOS:
 
@@ -47,14 +35,14 @@ The heart of EMBODIOS:
 - `inference.py` - AI inference engine
 - `nl_processor.py` - Natural language processing
 
-### 3. CLI (`src/embodi/cli/`)
+### 2. CLI (`src/embodi/cli/`)
 
 Docker-like interface for EMBODIOS:
 
 - `main.py` - CLI entry point
 - `commands.py` - Command implementations (build, run, bundle)
 
-### 4. Builder (`src/embodi/builder/`)
+### 3. Builder (`src/embodi/builder/`)
 
 Container and image management:
 
@@ -62,7 +50,7 @@ Container and image management:
 - `modelfile.py` - Modelfile parser
 - `converter.py` - Model format conversion
 
-### 5. Runtime (`src/embodi/runtime/`)
+### 4. Runtime (`src/embodi/runtime/`)
 
 Runtime environment management:
 
@@ -70,39 +58,23 @@ Runtime environment management:
 - `container.py` - Container management
 - `image.py` - Image handling
 
-## Build Artifacts
+### 5. Installer (`src/embodi/installer/`)
 
-When you compile EMBODIOS, the following files are generated:
+Deployment tools:
 
-```
-output_dir/
-├── hal_gpio.c         # GPIO driver
-├── hal_i2c.c         # I2C driver
-├── hal_uart.c        # UART driver
-├── hal.h             # HAL header
-├── tokens.h          # Hardware tokens
-├── nl_processor.c    # NL processing
-├── kernel.c          # Main kernel
-├── boot.S            # Boot assembly
-├── weights.S         # Model weights
-├── Makefile          # Build config
-├── CMakeLists.txt    # CMake config
-└── link.ld           # Linker script
-```
+- `bundle/bundler.py` - Bundle creator for bare-metal deployment
+- `iso/create_iso.py` - ISO builder
+- `hardware/detect.py` - Hardware detection
 
-## Testing
+### 6. Kernel (`kernel/`)
 
-Tests are organized by component:
+Bare-metal kernel in C/Assembly:
 
-```
-tests/
-├── test_builder.py    # Builder tests
-├── test_cli.py       # CLI tests
-├── test_core.py      # Core OS tests
-├── test_runtime.py   # Runtime tests
-├── integration/      # Integration tests
-└── benchmarks/       # Performance tests
-```
+- `core/` - Kernel core (console, panic, interrupts)
+- `mm/` - Memory management (PMM, VMM, heap)
+- `ai/` - AI inference engine
+- `arch/x86_64/` - x86_64 architecture support
+- `include/` - Header files
 
 ## Documentation
 
@@ -111,19 +83,10 @@ docs/
 ├── getting-started.md      # Quick start guide
 ├── architecture.md         # System architecture
 ├── modelfile-reference.md  # Modelfile syntax
-├── hardware.md            # Hardware support
-├── api.md                 # API reference
+├── hardware.md             # Hardware support
+├── api.md                  # API reference
 ├── bare-metal-deployment.md # Deployment guide
 └── performance-benchmarks.md # Performance data
-```
-
-## Installation Tools
-
-```
-embodi-installer/
-├── bundle/bundler.py      # Bundle creator
-├── iso/create_iso.py     # ISO builder
-└── hardware/detect.py    # Hardware detection
 ```
 
 ## Models Directory
@@ -137,11 +100,10 @@ Models are stored here when downloaded or converted.
 
 ## Development Workflow
 
-1. **Python Development**: Work in `src/embodi/core/`
-2. **Compile to Native**: Use `src/embodi/compiler/`
-3. **Test**: Run tests in `tests/`
-4. **Build Image**: Use CLI `embodi build`
-5. **Deploy**: Create ISO with `embodi bundle`
+1. **Python Development**: Work in `src/embodi/`
+2. **Build Image**: Use CLI `embodi build`
+3. **Test**: Use CLI `embodi run`
+4. **Deploy**: Create ISO with `embodi bundle`
 
 ## Key Files
 
@@ -160,5 +122,3 @@ EMBODIOS follows a layered architecture:
 3. **Kernel Layer**: Core OS functionality
 4. **AI Layer**: Language model inference
 5. **Application Layer**: Natural language interface
-
-The compiler transforms Python implementations into native code at each layer, enabling bare-metal execution without Python runtime.
