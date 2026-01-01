@@ -147,6 +147,68 @@ void heap_free(void *ptr)
 }
 
 
+/* Allocate aligned memory from heap */
+void* heap_alloc_aligned(size_t size, size_t alignment)
+{
+    if (!heap_state.initialized) {
+        heap_init();
+    }
+
+    if (size == 0) return NULL;
+    if (alignment == 0) alignment = ALIGNMENT;
+
+    /* Alignment must be power of 2 */
+    if ((alignment & (alignment - 1)) != 0) {
+        return NULL;
+    }
+
+    /* Check for overflow in size calculation */
+    if (size > SIZE_MAX - alignment - sizeof(void*)) {
+        return NULL;
+    }
+
+    /* Always use over-allocation pattern for consistency with free_aligned
+     * This ensures heap_free_aligned always works correctly */
+    size_t total_size = size + alignment + sizeof(void*);
+    void* raw = heap_alloc(total_size);
+    if (!raw) return NULL;
+
+    /* Compute aligned address, leaving room to store original pointer */
+    uintptr_t raw_addr = (uintptr_t)raw;
+    uintptr_t aligned_addr = (raw_addr + sizeof(void*) + alignment - 1) & ~(alignment - 1);
+
+    /* Store original pointer just before aligned address */
+    void** stored_ptr = (void**)(aligned_addr - sizeof(void*));
+    *stored_ptr = raw;
+
+    return (void*)aligned_addr;
+}
+
+/* Free aligned memory */
+void heap_free_aligned(void* ptr)
+{
+    if (!ptr) return;
+
+    /* Validate ptr is within heap bounds with room for stored pointer */
+    if ((uintptr_t)ptr < (uintptr_t)heap_state.start + sizeof(void*) ||
+        (uintptr_t)ptr >= (uintptr_t)heap_state.end) {
+        console_printf("Heap: Invalid aligned free pointer 0x%p\n", ptr);
+        return;
+    }
+
+    /* Retrieve original pointer stored before aligned address */
+    void** stored_ptr = (void**)((uintptr_t)ptr - sizeof(void*));
+    void* raw = *stored_ptr;
+
+    /* Validate stored pointer is also within heap bounds */
+    if ((void*)raw < heap_state.start || (void*)raw >= heap_state.end) {
+        console_printf("Heap: Corrupted aligned pointer metadata at 0x%p\n", ptr);
+        return;
+    }
+
+    heap_free(raw);
+}
+
 /* Get heap statistics */
 void heap_stats(void)
 {
@@ -154,7 +216,7 @@ void heap_stats(void)
     console_printf("  Total: %zu MB\n", heap_state.total_size / (1024 * 1024));
     console_printf("  Used:  %zu KB\n", heap_state.used_size / 1024);
     console_printf("  Free:  %zu MB\n", (heap_state.total_size - heap_state.used_size) / (1024 * 1024));
-    
+
     /* Count free blocks */
     int free_blocks = 0;
     block_header_t *current = heap_state.free_list;

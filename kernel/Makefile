@@ -116,6 +116,8 @@ KERNEL_C_SOURCES = \
     ai/quantized_matmul_simd.c \
     ai/embeddings.c \
     ai/embedding_benchmark.c \
+    ai/kv_cache_enhanced.c \
+    ai/kv_cache_benchmark.c \
     ai/model_loader.c \
     ai/transformer_full.c \
     ai/tensor_ops.c \

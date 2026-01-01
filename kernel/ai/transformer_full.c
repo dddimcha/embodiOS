@@ -12,6 +12,7 @@
 #include "embodios/model.h"
 #include "embodios/gguf.h"
 #include "embodios/embeddings.h"
+#include "embodios/kv_cache_enhanced.h"
 
 /* Math functions */
 float sqrtf(float x);
@@ -145,87 +146,115 @@ static void multi_head_attention(
 {
     struct transformer_config* c = &s->config;
     struct transformer_weights* w = &s->weights;
-    
+
     int head_dim = c->n_embd / c->n_heads;
-    
+
     /* Compute Q, K, V projections */
     tensor_gemm(s->x, w->q_weight[layer], s->q, seq_len, c->n_embd, c->n_embd, 1.0f, 0.0f);
     tensor_gemm(s->x, w->k_weight[layer], s->k, seq_len, c->n_embd, c->n_embd, 1.0f, 0.0f);
     tensor_gemm(s->x, w->v_weight[layer], s->v, seq_len, c->n_embd, c->n_embd, 1.0f, 0.0f);
-    
+
+    /* Try to use enhanced KV cache if available */
+    kv_cache_t* enh_cache = kv_cache_get_global();
+    bool use_enhanced = (enh_cache && kv_cache_is_valid(enh_cache) &&
+                         (uint32_t)layer < enh_cache->config.n_layers);
+
     /* Store in KV cache */
-    for (int pos = 0; pos < seq_len; pos++) {
-        int cache_idx = s->cache_pos + pos;
-        if (cache_idx < c->max_seq_len) {
-            for (int i = 0; i < c->n_embd; i++) {
-                s->key_cache[layer][cache_idx * c->n_embd + i] = s->k[pos * c->n_embd + i];
-                s->value_cache[layer][cache_idx * c->n_embd + i] = s->v[pos * c->n_embd + i];
+    if (use_enhanced) {
+        /* Use enhanced KV cache - batch store for all positions */
+        kv_cache_store_batch_f32(enh_cache, layer, s->cache_pos, seq_len, s->k, s->v);
+    } else if (s->key_cache && s->value_cache) {
+        /* Fallback to inline cache */
+        for (int pos = 0; pos < seq_len; pos++) {
+            int cache_idx = s->cache_pos + pos;
+            if (cache_idx < c->max_seq_len) {
+                for (int i = 0; i < c->n_embd; i++) {
+                    s->key_cache[layer][cache_idx * c->n_embd + i] = s->k[pos * c->n_embd + i];
+                    s->value_cache[layer][cache_idx * c->n_embd + i] = s->v[pos * c->n_embd + i];
+                }
             }
         }
     }
-    
+
+    /* Get pointers to cached K/V for attention computation */
+    const float* cached_keys = NULL;
+    const float* cached_values = NULL;
+
+    if (use_enhanced) {
+        cached_keys = kv_cache_get_key_ptr_f32(enh_cache, layer);
+        cached_values = kv_cache_get_value_ptr_f32(enh_cache, layer);
+    } else if (s->key_cache && s->value_cache) {
+        cached_keys = s->key_cache[layer];
+        cached_values = s->value_cache[layer];
+    }
+
+    /* Need cached KV for attention */
+    if (!cached_keys || !cached_values) {
+        return;
+    }
+
     /* Compute attention for each head */
     for (int h = 0; h < c->n_heads; h++) {
         /* Compute attention scores: Q @ K^T / sqrt(head_dim) */
         float scale = 1.0f / sqrtf((float)head_dim);
-        
+
         for (int i = 0; i < seq_len; i++) {
             for (int j = 0; j <= s->cache_pos + i; j++) {
                 float score = 0.0f;
-                
+
                 /* Dot product of Q[i] and K[j] for this head */
                 for (int k = 0; k < head_dim; k++) {
                     int q_idx = i * c->n_embd + h * head_dim + k;
                     int k_idx = j * c->n_embd + h * head_dim + k;
-                    score += s->q[q_idx] * s->key_cache[layer][k_idx];
+                    score += s->q[q_idx] * cached_keys[k_idx];
                 }
-                
+
                 s->att[h * seq_len * c->max_seq_len + i * c->max_seq_len + j] = score * scale;
             }
         }
-        
+
         /* Apply causal mask and softmax */
         for (int i = 0; i < seq_len; i++) {
             float* att_row = &s->att[h * seq_len * c->max_seq_len + i * c->max_seq_len];
-            
+
             /* Apply causal mask */
             for (int j = s->cache_pos + i + 1; j < c->max_seq_len; j++) {
                 att_row[j] = -1e9f;
             }
-            
+
             /* Softmax */
             float max_val = att_row[0];
             for (int j = 1; j <= s->cache_pos + i; j++) {
                 if (att_row[j] > max_val) max_val = att_row[j];
             }
-            
+
             float sum = 0.0f;
             for (int j = 0; j <= s->cache_pos + i; j++) {
                 att_row[j] = expf(att_row[j] - max_val);
                 sum += att_row[j];
             }
-            
+
             for (int j = 0; j <= s->cache_pos + i; j++) {
                 att_row[j] /= sum;
             }
         }
-        
+
         /* Apply attention to values */
         for (int i = 0; i < seq_len; i++) {
             for (int k = 0; k < head_dim; k++) {
                 float sum = 0.0f;
                 float* att_row = &s->att[h * seq_len * c->max_seq_len + i * c->max_seq_len];
-                
+
                 for (int j = 0; j <= s->cache_pos + i; j++) {
                     int v_idx = j * c->n_embd + h * head_dim + k;
-                    sum += att_row[j] * s->value_cache[layer][v_idx];
+                    sum += att_row[j] * cached_values[v_idx];
                 }
-                
+
                 s->xb[i * c->n_embd + h * head_dim + k] = sum;
             }
         }
     }
-    
+
     /* Output projection */
     tensor_gemm(s->xb, w->o_weight[layer], s->x, seq_len, c->n_embd, c->n_embd, 1.0f, 1.0f);
 }
@@ -441,6 +470,12 @@ void transformer_reset_cache(void)
 {
     if (g_transformer) {
         g_transformer->cache_pos = 0;
+    }
+
+    /* Also reset enhanced KV cache if available */
+    kv_cache_t* enh_cache = kv_cache_get_global();
+    if (enh_cache && kv_cache_is_valid(enh_cache)) {
+        kv_cache_reset(enh_cache);
     }
 }
 
