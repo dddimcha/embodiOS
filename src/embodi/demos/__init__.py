@@ -1,3 +1,0 @@
-"""
-EMBODIOS Demos - Demonstration modules
-"""

@@ -37,6 +37,7 @@ kernel/test/test_*
 # IDE and editor files
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
