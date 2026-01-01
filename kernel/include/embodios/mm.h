@@ -46,7 +46,9 @@ int memcmp(const void* s1, const void* s2, size_t n);
 /* Heap allocator (separate from slab) - for AI workloads */
 void heap_init(void);
 void* heap_alloc(size_t size);
+void* heap_alloc_aligned(size_t size, size_t alignment);
 void heap_free(void* ptr);
+void heap_free_aligned(void* ptr);
 void heap_stats(void);
 
 /* PMM statistics */
