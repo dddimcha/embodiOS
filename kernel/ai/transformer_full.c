@@ -11,6 +11,7 @@
 #include "embodios/tvm.h"
 #include "embodios/model.h"
 #include "embodios/gguf.h"
+#include "embodios/embeddings.h"
 
 /* Math functions */
 float sqrtf(float x);
@@ -275,15 +276,39 @@ void transformer_forward(int* tokens, int n_tokens, float* logits)
         return;
     }
     
-    /* Token + position embeddings */
-    for (int i = 0; i < n_tokens; i++) {
-        int token = tokens[i];
-        int pos = s->cache_pos + i;
-        
-        for (int j = 0; j < c->n_embd; j++) {
-            s->x[i * c->n_embd + j] = 
-                w->token_embedding[token * c->n_embd + j] +
-                w->position_embedding[pos * c->n_embd + j];
+    /* Token + position embeddings - use pre-computed cache if available */
+    embedding_cache_t* emb_cache = embedding_get_global();
+
+    if (emb_cache && embedding_validate_cache(emb_cache)) {
+        /* Fast path: use pre-computed embedding cache */
+        for (int i = 0; i < n_tokens; i++) {
+            int pos = s->cache_pos + i;
+            embedding_lookup(emb_cache, tokens[i], pos,
+                            &s->x[i * c->n_embd]);
+        }
+    } else {
+        /* Fallback: compute embeddings directly from weights */
+        for (int i = 0; i < n_tokens; i++) {
+            int token = tokens[i];
+            int pos = s->cache_pos + i;
+
+            /* Bounds validation to prevent buffer overflow */
+            if (token < 0 || token >= c->vocab_size) {
+                console_printf("Transformer: Invalid token %d (vocab=%d)\n",
+                               token, c->vocab_size);
+                token = 0;  /* Use padding token */
+            }
+            if (pos < 0 || pos >= c->max_seq_len) {
+                console_printf("Transformer: Position %d exceeds max %d\n",
+                               pos, c->max_seq_len);
+                pos = c->max_seq_len - 1;  /* Clamp to max */
+            }
+
+            for (int j = 0; j < c->n_embd; j++) {
+                s->x[i * c->n_embd + j] =
+                    w->token_embedding[token * c->n_embd + j] +
+                    w->position_embedding[pos * c->n_embd + j];
+            }
         }
     }
     
