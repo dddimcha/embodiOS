@@ -105,6 +105,7 @@ KERNEL_C_SOURCES = \
     ai/tvm_runtime.c \
     ai/tokenizer.c \
     ai/gguf_integer_loader.c \
+    ai/gguf_parser.c \
     ai/quantized_ops.c \
     ai/quantized_inference.c \
     ai/tinyllama_integer_inference.c \
