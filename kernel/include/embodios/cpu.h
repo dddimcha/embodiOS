@@ -42,4 +42,8 @@ uint64_t cpu_get_timestamp(void);
 void cpu_flush_cache(void);
 void cpu_invalidate_cache(void);
 
+/* SSE/FPU support (x86_64) */
+bool arch_sse2_available(void);
+const char* arch_get_sse_status(void);
+
 #endif /* EMBODIOS_CPU_H */
