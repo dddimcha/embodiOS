@@ -110,6 +110,158 @@ static void init_gdt(void)
 #endif
 }
 
+/* ============================================================================
+ * SSE/FPU Initialization
+ * ============================================================================ */
+
+/* CR0 bits */
+#define CR0_MP  (1 << 1)   /* Monitor Coprocessor */
+#define CR0_EM  (1 << 2)   /* Emulation - must be 0 for SSE */
+#define CR0_TS  (1 << 3)   /* Task Switched - must be 0 to avoid #NM */
+#define CR0_NE  (1 << 5)   /* Numeric Error */
+#define CR0_WP  (1 << 16)  /* Write Protect */
+
+/* CR4 bits */
+#define CR4_OSFXSR     (1 << 9)   /* OS supports FXSAVE/FXRSTOR */
+#define CR4_OSXMMEXCPT (1 << 10)  /* OS supports unmasked SSE exceptions */
+#define CR4_SMEP       (1 << 20)  /* Supervisor Mode Execution Prevention */
+
+/* CPUID feature bits */
+#define CPUID_FEAT_EDX_FPU   (1 << 0)   /* x87 FPU */
+#define CPUID_FEAT_EDX_FXSR  (1 << 24)  /* FXSAVE/FXRSTOR */
+#define CPUID_FEAT_EDX_SSE   (1 << 25)  /* SSE support */
+#define CPUID_FEAT_EDX_SSE2  (1 << 26)  /* SSE2 support */
+
+/* MXCSR default value:
+ * Bits 7-12: Exception masks (all set = masked)
+ * Bits 13-14: Rounding mode (00 = round to nearest)
+ * Bit 15: Flush-to-zero (0 = disabled)
+ */
+#define MXCSR_DEFAULT 0x1F80
+
+/* SSE state */
+static struct {
+    bool fpu_present;
+    bool fxsr_present;
+    bool sse_present;
+    bool sse2_present;
+    bool initialized;
+} sse_state = {0};
+
+/**
+ * Check CPU features via CPUID
+ */
+static void detect_cpu_features(void)
+{
+#ifdef __x86_64__
+    uint32_t eax, ebx, ecx, edx;
+
+    /* CPUID function 1: Processor Info and Feature Bits */
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(1));
+
+    sse_state.fpu_present = (edx & CPUID_FEAT_EDX_FPU) != 0;
+    sse_state.fxsr_present = (edx & CPUID_FEAT_EDX_FXSR) != 0;
+    sse_state.sse_present = (edx & CPUID_FEAT_EDX_SSE) != 0;
+    sse_state.sse2_present = (edx & CPUID_FEAT_EDX_SSE2) != 0;
+#endif
+}
+
+/**
+ * Initialize FPU and SSE
+ *
+ * This MUST be called FIRST before any other functions, as the kernel
+ * is compiled with -msse2 and any function could use SSE instructions.
+ *
+ * CR0 configuration:
+ *   - Clear EM (bit 2): Disable x87 emulation
+ *   - Clear TS (bit 3): Clear task switched flag
+ *   - Set MP (bit 1): Monitor coprocessor
+ *   - Set NE (bit 5): Native FPU error handling
+ *   - Set WP (bit 16): Write protection in kernel mode
+ *
+ * CR4 configuration:
+ *   - Set OSFXSR (bit 9): Enable FXSAVE/FXRSTOR
+ *   - Set OSXMMEXCPT (bit 10): Enable SSE exceptions
+ */
+static void init_fpu_sse(void)
+{
+#ifdef __x86_64__
+    /* Detect CPU features first */
+    detect_cpu_features();
+
+    /*
+     * SSE and FXSR are REQUIRED for this kernel (compiled with -msse2).
+     * If not available, we cannot continue - halt immediately.
+     */
+    if (!sse_state.sse_present || !sse_state.fxsr_present) {
+        /* Fatal: Cannot boot without SSE support */
+        __asm__ volatile("cli; hlt");
+        __builtin_unreachable();
+    }
+
+    /* Configure CR0 for FPU/SSE */
+    uint64_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+
+    cr0 |= CR0_MP;   /* Monitor coprocessor */
+    cr0 |= CR0_NE;   /* Native FPU errors */
+    cr0 |= CR0_WP;   /* Write protection */
+    cr0 &= ~CR0_EM;  /* Disable emulation (REQUIRED for SSE) */
+    cr0 &= ~CR0_TS;  /* Clear task switched */
+
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+
+    /* Configure CR4 for SSE */
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+
+    cr4 |= CR4_OSFXSR;      /* Enable FXSAVE/FXRSTOR */
+    cr4 |= CR4_OSXMMEXCPT;  /* Enable SSE exceptions */
+
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+
+    /* Initialize FPU */
+    __asm__ volatile("fninit");
+
+    /* Initialize SSE state with default MXCSR */
+    uint32_t mxcsr = MXCSR_DEFAULT;
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+
+    sse_state.initialized = true;
+#endif
+}
+
+/**
+ * Check if SSE2 is available and initialized
+ */
+bool arch_sse2_available(void)
+{
+    return sse_state.initialized && sse_state.sse2_present;
+}
+
+/**
+ * Get SSE status string for diagnostics
+ */
+const char* arch_get_sse_status(void)
+{
+    if (!sse_state.initialized) {
+        return "NOT INITIALIZED";
+    }
+    if (sse_state.sse2_present) {
+        return "SSE2 ENABLED";
+    }
+    if (sse_state.sse_present) {
+        return "SSE ENABLED (no SSE2)";
+    }
+    return "NO SSE SUPPORT";
+}
+
+/* ============================================================================
+ * TSS Initialization
+ * ============================================================================ */
+
 /* Initialize TSS */
 static void init_tss(void)
 {
@@ -142,19 +294,23 @@ static void init_tss(void)
 /* Early architecture initialization */
 void arch_early_init(void)
 {
-    /* Initialize GDT */
-    init_gdt();
-    
-    /* Initialize TSS */
-    init_tss();
-    
-#ifdef __x86_64__
-    /* Enable write protection in kernel mode */
-    uint64_t cr0;
-    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 |= (1 << 16);  /* WP bit */
-    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+    /*
+     * CRITICAL: Initialize FPU/SSE FIRST!
+     *
+     * The kernel is compiled with -msse2, so ANY function call could
+     * potentially use SSE instructions (e.g., memset, memcpy optimized
+     * to use SSE). This MUST happen before init_gdt() and init_tss()
+     * which use memset internally.
+     *
+     * init_fpu_sse() also sets CR0.WP (write protection).
+     */
+    init_fpu_sse();
 
+    /* Now safe to call functions that may use SSE */
+    init_gdt();
+    init_tss();
+
+#ifdef __x86_64__
     /* Check if SMEP is available before enabling */
     /* CPUID.07H:EBX.SMEP[bit 7] indicates SMEP support */
     uint32_t eax, ebx, ecx, edx;
@@ -164,7 +320,7 @@ void arch_early_init(void)
         /* SMEP is supported, enable it */
         uint64_t cr4;
         __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-        cr4 |= (1 << 20);  /* SMEP bit */
+        cr4 |= CR4_SMEP;
         __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
     }
 #endif
