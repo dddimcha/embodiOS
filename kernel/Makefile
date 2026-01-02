@@ -99,6 +99,7 @@ KERNEL_C_SOURCES = \
     core/task.c \
     core/dma.c \
     core/dma_test.c \
+    drivers/pci/pci.c \
     mm/pmm.c \
     mm/vmm.c \
     mm/slab.c \
