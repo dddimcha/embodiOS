@@ -10,6 +10,7 @@
 #include "embodios/task.h"
 #include "embodios/tvm.h"
 #include "embodios/dma.h"
+#include "embodios/pci.h"
 
 /* String function declarations */
 int strcmp(const char* s1, const char* s2);
@@ -47,6 +48,9 @@ void process_command(const char* command)
         console_printf("  tvm       - Show TVM runtime status\n");
         console_printf("  dmatest   - Run DMA subsystem tests\n");
         console_printf("  dmastats  - Show DMA statistics\n");
+        console_printf("  lspci     - List PCI devices\n");
+        console_printf("  pcitest   - Run PCI subsystem tests\n");
+        console_printf("  pcistats  - Show PCI statistics\n");
         console_printf("  reboot    - Reboot the system\n");
     } else if (strncmp(command, "ai ", 3) == 0) {
         /* TinyStories interactive inference */
@@ -114,6 +118,12 @@ void process_command(const char* command)
     } else if (strcmp(command, "dmastats") == 0) {
         dma_print_stats();
         dma_dump_allocations();
+    } else if (strcmp(command, "lspci") == 0) {
+        pci_print_devices();
+    } else if (strcmp(command, "pcitest") == 0) {
+        pci_run_tests();
+    } else if (strcmp(command, "pcistats") == 0) {
+        pci_print_stats();
     } else if (strcmp(command, "reboot") == 0) {
         console_printf("Rebooting...\n");
         arch_reboot();
