@@ -187,9 +187,10 @@ float expf(float x)
 }
 */
 
-/* Stubs for undefined references */
+/* Stubs for GGUF/TVM functions not yet fully implemented */
 void* gguf_get_tensor(void* ctx, const char* name, size_t* size) {
-    (void)ctx; (void)name; (void)size;
+    (void)ctx; (void)name;
+    if (size) *size = 0;
     return NULL;
 }
 
