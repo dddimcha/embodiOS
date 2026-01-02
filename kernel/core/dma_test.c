@@ -516,7 +516,7 @@ static void test_stress(void)
  * Main Test Entry Point
  * ============================================================================ */
 
-void dma_run_tests(void)
+int dma_run_tests(void)
 {
     console_printf("\n========================================\n");
     console_printf("EMBODIOS DMA Subsystem Tests\n");
@@ -550,4 +550,6 @@ void dma_run_tests(void)
     /* Print final stats */
     console_printf("\nFinal DMA statistics:\n");
     dma_print_stats();
+
+    return (tests_failed == 0) ? 0 : -1;
 }
