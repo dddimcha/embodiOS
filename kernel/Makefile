@@ -183,10 +183,22 @@ ARCH_C_OBJS = $(ARCH_C_SOURCES:.c=.o)
 TINYSTORIES_MODEL = ../models/tinystories-15m.bin
 TINYSTORIES_TOKENIZER = ../models/tokenizer.bin
 
-# Enable model embedding for x86_64 builds on Linux
+# Enable model embedding for x86_64 builds on Linux, but only if model files exist
+# The kernel boots fine without embedded models - AI will just be unavailable
 ifeq ($(ARCH),x86_64)
     ifneq ($(BUILD_OS),Darwin)
-        MODEL_OBJS = ai/tinystories_model.o ai/tinystories_tokenizer.o
+        # Check if model files exist before trying to embed them
+        ifneq ($(wildcard $(TINYSTORIES_MODEL)),)
+            MODEL_OBJS = ai/tinystories_model.o
+            $(info Model embedding enabled: $(TINYSTORIES_MODEL) found)
+        else
+            MODEL_OBJS =
+            $(info Model embedding disabled: $(TINYSTORIES_MODEL) not found)
+        endif
+        ifneq ($(wildcard $(TINYSTORIES_TOKENIZER)),)
+            MODEL_OBJS += ai/tinystories_tokenizer.o
+            $(info Tokenizer embedding enabled: $(TINYSTORIES_TOKENIZER) found)
+        endif
     else
         MODEL_OBJS =
     endif
@@ -222,7 +234,7 @@ embodios.bin: embodios.elf
 # Clean
 clean:
 	rm -f $(ALL_OBJS) embodios.elf embodios.bin
-	
+
 # Embed TinyStories model as binary object
 ai/tinystories_model.o: $(TINYSTORIES_MODEL)
 	@echo "Embedding TinyStories-15M model into kernel..."
