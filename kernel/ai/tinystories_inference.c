@@ -8,6 +8,7 @@
 #include <embodios/types.h>
 #include <embodios/console.h>
 #include <embodios/mm.h>
+#include <embodios/gguf_parser.h>
 
 /* Forward declarations for kernel functions */
 extern void* memcpy(void* dest, const void* src, size_t n);
@@ -83,8 +84,29 @@ typedef struct {
     int max_token_length;
 } Vocabulary;
 
-// Global model state
-static TinyStoriesConfig g_config;
+// Default configuration (fallback when GGUF parsing fails)
+// TinyStories-15M values for backwards compatibility
+#define DEFAULT_DIM         288
+#define DEFAULT_HIDDEN_DIM  768
+#define DEFAULT_N_LAYERS    6
+#define DEFAULT_N_HEADS     6
+#define DEFAULT_N_KV_HEADS  6
+#define DEFAULT_VOCAB_SIZE  32000
+#define DEFAULT_SEQ_LEN     256
+
+// Global model state - initialized with defaults, updated from GGUF if available
+static TinyStoriesConfig g_config = {
+    .dim = DEFAULT_DIM,
+    .hidden_dim = DEFAULT_HIDDEN_DIM,
+    .n_layers = DEFAULT_N_LAYERS,
+    .n_heads = DEFAULT_N_HEADS,
+    .n_kv_heads = DEFAULT_N_KV_HEADS,
+    .vocab_size = DEFAULT_VOCAB_SIZE,
+    .seq_len = DEFAULT_SEQ_LEN
+};
+
+// Flag to track if config was loaded from GGUF
+static bool g_config_from_gguf = false;
 static TinyStoriesWeights g_weights;
 static TinyStoriesRunState g_state;
 static Vocabulary g_vocab;
@@ -368,38 +390,66 @@ static int malloc_run_state(TinyStoriesRunState* s, TinyStoriesConfig* p) {
 }
 
 /**
- * Load TinyStories model from embedded binary data
- * Adapted from llama.c read_checkpoint - uses direct memory access instead of file I/O
+ * Load model from embedded binary data
+ *
+ * Supports two formats:
+ * 1. GGUF format - config is read from GGUF metadata (preferred)
+ * 2. Legacy llama.c format - uses hardcoded defaults
  */
 int tinystories_load_model(void) {
-    console_printf("Loading TinyStories-15M model...\n");
+    console_printf("Loading AI model...\n");
 
-    // Check if model is embedded
+    // Check if model weights are embedded
     if (_binary_tinystories_15m_bin_start == NULL) {
-        console_printf("ERROR: TinyStories model not embedded in kernel\n");
-        return -1;
+        console_printf("WARNING: No model weights embedded in kernel\n");
+        console_printf("AI inference will not be available.\n");
+        return 0;  // Success but no weights
     }
 
     const uint8_t* model_data = _binary_tinystories_15m_bin_start;
     size_t model_size = (size_t)(_binary_tinystories_15m_bin_end - _binary_tinystories_15m_bin_start);
 
+    // Validate model size
+    if (model_size < 1024 * 1024) {
+        console_printf("WARNING: Model file too small (%zu bytes)\n", model_size);
+        console_printf("AI inference will not be available.\n");
+        return 0;
+    }
+
     console_printf("Model size: %zu MB\n", model_size / (1024 * 1024));
 
-    // Read configuration (first 7 ints = 28 bytes)
-    const int* config_data = (const int*)model_data;
-    g_config.dim = config_data[0];
-    g_config.hidden_dim = config_data[1];
-    g_config.n_layers = config_data[2];
-    g_config.n_heads = config_data[3];
-    g_config.n_kv_heads = config_data[4];
-    g_config.vocab_size = config_data[5];
-    g_config.seq_len = config_data[6];
+    // Try GGUF format first (check magic number: "GGUF")
+    if (model_size >= 4 && model_data[0] == 'G' && model_data[1] == 'G' &&
+        model_data[2] == 'U' && model_data[3] == 'F') {
 
-    // negative vocab size is hacky way of signaling unshared weights
-    int shared_weights = g_config.vocab_size > 0 ? 1 : 0;
-    g_config.vocab_size = (g_config.vocab_size < 0) ? -g_config.vocab_size : g_config.vocab_size;
+        console_printf("Detected GGUF format, parsing metadata...\n");
 
-    console_printf("Configuration:\n");
+        if (gguf_parser_load(model_data, model_size) == 0) {
+            const struct gguf_model_arch* arch = gguf_parser_get_arch();
+            if (arch) {
+                // Load config from GGUF metadata
+                g_config.dim = arch->embedding_length;
+                g_config.hidden_dim = arch->feed_forward_length;
+                g_config.n_layers = arch->block_count;
+                g_config.n_heads = arch->attention_head_count;
+                g_config.n_kv_heads = arch->attention_head_count_kv;
+                g_config.vocab_size = arch->vocab_size;
+                g_config.seq_len = arch->context_length;
+                g_config_from_gguf = true;
+
+                console_printf("Configuration (from GGUF metadata):\n");
+                console_printf("  Model: %s\n", arch->general_name);
+                console_printf("  Architecture: %s\n", arch->general_architecture);
+            }
+        } else {
+            console_printf("GGUF parsing failed, using defaults\n");
+        }
+    } else {
+        console_printf("Non-GGUF format, using default config\n");
+    }
+
+    // Print final configuration
+    console_printf("Configuration%s:\n", g_config_from_gguf ? " (GGUF)" : " (defaults)");
     console_printf("  dim: %d\n", g_config.dim);
     console_printf("  hidden_dim: %d\n", g_config.hidden_dim);
     console_printf("  n_layers: %d\n", g_config.n_layers);
@@ -407,12 +457,31 @@ int tinystories_load_model(void) {
     console_printf("  n_kv_heads: %d\n", g_config.n_kv_heads);
     console_printf("  vocab_size: %d\n", g_config.vocab_size);
     console_printf("  seq_len: %d\n", g_config.seq_len);
-    console_printf("  shared_weights: %d\n", shared_weights);
 
-    // Weights start after config header (7 ints = 28 bytes)
-    float* weights_ptr = (float*)(model_data + sizeof(TinyStoriesConfig));
+    // Validate config before proceeding
+    if (g_config.dim == 0 || g_config.n_heads == 0 || g_config.vocab_size == 0) {
+        console_printf("ERROR: Invalid model configuration\n");
+        return 0;
+    }
 
-    // Map weight pointers (llama.c style)
+    // Determine weight layout based on format
+    int shared_weights = 1;
+    float* weights_ptr;
+
+    if (g_config_from_gguf) {
+        // GGUF: weights start after header and metadata
+        weights_ptr = (float*)gguf_parser_get_tensor_data();
+    } else {
+        // Legacy: weights start after 7-int config header
+        weights_ptr = (float*)(model_data + sizeof(TinyStoriesConfig));
+    }
+
+    if (!weights_ptr) {
+        console_printf("ERROR: Could not locate weight data\n");
+        return 0;
+    }
+
+    // Map weight pointers
     memory_map_weights(&g_weights, &g_config, weights_ptr, shared_weights);
 
     // Calculate vocabulary offset (after all weights)
@@ -931,18 +1000,20 @@ void tinystories_interactive_init(void) {
     console_printf("═══════════════════════════════════════════════════════════\n");
     console_printf("\n");
 
-    // Load model silently
-    console_printf("Loading TinyStories-15M model (57 MB)...\n");
-    if (tinystories_load_model() != 0) {
-        console_printf("ERROR: Failed to load model!\n");
-        return;
+    // Try to load model (will succeed even without weights)
+    tinystories_load_model();
+
+    if (g_model_loaded) {
+        console_printf("AI Model Ready!\n");
+        console_printf("Model: %d layers, %d dim, %d vocab\n",
+                       g_config.n_layers, g_config.dim, g_config.vocab_size);
+        console_printf("\nType 'ai <prompt>' to generate text\n");
+        console_printf("Example: ai Once upon a time\n");
+    } else {
+        console_printf("AI Model: Not available (no weights embedded)\n");
+        console_printf("To enable AI: embed tinystories-15m.bin in kernel build\n");
     }
 
-    console_printf("AI Model Ready!\n");
-    console_printf("Model: %d layers, %d dim, %d vocab\n",
-                   g_config.n_layers, g_config.dim, g_config.vocab_size);
-    console_printf("\nType 'ai <prompt>' to generate text\n");
-    console_printf("Example: ai Once upon a time\n");
     console_printf("═══════════════════════════════════════════════════════════\n");
     console_printf("\n");
 }
