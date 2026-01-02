@@ -23,9 +23,6 @@
 #define KERNEL_BASE 0x100000UL
 #endif
 
-/* Maximum addressable DMA range (64GB) */
-#define DMA_MAX_ADDRESS 0x1000000000ULL
-
 /* ============================================================================
  * Internal Structures
  * ============================================================================ */

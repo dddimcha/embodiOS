@@ -25,6 +25,7 @@
 #define DMA_CACHE_LINE_SIZE     64      /* x86_64 cache line size */
 #define DMA_MIN_ALIGNMENT       64      /* Minimum buffer alignment */
 #define DMA_ZONE_LIMIT          0x1000000  /* 16MB ZONE_DMA limit */
+#define DMA_MAX_ADDRESS         0x1000000000ULL  /* 64GB max addressable */
 
 /* ============================================================================
  * DMA Error Codes
@@ -336,6 +337,6 @@ void dma_print_stats(void);
 /**
  * Run DMA subsystem tests
  */
-void dma_run_tests(void);
+int dma_run_tests(void);
 
 #endif /* EMBODIOS_DMA_H */

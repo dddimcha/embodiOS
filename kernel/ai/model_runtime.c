@@ -29,7 +29,7 @@ void model_runtime_init(void)
 {
     runtime.initialized = true;
     console_printf("AI Runtime: Initialized\n");
-    
+
     /* Initialize TVM backend */
     tvm_runtime_init();
     console_printf("AI Runtime: TVM backend ready\n");
@@ -42,47 +42,47 @@ struct embodios_model* model_load(const void* data, size_t size)
         console_printf("AI Runtime: Not initialized\n");
         return NULL;
     }
-    
+
     /* Validate model header */
     if (size < sizeof(struct embodios_model)) {
         console_printf("AI Runtime: Model data too small\n");
         return NULL;
     }
-    
+
     struct embodios_model *model = (struct embodios_model*)data;
-    
+
     /* Basic validation */
     if (model->magic != 0x454D424F) { /* 'EMBO' */
         console_printf("AI Runtime: Invalid model magic\n");
         return NULL;
     }
-    
+
     /* Allocate workspace based on model requirements */
     size_t workspace_size = model->memory_required;
     if (workspace_size == 0) {
         /* Default to 64MB if not specified */
         workspace_size = 64 * 1024 * 1024;
     }
-    
+
     void *workspace = kmalloc(workspace_size);
     if (!workspace) {
         console_printf("AI Runtime: Failed to allocate %zu bytes workspace\n", workspace_size);
         return NULL;
     }
-    
+
     /* Store model info */
     runtime.model = model;
     runtime.workspace = workspace;
     runtime.workspace_size = workspace_size;
-    
-    console_printf("AI Runtime: Loaded model '%s' v%u.%u\n", 
-                   model->name, 
-                   model->version_major, 
+
+    console_printf("AI Runtime: Loaded model '%s' v%u.%u\n",
+                   model->name,
+                   model->version_major,
                    model->version_minor);
     console_printf("  Architecture: %s\n", model->arch);
     console_printf("  Parameters: %zu\n", model->param_count);
     console_printf("  Workspace: %zu MB\n", workspace_size / (1024 * 1024));
-    
+
     return model;
 }
 
@@ -97,7 +97,7 @@ int model_inference(const int *input_tokens, int num_tokens,
         console_printf("AI Runtime: No model loaded\n");
         return -1;
     }
-    
+
     console_printf("AI Runtime: Running inference with %d tokens\n", num_tokens);
 
     /* Simple integer-based inference (no floating-point, no graph executor) */
@@ -120,7 +120,7 @@ int model_inference(const int *input_tokens, int num_tokens,
     for (int i = 0; i < 6 && output_len < max_output; i++) {
         output_tokens[output_len++] = demo_response[i];
     }
-    
+
     console_printf("AI Runtime: Inference complete, generated %d tokens\n", output_len);
     return output_len;
 }
@@ -139,7 +139,7 @@ void model_unload(struct embodios_model* model)
         console_printf("AI Runtime: Model not loaded\n");
         return;
     }
-    
+
     /* Note: graph executor not used in integer-only mode */
     model_graph = NULL;
 
@@ -168,26 +168,26 @@ size_t strlen(const char* s);
 
 static int g_inference_initialized = 0;
 
-/* Initialize inference engine (model-based wrapper) */
+/* Initialize inference engine (model_runtime wrapper) */
 int model_inference_init(struct embodios_model* model)
 {
     console_printf("Initializing inference engine...\n");
-    
+
     /* Initialize tokenizer */
     if (tokenizer_init() < 0) {
         console_printf("Failed to initialize tokenizer\n");
         return -1;
     }
-    
+
     /* Initialize transformer */
     if (transformer_init(model) < 0) {
         console_printf("Failed to initialize transformer\n");
         return -1;
     }
-    
+
     runtime.model = model;
     g_inference_initialized = 1;
-    
+
     console_printf("Inference engine initialized successfully\n");
     return 0;
 }
@@ -224,19 +224,19 @@ int inference_run(const char* input, char* output, size_t output_size)
 void inference_test(void)
 {
     console_printf("Running inference test...\n");
-    
+
     const char* test_prompts[] = {
         "Hello",
         "What is 2+2?",
         "Tell me a joke",
         NULL
     };
-    
+
     char output[512];
-    
+
     for (int i = 0; test_prompts[i]; i++) {
         console_printf("\nTest %d: \"%s\"\n", i + 1, test_prompts[i]);
-        
+
         if (inference_run(test_prompts[i], output, sizeof(output)) == 0) {
             console_printf("Response: %s\n", output);
         } else {
@@ -250,13 +250,13 @@ void inference_stats(void)
 {
     console_printf("Inference Statistics:\n");
     console_printf("  Initialized: %s\n", g_inference_initialized ? "Yes" : "No");
-    
+
     if (runtime.model) {
         console_printf("  Model: %s\n", runtime.model->name);
         console_printf("  Architecture: %s\n", runtime.model->arch);
     } else {
         console_printf("  Model: None\n");
     }
-    
+
     /* TODO: Add more stats like tokens processed, inference time, etc. */
 }
