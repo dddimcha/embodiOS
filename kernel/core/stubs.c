@@ -9,6 +9,7 @@
 #include "embodios/interrupt.h"
 #include "embodios/task.h"
 #include "embodios/tvm.h"
+#include "embodios/dma.h"
 
 /* String function declarations */
 int strcmp(const char* s1, const char* s2);
@@ -44,6 +45,8 @@ void process_command(const char* command)
         console_printf("  ai <prompt> - Generate text with TinyStories AI\n");
         console_printf("  infer <text> - Run AI inference\n");
         console_printf("  tvm       - Show TVM runtime status\n");
+        console_printf("  dmatest   - Run DMA subsystem tests\n");
+        console_printf("  dmastats  - Show DMA statistics\n");
         console_printf("  reboot    - Reboot the system\n");
     } else if (strncmp(command, "ai ", 3) == 0) {
         /* TinyStories interactive inference */
@@ -106,6 +109,11 @@ void process_command(const char* command)
         tinystories_test();
     } else if (strcmp(command, "tvm") == 0) {
         tvm_runtime_stats();
+    } else if (strcmp(command, "dmatest") == 0) {
+        dma_run_tests();
+    } else if (strcmp(command, "dmastats") == 0) {
+        dma_print_stats();
+        dma_dump_allocations();
     } else if (strcmp(command, "reboot") == 0) {
         console_printf("Rebooting...\n");
         arch_reboot();
@@ -114,18 +122,7 @@ void process_command(const char* command)
     }
 }
 
-/* Stub implementations for missing AI functions */
-int transformer_init(struct embodios_model* model)
-{
-    (void)model;
-    console_printf("Transformer: stub init (no model load)\n");
-    return 0;
-}
-
-void transformer_reset_cache(void)
-{
-    /* Stub - do nothing */
-}
+/* Note: transformer_init and transformer_reset_cache are now in transformer_full.c */
 
 int llama_model_load(const uint8_t* data, size_t size)
 {
@@ -189,3 +186,24 @@ float expf(float x)
     return result;
 }
 */
+
+/* Stubs for undefined references */
+void* gguf_get_tensor(void* ctx, const char* name, size_t* size) {
+    (void)ctx; (void)name; (void)size;
+    return NULL;
+}
+
+int gguf_get_model_config(void* ctx, void* config) {
+    (void)ctx; (void)config;
+    return -1;
+}
+
+int tinyllama_forward_tvm(void* input, void* output) {
+    (void)input; (void)output;
+    return -1;
+}
+
+int tinyllama_forward(void* input, void* output) {
+    (void)input; (void)output;
+    return -1;
+}

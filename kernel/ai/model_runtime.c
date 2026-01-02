@@ -168,8 +168,8 @@ size_t strlen(const char* s);
 
 static int g_inference_initialized = 0;
 
-/* Initialize inference engine */
-int inference_init(struct embodios_model* model)
+/* Initialize inference engine (model-based wrapper) */
+int model_inference_init(struct embodios_model* model)
 {
     console_printf("Initializing inference engine...\n");
     
