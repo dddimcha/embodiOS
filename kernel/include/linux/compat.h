@@ -188,10 +188,12 @@
  * - linux/delay.h (mdelay, udelay, msleep)
  * - linux/io.h (ioread*, iowrite*, ioremap)
  * - linux/interrupt.h (request_irq, free_irq)
- * - linux/dma-mapping.h (dma_alloc_coherent, dma_map_single)
  * - linux/device.h (struct device, driver registration)
  * - linux/platform_device.h (platform driver support)
  * - linux/of.h (device tree support)
+ *
+ * Implemented:
+ * - embodios/dma.h (dma_alloc_coherent, dma_map_single, scatter-gather)
  *
  * ============================================================================
  */
@@ -228,7 +230,7 @@
 #define LINUX_COMPAT_HAS_WORKQUEUE  0
 #define LINUX_COMPAT_HAS_TASKLET    0
 #define LINUX_COMPAT_HAS_TIMER      0
-#define LINUX_COMPAT_HAS_DMA        0
+#define LINUX_COMPAT_HAS_DMA        1
 #define LINUX_COMPAT_HAS_DEVICE     0
 #define LINUX_COMPAT_HAS_SYSFS      0
 #define LINUX_COMPAT_HAS_PROCFS     0

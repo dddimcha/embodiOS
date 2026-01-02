@@ -97,6 +97,8 @@ KERNEL_C_SOURCES = \
     core/stubs.c \
     core/interrupt.c \
     core/task.c \
+    core/dma.c \
+    core/dma_test.c \
     mm/pmm.c \
     mm/vmm.c \
     mm/slab.c \
@@ -111,7 +113,6 @@ KERNEL_C_SOURCES = \
     ai/tinyllama_integer_inference.c \
     ai/tinystories_inference.c \
     ai/simd_ops.c \
-    ai/kv_cache.c \
     ai/memory_opt.c \
     ai/quantized_matmul_simd.c \
     ai/embeddings.c \

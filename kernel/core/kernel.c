@@ -7,6 +7,7 @@
 #include <embodios/interrupt.h>
 #include <embodios/task.h>
 #include <embodios/ai.h>
+#include <embodios/dma.h>
 
 /* Kernel version info */
 const char* kernel_version = "EMBODIOS v0.1.0-native";
@@ -73,7 +74,11 @@ void kernel_main(void)
     /* Initialize heap for AI workloads */
     console_printf("Initializing heap allocator...\n");
     heap_init();
-    
+
+    /* Initialize DMA subsystem */
+    console_printf("Initializing DMA subsystem...\n");
+    dma_init();
+
     /* Initialize task scheduler */
     console_printf("Initializing task scheduler...\n");
     scheduler_init();
