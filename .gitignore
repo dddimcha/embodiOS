@@ -14,9 +14,16 @@
 *.nova
 # Ignore model files but not metadata
 /models/*/
+/models/*.bin
 !/models/.gitkeep
 !/models/README.md
 !/models/manifest.json
+
+# Kernel build artifacts
+kernel/embodios.elf
+kernel/embodios.bin
+kernel/embodios.iso
+kernel/iso/
 /images/
 /.embodi/
 /runtime/
