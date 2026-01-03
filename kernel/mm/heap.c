@@ -1,12 +1,14 @@
 /* Simple heap allocator for AI workloads */
 
 #include "embodios/types.h"
+#include "embodios/kernel.h"
 #include "embodios/mm.h"
 #include "embodios/console.h"
 
 /* Heap configuration */
-#define HEAP_START      0x10000000  /* 256MB mark */
-#define HEAP_SIZE       (256 * 1024 * 1024)  /* 256MB heap */
+#define MIN_HEAP_SIZE   (16 * 1024 * 1024)   /* Minimum 16MB heap */
+#define MAX_HEAP_SIZE   (256 * 1024 * 1024)  /* Maximum 256MB - fits in order 16 buddy block */
+#define HEAP_PERCENT    50                    /* Use 50% for AI models (max 256MB) */
 #define MIN_BLOCK_SIZE  64
 #define ALIGNMENT       16
 
@@ -30,26 +32,69 @@ static struct {
     .initialized = false
 };
 
+/* Calculate optimal heap size based on available memory */
+static size_t calculate_heap_size(void)
+{
+    size_t available = pmm_available_memory();
+    size_t heap_size;
+
+    /* Use HEAP_PERCENT of available memory */
+    heap_size = (available * HEAP_PERCENT) / 100;
+
+    /* Apply minimum and maximum bounds */
+    if (heap_size < MIN_HEAP_SIZE) {
+        heap_size = MIN_HEAP_SIZE;
+    }
+    if (heap_size > MAX_HEAP_SIZE) {
+        heap_size = MAX_HEAP_SIZE;
+    }
+
+    /* Align to page boundary */
+    heap_size = heap_size & ~(PAGE_SIZE - 1);
+
+    return heap_size;
+}
+
 /* Initialize heap */
 void heap_init(void)
 {
-    heap_state.start = (void*)HEAP_START;
-    heap_state.end = (void*)(HEAP_START + HEAP_SIZE);
-    heap_state.total_size = HEAP_SIZE;
+    /* Calculate heap size based on available memory */
+    size_t heap_size = calculate_heap_size();
+    size_t heap_pages = heap_size / PAGE_SIZE;
+
+    /* Allocate heap memory from PMM */
+    void* heap_mem = pmm_alloc_pages(heap_pages);
+    if (!heap_mem) {
+        /* Fallback: try with minimum heap size */
+        console_printf("Heap: Failed to allocate %zu MB, trying minimum...\n",
+                       heap_size / (1024 * 1024));
+        heap_size = MIN_HEAP_SIZE;
+        heap_pages = heap_size / PAGE_SIZE;
+        heap_mem = pmm_alloc_pages(heap_pages);
+
+        if (!heap_mem) {
+            console_printf("Heap: FATAL - Cannot allocate memory for heap!\n");
+            return;
+        }
+    }
+
+    heap_state.start = heap_mem;
+    heap_state.end = (void*)((uintptr_t)heap_mem + heap_size);
+    heap_state.total_size = heap_size;
     heap_state.used_size = sizeof(block_header_t);
-    
+
     /* Create initial free block */
     block_header_t *initial = (block_header_t*)heap_state.start;
-    initial->size = HEAP_SIZE - sizeof(block_header_t);
+    initial->size = heap_size - sizeof(block_header_t);
     initial->used = false;
     initial->next = NULL;
     initial->prev = NULL;
-    
+
     heap_state.free_list = initial;
     heap_state.initialized = true;
-    
-    console_printf("Heap: Initialized %zu MB at 0x%p\n", 
-                   HEAP_SIZE / (1024 * 1024), heap_state.start);
+
+    console_printf("Heap: Initialized %zu MB at %p (dynamic from PMM)\n",
+                   heap_size / (1024 * 1024), heap_state.start);
 }
 
 /* Align size to boundary */

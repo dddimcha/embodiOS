@@ -4,9 +4,9 @@
 #include <embodios/console.h>
 
 /* Buddy allocator constants */
-#define MAX_ORDER       11  /* Max block size: 2^11 * 4KB = 8MB */
+#define MAX_ORDER       18  /* Max block size: 2^18 * 4KB = 1GB */
 #define MIN_ORDER       0   /* Min block size: 2^0 * 4KB = 4KB */
-#define BITMAP_SIZE     (1 << 16)  /* Support up to 256MB with 4KB pages */
+#define BITMAP_SIZE     (1 << 19)  /* Support up to 2GB with 4KB pages */
 
 /* Free list for each order */
 struct free_list {
@@ -298,6 +298,24 @@ void pmm_free_pages(void* addr, size_t count)
 size_t pmm_available_pages(void)
 {
     return pmm_state.free_pages;
+}
+
+/* Get total pages */
+size_t pmm_total_pages(void)
+{
+    return pmm_state.total_pages;
+}
+
+/* Get total memory in bytes */
+size_t pmm_total_memory(void)
+{
+    return pmm_state.total_pages * PAGE_SIZE;
+}
+
+/* Get available memory in bytes */
+size_t pmm_available_memory(void)
+{
+    return pmm_state.free_pages * PAGE_SIZE;
 }
 
 /* Print PMM statistics */

@@ -22,6 +22,9 @@ void* pmm_alloc_pages(size_t count);
 void pmm_free_page(void* page);
 void pmm_free_pages(void* page, size_t count);
 size_t pmm_available_pages(void);
+size_t pmm_total_pages(void);
+size_t pmm_total_memory(void);
+size_t pmm_available_memory(void);
 
 /* Virtual memory management */
 void vmm_init(void);

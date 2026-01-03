@@ -9,13 +9,20 @@
 #include <embodios/console.h>
 #include <embodios/mm.h>
 #include <embodios/gguf_parser.h>
+#include <embodios/block.h>
 
 /* Forward declarations for kernel functions */
 extern void* memcpy(void* dest, const void* src, size_t n);
 extern void* memset(void* s, int c, size_t n);
-// SSE-enabled math functions (standard libm)
+// SSE-enabled math functions (implemented in lib/math.c)
 extern float sqrtf(float x);
 extern float expf(float x);
+extern float powf(float base, float exp);
+extern float cosf(float x);
+extern float sinf(float x);
+extern float tanhf(float x);
+extern float fabsf(float x);
+extern float logf(float x);
 
 // Simple timer implementation using x86_64 TSC (time-stamp counter)
 static inline uint64_t get_timestamp(void) {
@@ -30,6 +37,8 @@ static inline uint64_t get_timestamp(void) {
 
 /* SSE2 intrinsics for x86_64 optimization */
 #ifdef __x86_64__
+/* Prevent mm_malloc.h from being included - it needs stdlib.h */
+#define _MM_MALLOC_H_INCLUDED
 #include <emmintrin.h>  // SSE2
 #endif
 
@@ -389,33 +398,15 @@ static int malloc_run_state(TinyStoriesRunState* s, TinyStoriesConfig* p) {
     return 0;
 }
 
+/* Disk-loaded model buffer */
+static uint8_t* g_disk_model_data = NULL;
+static size_t g_disk_model_size = 0;
+
 /**
- * Load model from embedded binary data
- *
- * Supports two formats:
- * 1. GGUF format - config is read from GGUF metadata (preferred)
- * 2. Legacy llama.c format - uses hardcoded defaults
+ * Load model from raw data buffer
+ * Called by tinystories_load_model() or tinystories_load_from_disk()
  */
-int tinystories_load_model(void) {
-    console_printf("Loading AI model...\n");
-
-    // Check if model weights are embedded
-    if (_binary_tinystories_15m_bin_start == NULL) {
-        console_printf("WARNING: No model weights embedded in kernel\n");
-        console_printf("AI inference will not be available.\n");
-        return 0;  // Success but no weights
-    }
-
-    const uint8_t* model_data = _binary_tinystories_15m_bin_start;
-    size_t model_size = (size_t)(_binary_tinystories_15m_bin_end - _binary_tinystories_15m_bin_start);
-
-    // Validate model size
-    if (model_size < 1024 * 1024) {
-        console_printf("WARNING: Model file too small (%zu bytes)\n", model_size);
-        console_printf("AI inference will not be available.\n");
-        return 0;
-    }
-
+static int tinystories_load_from_data(const uint8_t* model_data, size_t model_size) {
     console_printf("Model size: %zu MB\n", model_size / (1024 * 1024));
 
     // Try GGUF format first (check magic number: "GGUF")
@@ -505,13 +496,15 @@ int tinystories_load_model(void) {
     }
 
     // Try to load vocabulary from embedded tokenizer first
+    extern int tokenizer_embedded(void);
     const uint8_t* vocab_ptr = NULL;
-    if (_binary_tokenizer_bin_start != NULL) {
+    if (tokenizer_embedded()) {
         console_printf("Loading vocabulary from embedded tokenizer...\n");
         vocab_ptr = _binary_tokenizer_bin_start;
     } else {
-        // Fallback: try to find vocabulary in model file (llama.c doesn't have this)
-        console_printf("No embedded tokenizer found, trying model file...\n");
+        // Fallback: try to find vocabulary in model file
+        // llama.c format: config (28 bytes) + weights + vocab
+        console_printf("Loading vocabulary from model file...\n");
         vocab_ptr = model_data + sizeof(TinyStoriesConfig) + weights_size * sizeof(float);
     }
 
@@ -537,6 +530,158 @@ int tinystories_load_model(void) {
 
     g_model_loaded = true;
     return 0;
+}
+
+/* External helper to check if model is embedded */
+extern int tinystories_model_embedded(void);
+
+/**
+ * Load model from embedded binary data
+ */
+int tinystories_load_model(void) {
+    console_printf("Loading AI model...\n");
+
+    // Check if model weights are embedded using helper function
+    if (!tinystories_model_embedded()) {
+        console_printf("WARNING: No model weights embedded in kernel\n");
+        console_printf("AI inference will use fallback mode.\n");
+        console_printf("Use 'loadtiny' command to load from disk.\n");
+        return 0;  // Success but no weights
+    }
+
+    const uint8_t* model_data = _binary_tinystories_15m_bin_start;
+    size_t model_size = (size_t)(_binary_tinystories_15m_bin_end - _binary_tinystories_15m_bin_start);
+
+    return tinystories_load_from_data(model_data, model_size);
+}
+
+/**
+ * Load TinyStories model from VirtIO block device
+ * Reads the entire model file from disk sector 0 into heap memory
+ */
+int tinystories_load_from_disk(void) {
+    console_printf("\n");
+    console_printf("Loading TinyStories model from disk...\n");
+
+    // Get the first block device
+    block_device_t* dev = block_get_device_by_index(0);
+    if (!dev) {
+        console_printf("ERROR: No block device available\n");
+        console_printf("Make sure QEMU has a VirtIO disk attached.\n");
+        return -1;
+    }
+
+    console_printf("Using block device: %s\n", dev->name);
+    console_printf("Device capacity: %llu sectors\n", (unsigned long long)dev->total_sectors);
+
+    // Read the first sector to get the config header
+    uint8_t header[512];
+    if (block_read(dev, 0, 1, header) != 0) {
+        console_printf("ERROR: Failed to read header sector\n");
+        return -2;
+    }
+
+    // Parse config from header (first 28 bytes = 7 ints)
+    int* config = (int*)header;
+    int dim = config[0];
+    int hidden_dim = config[1];
+    int n_layers = config[2];
+    int n_heads = config[3];
+    int n_kv_heads = config[4];
+    int vocab_size = config[5];
+    int seq_len = config[6];
+
+    // Validate config (basic sanity checks)
+    if (dim <= 0 || dim > 8192 || hidden_dim <= 0 || hidden_dim > 32768 ||
+        n_layers <= 0 || n_layers > 128 || n_heads <= 0 || n_heads > 256 ||
+        vocab_size <= 0 || vocab_size > 256000) {
+        console_printf("ERROR: Invalid model config in disk header\n");
+        console_printf("  dim=%d hidden=%d layers=%d heads=%d vocab=%d\n",
+                       dim, hidden_dim, n_layers, n_heads, vocab_size);
+        console_printf("This might not be a TinyStories .bin file.\n");
+        return -3;
+    }
+
+    console_printf("Model config from disk:\n");
+    console_printf("  dim: %d, hidden: %d, layers: %d\n", dim, hidden_dim, n_layers);
+    console_printf("  heads: %d, kv_heads: %d, vocab: %d\n", n_heads, n_kv_heads, vocab_size);
+
+    // Calculate approximate model size
+    // This is a rough estimate - the actual calculation is complex
+    int head_size = dim / n_heads;
+    size_t param_bytes = 0;
+    param_bytes += vocab_size * dim * 4;  // token embeddings
+    param_bytes += n_layers * dim * 4;    // rms_att
+    param_bytes += n_layers * dim * (n_heads * head_size) * 4;  // wq
+    param_bytes += n_layers * dim * (n_kv_heads * head_size) * 4;  // wk
+    param_bytes += n_layers * dim * (n_kv_heads * head_size) * 4;  // wv
+    param_bytes += n_layers * (n_heads * head_size) * dim * 4;  // wo
+    param_bytes += n_layers * dim * 4;    // rms_ffn
+    param_bytes += n_layers * dim * hidden_dim * 4;  // w1
+    param_bytes += n_layers * hidden_dim * dim * 4;  // w2
+    param_bytes += n_layers * dim * hidden_dim * 4;  // w3
+    param_bytes += dim * 4;               // rms_final
+    param_bytes += seq_len * head_size;   // freq_cis
+
+    // Add extra for vocab data (scores + token strings)
+    size_t model_size = param_bytes + 28 + vocab_size * 64;  // rough estimate
+
+    // Round up to sector boundary
+    uint32_t sector_count = (model_size + 511) / 512;
+
+    // Cap at device capacity
+    if (sector_count > dev->total_sectors) {
+        sector_count = (uint32_t)dev->total_sectors;
+    }
+
+    size_t total_bytes = sector_count * 512ULL;
+    console_printf("Reading %u sectors (%zu MB)...\n", sector_count, total_bytes / (1024*1024));
+
+    // Free any previously loaded disk model
+    if (g_disk_model_data) {
+        heap_free(g_disk_model_data);
+        g_disk_model_data = NULL;
+    }
+
+    // Allocate memory for model
+    g_disk_model_data = (uint8_t*)heap_alloc(total_bytes);
+    if (!g_disk_model_data) {
+        console_printf("ERROR: Failed to allocate %zu bytes for model\n", total_bytes);
+        return -4;
+    }
+
+    // Read model from disk in chunks
+    #define CHUNK_SECTORS 256  // Read 128KB at a time
+    uint32_t sectors_read = 0;
+    uint32_t progress_last = 0;
+
+    while (sectors_read < sector_count) {
+        uint32_t chunk = sector_count - sectors_read;
+        if (chunk > CHUNK_SECTORS) chunk = CHUNK_SECTORS;
+
+        int ret = block_read(dev, sectors_read, chunk, g_disk_model_data + sectors_read * 512);
+        if (ret != 0) {
+            console_printf("ERROR: Disk read failed at sector %u (error %d)\n", sectors_read, ret);
+            heap_free(g_disk_model_data);
+            g_disk_model_data = NULL;
+            return -5;
+        }
+
+        sectors_read += chunk;
+
+        // Show progress every 10%
+        uint32_t progress = (sectors_read * 100) / sector_count;
+        if (progress >= progress_last + 10) {
+            console_printf("  %u%% (%u MB read)\n", progress, (sectors_read * 512) / (1024*1024));
+            progress_last = progress;
+        }
+    }
+
+    console_printf("Disk read complete.\n");
+    g_disk_model_size = total_bytes;
+
+    // Now load from the buffer
+    return tinystories_load_from_data(g_disk_model_data, g_disk_model_size);
 }
 
 // ----------------------------------------------------------------------------

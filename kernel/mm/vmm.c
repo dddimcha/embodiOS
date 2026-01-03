@@ -140,9 +140,10 @@ void vmm_init(void)
     vmm_state.kernel_pml4 = NULL;
 #endif
     
-    /* Set up kernel heap */
-    vmm_state.vmm_heap_start = (void*)0x10000000;  /* 256MB */
-    vmm_state.vmm_heap_end = (void*)0x20000000;    /* 512MB */
+    /* Set up VMM heap - separate from main heap, used for page table allocations */
+    /* This is a small region for VMM internal allocations */
+    vmm_state.vmm_heap_start = (void*)0x8000000;   /* 128MB */
+    vmm_state.vmm_heap_end = (void*)0x8400000;     /* 132MB - 4MB for VMM */
     vmm_state.vmm_heap_used = 0;
     
     vmm_state.initialized = true;

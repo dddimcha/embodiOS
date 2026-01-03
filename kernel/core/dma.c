@@ -213,16 +213,12 @@ dma_addr_t virt_to_dma(void* vaddr) {
         return DMA_ADDR_INVALID;
     }
 
-    /* Identity mapping: physical = virtual - KERNEL_BASE */
-    uintptr_t virt = (uintptr_t)vaddr;
-
-    /* Sanity check - address should be above kernel base */
-    if (virt < KERNEL_BASE) {
-        /* Assume it's already a physical address or low memory */
-        return (dma_addr_t)virt;
-    }
-
-    return (dma_addr_t)(virt - KERNEL_BASE);
+    /*
+     * EMBODIOS runs with identity mapping (virt == phys).
+     * The boot.S comment confirms: "we're identity-mapped, no higher half needed"
+     * So we just return the address as-is.
+     */
+    return (dma_addr_t)(uintptr_t)vaddr;
 }
 
 void* dma_to_virt(dma_addr_t dma_addr) {
@@ -230,8 +226,8 @@ void* dma_to_virt(dma_addr_t dma_addr) {
         return NULL;
     }
 
-    /* Identity mapping: virtual = physical + KERNEL_BASE */
-    return (void*)(dma_addr + KERNEL_BASE);
+    /* Identity mapping: virtual == physical */
+    return (void*)(uintptr_t)dma_addr;
 }
 
 /* ============================================================================
@@ -244,7 +240,7 @@ void* dma_alloc_coherent(size_t size, dma_addr_t* dma_handle) {
         return NULL;
     }
 
-    if (size == 0 || !dma_handle) {
+    if (size == 0) {
         return NULL;
     }
 
@@ -286,7 +282,9 @@ void* dma_alloc_coherent(size_t size, dma_addr_t* dma_handle) {
         g_dma.stats.peak_allocated = g_dma.stats.bytes_allocated;
     }
 
-    *dma_handle = dma_addr;
+    if (dma_handle) {
+        *dma_handle = dma_addr;
+    }
     return vaddr;
 }
 
