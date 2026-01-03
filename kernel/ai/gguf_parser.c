@@ -17,6 +17,7 @@
 #include <embodios/console.h>
 #include <embodios/mm.h>
 #include <embodios/gguf_parser.h>
+#include <embodios/block.h>
 
 /* ============================================================================
  * GGUF Format Constants
@@ -1207,4 +1208,125 @@ const void* gguf_parser_get_tensor_data_ptr(const struct gguf_tensor_info* info)
 ggml_type_t gguf_parser_get_model_quant_type(void)
 {
     return g_ctx.predominant_type;
+}
+
+/* ============================================================================
+ * Block Device Loading
+ * ============================================================================ */
+
+/* Static buffer for model data loaded from block device */
+static uint8_t* g_model_buffer = NULL;
+static size_t g_model_buffer_size = 0;
+
+/**
+ * Load GGUF model from block device
+ *
+ * @param dev       Block device to read from
+ * @param offset    Byte offset into device (usually 0)
+ * @param size      Size of model in bytes (0 = auto-detect from device size)
+ *
+ * @return 0 on success, negative error on failure
+ */
+int gguf_load_from_block(block_device_t* dev, uint64_t offset, size_t size)
+{
+    if (!dev) {
+        console_printf("[GGUF] Error: No block device specified\n");
+        return -1;
+    }
+
+    /* Calculate size if not specified */
+    uint64_t dev_capacity = block_capacity(dev);
+    if (size == 0) {
+        if (offset >= dev_capacity) {
+            console_printf("[GGUF] Error: Offset beyond device capacity\n");
+            return -1;
+        }
+        size = (size_t)(dev_capacity - offset);
+    }
+
+    console_printf("[GGUF] Loading model from %s (offset=%llu, size=%zu MB)\n",
+                   dev->name, offset, size / (1024 * 1024));
+
+    /* Free any previous buffer */
+    if (g_model_buffer) {
+        heap_free(g_model_buffer);
+        g_model_buffer = NULL;
+        g_model_buffer_size = 0;
+    }
+
+    /* Allocate buffer for model data */
+    g_model_buffer = (uint8_t*)heap_alloc(size);
+    if (!g_model_buffer) {
+        console_printf("[GGUF] Error: Failed to allocate %zu MB for model\n",
+                       size / (1024 * 1024));
+        return -1;
+    }
+    g_model_buffer_size = size;
+
+    console_printf("[GGUF] Allocated %zu MB buffer at %p\n",
+                   size / (1024 * 1024), g_model_buffer);
+
+    /* Read data in chunks */
+    size_t chunk_size = 64 * 1024;  /* 64KB chunks */
+    size_t bytes_read = 0;
+    uint64_t current_offset = offset;
+
+    while (bytes_read < size) {
+        size_t to_read = size - bytes_read;
+        if (to_read > chunk_size) {
+            to_read = chunk_size;
+        }
+
+        /* Calculate sectors */
+        uint64_t start_sector = current_offset / BLOCK_SECTOR_SIZE;
+        uint32_t num_sectors = (to_read + BLOCK_SECTOR_SIZE - 1) / BLOCK_SECTOR_SIZE;
+
+        /* Read sectors */
+        int ret = block_read(dev, start_sector, num_sectors,
+                             g_model_buffer + bytes_read);
+        if (ret != BLOCK_OK) {
+            console_printf("[GGUF] Error: Block read failed at offset %zu\n",
+                           bytes_read);
+            heap_free(g_model_buffer);
+            g_model_buffer = NULL;
+            g_model_buffer_size = 0;
+            return -1;
+        }
+
+        bytes_read += num_sectors * BLOCK_SECTOR_SIZE;
+        current_offset += num_sectors * BLOCK_SECTOR_SIZE;
+
+        /* Progress indicator every 10MB */
+        if ((bytes_read % (10 * 1024 * 1024)) == 0) {
+            console_printf("[GGUF] Read %zu / %zu MB...\n",
+                           bytes_read / (1024 * 1024), size / (1024 * 1024));
+        }
+    }
+
+    console_printf("[GGUF] Read complete, parsing GGUF...\n");
+
+    /* Parse the loaded data */
+    int ret = gguf_parser_load(g_model_buffer, size);
+    if (ret < 0) {
+        console_printf("[GGUF] Error: Failed to parse GGUF data\n");
+        heap_free(g_model_buffer);
+        g_model_buffer = NULL;
+        g_model_buffer_size = 0;
+        return -1;
+    }
+
+    console_printf("[GGUF] Model loaded successfully from %s\n", dev->name);
+    return 0;
+}
+
+/**
+ * Free model data loaded from block device
+ */
+void gguf_free_block_buffer(void)
+{
+    if (g_model_buffer) {
+        heap_free(g_model_buffer);
+        g_model_buffer = NULL;
+        g_model_buffer_size = 0;
+    }
 }

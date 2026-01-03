@@ -9,6 +9,7 @@
 #include <embodios/ai.h>
 #include <embodios/dma.h>
 #include <embodios/pci.h>
+#include <embodios/virtio_blk.h>
 #include <embodios/model_registry.h>
 
 /* Kernel version info */
@@ -67,7 +68,10 @@ void kernel_main(void)
     
     /* Memory management setup */
     console_printf("Initializing memory management...\n");
-    size_t mem_size = 256 * 1024 * 1024; /* Default 256MB */
+    /* TODO: Parse multiboot memory map for actual available RAM.
+     * Using 512MB for faster x86 emulation boot. TinyStories model fits.
+     * For larger models, increase: 1024*1024*1024 for 1GB (slower boot) */
+    size_t mem_size = 512 * 1024 * 1024; /* 512MB for x86 emulation */
     void* mem_start = (void*)ALIGN_UP((uintptr_t)_kernel_end, PAGE_SIZE);
     pmm_init(mem_start, mem_size);
     vmm_init();
@@ -84,6 +88,10 @@ void kernel_main(void)
     /* Initialize PCI subsystem */
     console_printf("Initializing PCI subsystem...\n");
     pci_init();
+
+    /* Initialize VirtIO block driver */
+    console_printf("Initializing VirtIO block driver...\n");
+    virtio_blk_init();
 
     /* Initialize task scheduler */
     console_printf("Initializing task scheduler...\n");

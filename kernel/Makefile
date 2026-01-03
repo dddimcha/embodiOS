@@ -54,15 +54,22 @@ ifeq ($(ARCH),x86_64)
     CFLAGS += -mno-red-zone -mcmodel=kernel
     # NOTE: SSE2 enabled for AI inference SIMD and math functions (sqrtf, expf, etc.)
     CFLAGS += -msse2 -mfpmath=sse
-    # Check if we're on Linux or macOS
-    UNAME_S := $(shell uname -s)
-    ifeq ($(UNAME_S),Linux)
-        ASFLAGS = -m64
+    # Check if we're using cross-compiler or native tools
+    ifneq (,$(findstring x86_64-elf,$(CC)))
+        # Cross-compiler (x86_64-elf-gcc)
+        ASFLAGS = -c
         LDFLAGS = -m elf_x86_64
     else
-        # macOS flags
-        ASFLAGS = -arch x86_64
-        LDFLAGS = -arch x86_64
+        # Check if we're on Linux or macOS
+        UNAME_S := $(shell uname -s)
+        ifeq ($(UNAME_S),Linux)
+            ASFLAGS = -c
+            LDFLAGS = -m elf_x86_64
+        else
+            # macOS native flags (Clang)
+            ASFLAGS = -arch x86_64
+            LDFLAGS = -arch x86_64
+        endif
     endif
 endif
 
@@ -101,6 +108,7 @@ KERNEL_C_SOURCES = \
     core/dma_test.c \
     core/lock_test.c \
     drivers/pci/pci.c \
+    drivers/block/virtio_blk.c \
     mm/pmm.c \
     mm/vmm.c \
     mm/slab.c \
@@ -189,24 +197,22 @@ ARCH_C_OBJS = $(ARCH_C_SOURCES:.c=.o)
 TINYSTORIES_MODEL = ../models/tinystories-15m.bin
 TINYSTORIES_TOKENIZER = ../models/tokenizer.bin
 
-# Enable model embedding for x86_64 builds on Linux, but only if model files exist
+# Enable model embedding for x86_64 builds if model files exist
+# Works on both Linux and macOS with cross-compilation
 # The kernel boots fine without embedded models - AI will just be unavailable
 ifeq ($(ARCH),x86_64)
-    ifneq ($(BUILD_OS),Darwin)
-        # Check if model files exist before trying to embed them
-        ifneq ($(wildcard $(TINYSTORIES_MODEL)),)
-            MODEL_OBJS = ai/tinystories_model.o
-            $(info Model embedding enabled: $(TINYSTORIES_MODEL) found)
-        else
-            MODEL_OBJS =
-            $(info Model embedding disabled: $(TINYSTORIES_MODEL) not found)
-        endif
-        ifneq ($(wildcard $(TINYSTORIES_TOKENIZER)),)
-            MODEL_OBJS += ai/tinystories_tokenizer.o
-            $(info Tokenizer embedding enabled: $(TINYSTORIES_TOKENIZER) found)
-        endif
+    # Check if model files exist before trying to embed them
+    ifneq ($(wildcard $(TINYSTORIES_MODEL)),)
+        MODEL_OBJS = ai/tinystories_model.o ai/tinystories_model_flag.o
+        $(info Model embedding enabled: $(TINYSTORIES_MODEL) found)
     else
         MODEL_OBJS =
+        $(info Model embedding disabled: $(TINYSTORIES_MODEL) not found)
+    endif
+    # Always embed tokenizer if available (small file, 433KB)
+    ifneq ($(wildcard $(TINYSTORIES_TOKENIZER)),)
+        MODEL_OBJS += ai/tinystories_tokenizer.o ai/tokenizer_flag.o
+        $(info Tokenizer embedding enabled: $(TINYSTORIES_TOKENIZER) found)
     endif
 else
     MODEL_OBJS =
@@ -218,7 +224,9 @@ ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS) $(LLAMA_CPP_OBJS) $(GGM
 all: embodios.elf embodios.bin
 
 embodios.elf: $(ALL_OBJS)
-ifeq ($(BUILD_OS),Darwin)
+ifneq (,$(findstring x86_64-elf,$(LD)))
+	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
+else ifeq ($(BUILD_OS),Darwin)
 	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS)
 else
 	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
@@ -239,7 +247,8 @@ embodios.bin: embodios.elf
 
 # Clean
 clean:
-	rm -f $(ALL_OBJS) embodios.elf embodios.bin
+	rm -f $(ALL_OBJS) embodios.elf embodios.bin embodios.iso
+	rm -f ai/tinystories_model_flag.o ai/tokenizer_flag.o
 
 # Embed TinyStories model as binary object
 ai/tinystories_model.o: $(TINYSTORIES_MODEL)
@@ -251,6 +260,8 @@ ifeq ($(ARCH),x86_64)
 		--redefine-sym _binary____models_tinystories_15m_bin_end=_binary_tinystories_15m_bin_end \
 		--redefine-sym _binary____models_tinystories_15m_bin_size=_binary_tinystories_15m_bin_size \
 		$< $@
+	@# Create presence flag object
+	@echo "int _tinystories_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/tinystories_model_flag.o
 else
 	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
@@ -258,6 +269,7 @@ else
 		--redefine-sym _binary____models_tinystories_15m_bin_end=_binary_tinystories_15m_bin_end \
 		--redefine-sym _binary____models_tinystories_15m_bin_size=_binary_tinystories_15m_bin_size \
 		$< $@
+	@echo "int _tinystories_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/tinystories_model_flag.o
 endif
 
 # Embed tokenizer as binary object
@@ -270,6 +282,7 @@ ifeq ($(ARCH),x86_64)
 		--redefine-sym _binary____models_tokenizer_bin_end=_binary_tokenizer_bin_end \
 		--redefine-sym _binary____models_tokenizer_bin_size=_binary_tokenizer_bin_size \
 		$< $@
+	@echo "int _tokenizer_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/tokenizer_flag.o
 else
 	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
@@ -277,6 +290,7 @@ else
 		--redefine-sym _binary____models_tokenizer_bin_end=_binary_tokenizer_bin_end \
 		--redefine-sym _binary____models_tokenizer_bin_size=_binary_tokenizer_bin_size \
 		$< $@
+	@echo "int _tokenizer_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/tokenizer_flag.o
 endif
 
 # ISO for x86_64

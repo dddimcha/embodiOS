@@ -13,6 +13,9 @@
 #include "embodios/pci.h"
 #include "embodios/model_registry.h"
 #include "embodios/bpe_tokenizer.h"
+#include "embodios/virtio_blk.h"
+#include "embodios/block.h"
+#include "embodios/gguf_parser.h"
 
 /* String function declarations */
 int strcmp(const char* s1, const char* s2);
@@ -84,6 +87,14 @@ void process_command(const char* command)
         console_printf("  lspci       - List PCI devices\n");
         console_printf("  pcitest     - Run PCI subsystem tests\n");
         console_printf("  pcistats    - Show PCI statistics\n");
+        console_printf("\n");
+        console_printf("Storage:\n");
+        console_printf("  blkinfo     - Show VirtIO block device info\n");
+        console_printf("  blktest     - Run VirtIO block tests\n");
+        console_printf("  blkread <sector> [count] - Read sectors from disk\n");
+        console_printf("  blkdevs     - List all block devices\n");
+        console_printf("  loadmodel   - Load GGUF model from VirtIO disk\n");
+        console_printf("  loadtiny    - Load TinyStories model from disk\n");
         console_printf("\n");
         console_printf("Testing:\n");
         console_printf("  locktest    - Run locking primitives tests\n");
@@ -216,6 +227,70 @@ void process_command(const char* command)
         pci_run_tests();
     } else if (strcmp(command, "pcistats") == 0) {
         pci_print_stats();
+    } else if (strcmp(command, "blkinfo") == 0) {
+        virtio_blk_info();
+    } else if (strcmp(command, "blktest") == 0) {
+        virtio_blk_test();
+    } else if (strncmp(command, "blkread ", 8) == 0) {
+        /* Parse: blkread <sector> [count] */
+        const char* args = command + 8;
+        uint64_t sector = 0;
+        uint32_t count = 1;
+
+        /* Parse sector number */
+        while (*args >= '0' && *args <= '9') {
+            sector = sector * 10 + (*args - '0');
+            args++;
+        }
+
+        /* Skip whitespace and parse optional count */
+        while (*args == ' ') args++;
+        if (*args >= '0' && *args <= '9') {
+            count = 0;
+            while (*args >= '0' && *args <= '9') {
+                count = count * 10 + (*args - '0');
+                args++;
+            }
+        }
+
+        virtio_blk_read_cmd(sector, count);
+    } else if (strcmp(command, "blkdevs") == 0) {
+        block_print_devices();
+    } else if (strcmp(command, "loadmodel") == 0) {
+        /* Load GGUF model from first VirtIO block device */
+        block_device_t* dev = block_get_device_by_index(0);
+        if (!dev) {
+            console_printf("ERROR: No block device available\n");
+            console_printf("Make sure QEMU is started with a VirtIO disk\n");
+            return;
+        }
+
+        console_printf("Loading GGUF model from %s...\n", dev->name);
+        int ret = gguf_load_from_block(dev, 0, 0);  /* Auto-detect size */
+        if (ret == 0) {
+            console_printf("Model loaded successfully!\n");
+            gguf_parser_print_summary();
+
+            /* Initialize BPE tokenizer from loaded model */
+            console_printf("\nInitializing tokenizer...\n");
+            if (bpe_tokenizer_init() == 0) {
+                console_printf("Tokenizer ready.\n");
+            }
+        } else {
+            console_printf("Failed to load model (error %d)\n", ret);
+        }
+    } else if (strcmp(command, "loadtiny") == 0) {
+        /* Load TinyStories model from VirtIO disk */
+        extern int tinystories_load_from_disk(void);
+        int ret = tinystories_load_from_disk();
+        if (ret == 0) {
+            console_printf("TinyStories model ready for inference!\n");
+            console_printf("Use 'ai <prompt>' to generate text.\n");
+        } else {
+            console_printf("Failed to load TinyStories model (error %d)\n", ret);
+        }
+    } else if (strcmp(command, "blkstats") == 0) {
+        virtio_blk_print_stats();
     } else if (strcmp(command, "locktest") == 0) {
         extern int lock_run_tests(void);
         lock_run_tests();
