@@ -67,13 +67,25 @@ embodi bundle create --model my-ai-os:latest --output embodios.iso --target bare
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md)
-- [Modelfile Reference](docs/modelfile-reference.md)
-- [Hardware Compatibility](docs/hardware.md)
-- [API Documentation](docs/api.md)
-- [Performance Benchmarks](docs/performance-benchmarks.md)
-- [Bare Metal Deployment](docs/bare-metal-deployment.md)
+The `docs/` folder is a **git submodule** pointing to the [EMBODIOS Wiki](https://github.com/dddimcha/embodiOS/wiki).
+
+### Wiki Documentation (docs/)
+- [Home](docs/Home.md) - Wiki home page
+- [Current State Analysis](docs/Current-State-Analysis.md) - Project progress (65% complete)
+- [Three Strategic Pillars](docs/Three-Strategic-Pillars.md) - Implementation roadmap
+- [Pillar 1: Ollama GGUF Integration](docs/Pillar-1:-Ollama-GGUF-Integration.md) - AI runtime (85% complete)
+
+### Quick Start Guides (docs-archive/)
+- [Getting Started](docs-archive/getting-started.md)
+- [Modelfile Reference](docs-archive/modelfile-reference.md)
+- [Hardware Compatibility](docs-archive/hardware.md)
+- [API Documentation](docs-archive/api.md)
 - [Contributing Guide](CONTRIBUTING.md)
+
+### Technical Details (docs-archive/)
+- [Performance Benchmarks](docs-archive/performance-benchmarks.md)
+- [Bare Metal Deployment](docs-archive/bare-metal-deployment.md)
+- [Quantized Integer Inference](docs-archive/quantized-integer-inference.md)
 
 ## Use Cases
 
