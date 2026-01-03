@@ -9,6 +9,7 @@
 #include <embodios/ai.h>
 #include <embodios/dma.h>
 #include <embodios/pci.h>
+#include <embodios/model_registry.h>
 
 /* Kernel version info */
 const char* kernel_version = "EMBODIOS v0.1.0-native";
@@ -91,6 +92,9 @@ void kernel_main(void)
     /* Initialize AI runtime */
     console_printf("Initializing AI runtime...\n");
     model_runtime_init();
+
+    /* Initialize model registry for multi-model support */
+    model_registry_init();
 
     /* Load TinyStories-15M model for interactive use */
     extern void tinystories_interactive_init(void);
