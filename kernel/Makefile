@@ -125,6 +125,7 @@ KERNEL_C_SOURCES = \
     ai/model_loader.c \
     ai/model_registry.c \
     ai/embedded_model_stubs.c \
+    ai/bpe_tokenizer.c \
     ai/transformer_full.c \
     ai/transformer_inference.c \
     ai/inference_test.c \
