@@ -59,38 +59,7 @@ enum gguf_type {
     GGUF_TYPE_COUNT
 };
 
-/* GGML tensor types */
-enum ggml_type {
-    GGML_TYPE_F32     = 0,
-    GGML_TYPE_F16     = 1,
-    GGML_TYPE_Q4_0    = 2,
-    GGML_TYPE_Q4_1    = 3,
-    GGML_TYPE_Q5_0    = 6,
-    GGML_TYPE_Q5_1    = 7,
-    GGML_TYPE_Q8_0    = 8,
-    GGML_TYPE_Q8_1    = 9,
-    GGML_TYPE_Q2_K    = 10,
-    GGML_TYPE_Q3_K    = 11,
-    GGML_TYPE_Q4_K    = 12,
-    GGML_TYPE_Q5_K    = 13,
-    GGML_TYPE_Q6_K    = 14,
-    GGML_TYPE_Q8_K    = 15,
-    GGML_TYPE_IQ2_XXS = 16,
-    GGML_TYPE_IQ2_XS  = 17,
-    GGML_TYPE_IQ3_XXS = 18,
-    GGML_TYPE_IQ1_S   = 19,
-    GGML_TYPE_IQ4_NL  = 20,
-    GGML_TYPE_IQ3_S   = 21,
-    GGML_TYPE_IQ2_S   = 22,
-    GGML_TYPE_IQ4_XS  = 23,
-    GGML_TYPE_I8      = 24,
-    GGML_TYPE_I16     = 25,
-    GGML_TYPE_I32     = 26,
-    GGML_TYPE_I64     = 27,
-    GGML_TYPE_F64     = 28,
-    GGML_TYPE_BF16    = 29,
-    GGML_TYPE_COUNT
-};
+/* Use ggml_type_t from header */
 
 /* ============================================================================
  * GGUF Header Structures
@@ -122,6 +91,9 @@ struct gguf_vocab_token {
     uint32_t type;  /* 0=normal, 1=unknown, 2=control, 3=user_defined, etc. */
 };
 
+/* Maximum tensors to store (for most models) */
+#define GGUF_MAX_STORED_TENSORS 4096
+
 /* ============================================================================
  * GGUF Parser Context
  * ============================================================================ */
@@ -150,6 +122,14 @@ struct gguf_parser_ctx {
     uint32_t vocab_count;
     float* vocab_scores;
     uint32_t* vocab_types;
+
+    /* Tensor info storage */
+    struct gguf_tensor_info* tensors;
+    uint64_t tensor_count;
+
+    /* Type statistics for detecting model quantization */
+    uint32_t type_counts[GGML_TYPE_COUNT];
+    ggml_type_t predominant_type;
 
     /* Validation */
     uint8_t is_valid;
@@ -201,15 +181,74 @@ static size_t gguf_type_size(enum gguf_type type)
     return 0;
 }
 
-static const char* ggml_type_name(enum ggml_type type)
+/* Block sizes for GGML types */
+static const size_t ggml_block_sizes[] = {
+    [GGML_TYPE_F32]   = 4,
+    [GGML_TYPE_F16]   = 2,
+    [GGML_TYPE_Q4_0]  = 18,   /* 2 + 16 */
+    [GGML_TYPE_Q4_1]  = 20,   /* 4 + 16 */
+    [GGML_TYPE_Q5_0]  = 22,   /* 2 + 4 + 16 */
+    [GGML_TYPE_Q5_1]  = 24,   /* 4 + 4 + 16 */
+    [GGML_TYPE_Q8_0]  = 34,   /* 2 + 32 */
+    [GGML_TYPE_Q8_1]  = 36,   /* 4 + 32 */
+    [GGML_TYPE_Q2_K]  = 84,
+    [GGML_TYPE_Q3_K]  = 110,
+    [GGML_TYPE_Q4_K]  = 144,  /* 4 + 12 + 128 */
+    [GGML_TYPE_Q5_K]  = 176,  /* 4 + 12 + 32 + 128 */
+    [GGML_TYPE_Q6_K]  = 210,  /* 128 + 64 + 16 + 2 */
+    [GGML_TYPE_Q8_K]  = 292,
+};
+
+/* Elements per block for GGML types */
+static const size_t ggml_block_elements[] = {
+    [GGML_TYPE_F32]   = 1,
+    [GGML_TYPE_F16]   = 1,
+    [GGML_TYPE_Q4_0]  = 32,
+    [GGML_TYPE_Q4_1]  = 32,
+    [GGML_TYPE_Q5_0]  = 32,
+    [GGML_TYPE_Q5_1]  = 32,
+    [GGML_TYPE_Q8_0]  = 32,
+    [GGML_TYPE_Q8_1]  = 32,
+    [GGML_TYPE_Q2_K]  = 256,
+    [GGML_TYPE_Q3_K]  = 256,
+    [GGML_TYPE_Q4_K]  = 256,
+    [GGML_TYPE_Q5_K]  = 256,
+    [GGML_TYPE_Q6_K]  = 256,
+    [GGML_TYPE_Q8_K]  = 256,
+};
+
+const char* ggml_type_name(ggml_type_t type)
 {
     static const char* names[] = {
-        "F32", "F16", "Q4_0", "Q4_1", "???", "???",
-        "Q5_0", "Q5_1", "Q8_0", "Q8_1",
-        "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K"
+        [GGML_TYPE_F32]   = "F32",
+        [GGML_TYPE_F16]   = "F16",
+        [GGML_TYPE_Q4_0]  = "Q4_0",
+        [GGML_TYPE_Q4_1]  = "Q4_1",
+        [GGML_TYPE_Q5_0]  = "Q5_0",
+        [GGML_TYPE_Q5_1]  = "Q5_1",
+        [GGML_TYPE_Q8_0]  = "Q8_0",
+        [GGML_TYPE_Q8_1]  = "Q8_1",
+        [GGML_TYPE_Q2_K]  = "Q2_K",
+        [GGML_TYPE_Q3_K]  = "Q3_K",
+        [GGML_TYPE_Q4_K]  = "Q4_K",
+        [GGML_TYPE_Q5_K]  = "Q5_K",
+        [GGML_TYPE_Q6_K]  = "Q6_K",
+        [GGML_TYPE_Q8_K]  = "Q8_K",
     };
-    if (type <= GGML_TYPE_Q8_K) return names[type];
+    if (type < GGML_TYPE_COUNT && names[type]) return names[type];
     return "unknown";
+}
+
+size_t ggml_type_block_size(ggml_type_t type)
+{
+    if (type < GGML_TYPE_COUNT) return ggml_block_sizes[type];
+    return 0;
+}
+
+size_t ggml_type_block_elements(ggml_type_t type)
+{
+    if (type < GGML_TYPE_COUNT) return ggml_block_elements[type];
+    return 0;
 }
 
 /* ============================================================================
@@ -734,6 +773,18 @@ static int gguf_parse_metadata(void)
  * Tensor Info Parsing
  * ============================================================================ */
 
+/* Calculate tensor size in bytes based on type and element count */
+static size_t calc_tensor_size(ggml_type_t type, uint64_t n_elements)
+{
+    size_t block_size = ggml_type_block_size(type);
+    size_t block_elems = ggml_type_block_elements(type);
+
+    if (block_elems == 0) return 0;
+
+    size_t n_blocks = (n_elements + block_elems - 1) / block_elems;
+    return n_blocks * block_size;
+}
+
 static int gguf_parse_tensor_info(void)
 {
     const uint8_t* ptr = g_ctx.tensor_info_start;
@@ -741,9 +792,28 @@ static int gguf_parse_tensor_info(void)
 
     GGUF_INFO("Parsing %llu tensor entries...", (unsigned long long)g_ctx.n_tensors);
 
+    /* Allocate tensor info storage */
+    uint64_t n_to_store = g_ctx.n_tensors;
+    if (n_to_store > GGUF_MAX_STORED_TENSORS) {
+        GGUF_DEBUG("Capping tensor storage at %d (model has %llu)",
+                   GGUF_MAX_STORED_TENSORS, (unsigned long long)g_ctx.n_tensors);
+        n_to_store = GGUF_MAX_STORED_TENSORS;
+    }
+
+    g_ctx.tensors = (struct gguf_tensor_info*)kmalloc(n_to_store * sizeof(struct gguf_tensor_info));
+    if (!g_ctx.tensors) {
+        GGUF_ERROR("Failed to allocate tensor info storage");
+        return -1;
+    }
+    memset(g_ctx.tensors, 0, n_to_store * sizeof(struct gguf_tensor_info));
+    g_ctx.tensor_count = 0;
+
+    /* Reset type counters */
+    memset(g_ctx.type_counts, 0, sizeof(g_ctx.type_counts));
+
     for (uint64_t i = 0; i < g_ctx.n_tensors; i++) {
         /* Read tensor name */
-        char name[128];
+        char name[GGUF_MAX_TENSOR_NAME];
         if (safe_read_string(&ptr, end, name, sizeof(name), NULL) < 0) {
             GGUF_ERROR("Failed to read tensor %llu name", (unsigned long long)i);
             return -1;
@@ -753,12 +823,12 @@ static int gguf_parse_tensor_info(void)
         uint32_t n_dims;
         if (safe_read_u32(&ptr, end, &n_dims) < 0) return -1;
 
-        if (n_dims > 4) {
+        if (n_dims > GGUF_MAX_TENSOR_DIMS) {
             GGUF_ERROR("Too many dimensions: %u", n_dims);
             return -1;
         }
 
-        uint64_t dims[4] = {0};
+        uint64_t dims[GGUF_MAX_TENSOR_DIMS] = {0};
         for (uint32_t d = 0; d < n_dims; d++) {
             if (safe_read_u64(&ptr, end, &dims[d]) < 0) return -1;
         }
@@ -769,13 +839,39 @@ static int gguf_parse_tensor_info(void)
         if (safe_read_u32(&ptr, end, &type) < 0) return -1;
         if (safe_read_u64(&ptr, end, &offset) < 0) return -1;
 
+        /* Calculate total elements */
+        uint64_t n_elements = 1;
+        for (uint32_t d = 0; d < n_dims; d++) {
+            n_elements *= dims[d];
+        }
+
+        /* Store tensor info if within limit */
+        if (i < n_to_store) {
+            struct gguf_tensor_info* ti = &g_ctx.tensors[i];
+            strncpy(ti->name, name, GGUF_MAX_TENSOR_NAME - 1);
+            ti->name[GGUF_MAX_TENSOR_NAME - 1] = '\0';
+            ti->n_dims = n_dims;
+            for (uint32_t d = 0; d < GGUF_MAX_TENSOR_DIMS; d++) {
+                ti->dims[d] = dims[d];
+            }
+            ti->type = (ggml_type_t)type;
+            ti->offset = offset;
+            ti->size = calc_tensor_size((ggml_type_t)type, n_elements);
+            g_ctx.tensor_count++;
+        }
+
+        /* Count quantization types (for detecting model quant type) */
+        if (type < GGML_TYPE_COUNT) {
+            g_ctx.type_counts[type]++;
+        }
+
         /* Log first few tensors */
         if (i < 5 || i == g_ctx.n_tensors - 1) {
             GGUF_DEBUG("Tensor[%llu]: %s [%llux%llux%llux%llu] type=%s offset=%llu",
                       (unsigned long long)i, name,
                       (unsigned long long)dims[0], (unsigned long long)dims[1],
                       (unsigned long long)dims[2], (unsigned long long)dims[3],
-                      ggml_type_name((enum ggml_type)type),
+                      ggml_type_name((ggml_type_t)type),
                       (unsigned long long)offset);
         }
     }
@@ -785,8 +881,21 @@ static int gguf_parse_tensor_info(void)
     size_t aligned = (metadata_size + g_ctx.alignment - 1) & ~(g_ctx.alignment - 1);
     g_ctx.tensor_data_start = g_ctx.data + aligned;
 
+    /* Determine predominant quantization type (exclude F32/F16 for this) */
+    uint32_t max_count = 0;
+    g_ctx.predominant_type = GGML_TYPE_F16;  /* Default */
+
+    for (int t = GGML_TYPE_Q4_0; t < GGML_TYPE_COUNT; t++) {
+        if (g_ctx.type_counts[t] > max_count) {
+            max_count = g_ctx.type_counts[t];
+            g_ctx.predominant_type = (ggml_type_t)t;
+        }
+    }
+
     GGUF_INFO("Tensor data starts at offset %zu (aligned from %zu)",
               aligned, metadata_size);
+    GGUF_INFO("Predominant quantization: %s (%u tensors)",
+              ggml_type_name(g_ctx.predominant_type), max_count);
 
     return 0;
 }
@@ -995,6 +1104,10 @@ void gguf_parser_free(void)
         kfree(g_ctx.vocab_types);
     }
 
+    if (g_ctx.tensors) {
+        kfree(g_ctx.tensors);
+    }
+
     memset(&g_ctx, 0, sizeof(g_ctx));
     GGUF_INFO("Parser resources freed");
 }
@@ -1031,5 +1144,67 @@ void gguf_parser_print_summary(void)
     console_printf("\nTensors: %llu\n", (unsigned long long)g_ctx.n_tensors);
     console_printf("Tensor data offset: %zu\n", (size_t)(g_ctx.tensor_data_start - g_ctx.data));
     console_printf("Alignment: %zu bytes\n", g_ctx.alignment);
+    console_printf("Quantization: %s\n", ggml_type_name(g_ctx.predominant_type));
     console_printf("==========================\n\n");
+}
+
+/* ============================================================================
+ * Tensor Info API
+ * ============================================================================ */
+
+/**
+ * Get number of tensors
+ */
+uint64_t gguf_parser_get_tensor_count(void)
+{
+    return g_ctx.tensor_count;
+}
+
+/**
+ * Get tensor info by index
+ */
+const struct gguf_tensor_info* gguf_parser_get_tensor_by_index(uint64_t index)
+{
+    if (!g_ctx.tensors || index >= g_ctx.tensor_count) {
+        return NULL;
+    }
+    return &g_ctx.tensors[index];
+}
+
+/**
+ * Get tensor info by name
+ */
+const struct gguf_tensor_info* gguf_parser_get_tensor_by_name(const char* name)
+{
+    if (!g_ctx.tensors || !name) {
+        return NULL;
+    }
+
+    for (uint64_t i = 0; i < g_ctx.tensor_count; i++) {
+        if (strcmp(g_ctx.tensors[i].name, name) == 0) {
+            return &g_ctx.tensors[i];
+        }
+    }
+
+    return NULL;
+}
+
+/**
+ * Get pointer to tensor data
+ */
+const void* gguf_parser_get_tensor_data_ptr(const struct gguf_tensor_info* info)
+{
+    if (!info || !g_ctx.tensor_data_start) {
+        return NULL;
+    }
+
+    return g_ctx.tensor_data_start + info->offset;
+}
+
+/**
+ * Get the predominant quantization type in the model
+ */
+ggml_type_t gguf_parser_get_model_quant_type(void)
+{
+    return g_ctx.predominant_type;
 }

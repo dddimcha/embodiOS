@@ -111,6 +111,7 @@ KERNEL_C_SOURCES = \
     ai/gguf_integer_loader.c \
     ai/gguf_parser.c \
     ai/quantized_ops.c \
+    ai/quantized_test.c \
     ai/quantized_inference.c \
     ai/tinyllama_integer_inference.c \
     ai/tinystories_inference.c \
