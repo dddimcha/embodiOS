@@ -11,6 +11,7 @@
 #include "embodios/tvm.h"
 #include "embodios/dma.h"
 #include "embodios/pci.h"
+#include "embodios/model_registry.h"
 
 /* String function declarations */
 int strcmp(const char* s1, const char* s2);
@@ -21,6 +22,27 @@ size_t strlen(const char* s);
 void arch_reboot(void);
 void pmm_print_stats(void);
 void heap_stats(void);
+
+/* Helper to parse integer from string */
+static int parse_int(const char* s)
+{
+    int result = 0;
+    int sign = 1;
+
+    while (*s == ' ') s++;  /* Skip whitespace */
+
+    if (*s == '-') {
+        sign = -1;
+        s++;
+    }
+
+    while (*s >= '0' && *s <= '9') {
+        result = result * 10 + (*s - '0');
+        s++;
+    }
+
+    return result * sign;
+}
 
 /* Command processor implementation */
 void command_processor_init(struct embodios_model* model)
@@ -38,23 +60,37 @@ void process_command(const char* command)
     /* Basic built-in commands */
     if (strcmp(command, "help") == 0) {
         console_printf("Available commands:\n");
-        console_printf("  help      - Show this help message\n");
-        console_printf("  mem       - Display memory information\n");
-        console_printf("  heap      - Show heap statistics\n");
-        console_printf("  tasks     - List running tasks\n");
-        console_printf("  model     - Show loaded model info\n");
+        console_printf("  help        - Show this help message\n");
+        console_printf("  mem         - Display memory information\n");
+        console_printf("  heap        - Show heap statistics\n");
+        console_printf("  tasks       - List running tasks\n");
+        console_printf("\n");
+        console_printf("Model Management:\n");
+        console_printf("  models      - List all loaded models\n");
+        console_printf("  model       - Show active model info\n");
+        console_printf("  model load <name>   - Load embedded model\n");
+        console_printf("  model switch <id>   - Switch to model by ID\n");
+        console_printf("  model unload <id>   - Unload model by ID\n");
+        console_printf("\n");
+        console_printf("AI Inference:\n");
         console_printf("  ai <prompt> - Generate text with TinyStories AI\n");
         console_printf("  infer <text> - Run AI inference\n");
-        console_printf("  tvm       - Show TVM runtime status\n");
-        console_printf("  dmatest   - Run DMA subsystem tests\n");
-        console_printf("  dmastats  - Show DMA statistics\n");
-        console_printf("  lspci     - List PCI devices\n");
-        console_printf("  pcitest   - Run PCI subsystem tests\n");
-        console_printf("  pcistats  - Show PCI statistics\n");
-        console_printf("  locktest  - Run locking primitives tests\n");
-        console_printf("  quanttest - Run quantization tests\n");
-        console_printf("  quantbench - Run quantization benchmarks\n");
-        console_printf("  reboot    - Reboot the system\n");
+        console_printf("  tvm         - Show TVM runtime status\n");
+        console_printf("\n");
+        console_printf("Hardware:\n");
+        console_printf("  dmatest     - Run DMA subsystem tests\n");
+        console_printf("  dmastats    - Show DMA statistics\n");
+        console_printf("  lspci       - List PCI devices\n");
+        console_printf("  pcitest     - Run PCI subsystem tests\n");
+        console_printf("  pcistats    - Show PCI statistics\n");
+        console_printf("\n");
+        console_printf("Testing:\n");
+        console_printf("  locktest    - Run locking primitives tests\n");
+        console_printf("  quanttest   - Run quantization tests\n");
+        console_printf("  quantbench  - Run quantization benchmarks\n");
+        console_printf("\n");
+        console_printf("System:\n");
+        console_printf("  reboot      - Reboot the system\n");
     } else if (strncmp(command, "ai ", 3) == 0) {
         /* TinyStories interactive inference */
         const char* prompt = command + 3;
@@ -86,15 +122,65 @@ void process_command(const char* command)
         heap_stats();
     } else if (strcmp(command, "tasks") == 0) {
         console_printf("Task scheduler not fully implemented\n");
+    } else if (strcmp(command, "models") == 0) {
+        /* List all loaded models */
+        model_registry_print_status();
     } else if (strcmp(command, "model") == 0) {
-        struct embodios_model* model = get_current_model();
+        /* Show active model info */
+        struct embodios_model* model = model_registry_get_active();
         if (model) {
-            console_printf("Loaded model: %s\n", model->name);
+            int id = model_registry_get_active_id();
+            console_printf("Active model [%d]: %s\n", id, model->name);
             console_printf("  Architecture: %s\n", model->arch);
             console_printf("  Parameters: %zu\n", model->param_count);
             console_printf("  Version: %u.%u\n", model->version_major, model->version_minor);
         } else {
-            console_printf("No model loaded\n");
+            console_printf("No active model\n");
+            console_printf("Use 'model load <name>' to load a model\n");
+        }
+    } else if (strncmp(command, "model load ", 11) == 0) {
+        /* Load embedded model by name */
+        const char* name = command + 11;
+        while (*name == ' ') name++;  /* Skip whitespace */
+
+        if (*name == '\0') {
+            console_printf("Usage: model load <name>\n");
+            console_printf("Available: tinystories\n");
+            return;
+        }
+
+        int result = model_registry_load_embedded(name);
+        if (result >= 0) {
+            console_printf("Model loaded successfully with ID %d\n", result);
+        } else {
+            console_printf("Failed to load model: %s\n",
+                           model_registry_strerror(result));
+        }
+    } else if (strncmp(command, "model switch ", 13) == 0) {
+        /* Switch to model by ID */
+        const char* id_str = command + 13;
+        int model_id = parse_int(id_str);
+
+        int result = model_registry_switch(model_id);
+        if (result == 0) {
+            struct embodios_model* model = model_registry_get_active();
+            console_printf("Switched to model %d: %s\n", model_id,
+                           model ? model->name : "(unknown)");
+        } else {
+            console_printf("Failed to switch: %s\n",
+                           model_registry_strerror(result));
+        }
+    } else if (strncmp(command, "model unload ", 13) == 0) {
+        /* Unload model by ID */
+        const char* id_str = command + 13;
+        int model_id = parse_int(id_str);
+
+        int result = model_registry_unload(model_id);
+        if (result == 0) {
+            console_printf("Model %d unloaded\n", model_id);
+        } else {
+            console_printf("Failed to unload: %s\n",
+                           model_registry_strerror(result));
         }
     } else if (strncmp(command, "infer ", 6) == 0) {
         const char* input = command + 6;
