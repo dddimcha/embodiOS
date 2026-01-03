@@ -1,256 +1,176 @@
-# EMBODIOS - Embodied Intelligence Operating System
+# EMBODIOS - Bare-Metal AI Operating System
 
-## Overview
+[![Status](https://img.shields.io/badge/Status-65%25%20Complete-yellow)](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis)
+[![AI Runtime](https://img.shields.io/badge/AI%20Runtime-85%25-green)](https://github.com/dddimcha/embodiOS/wiki/Pillar-1:-Ollama-GGUF-Integration)
+[![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
-EMBODIOS is an experimental operating system where AI models run directly on hardware as the OS kernel itself. Instead of traditional system calls and command-line interfaces, you control hardware through natural language commands. The entire OS is powered by language models that handle kernel operations, memory management, and hardware control.
+> **The world's first bare-metal AI operating system** - where the AI model runs directly on hardware as the OS kernel itself. No userspace. No OS overhead. Just transformers and hardware.
 
-**Key Innovation**: EMBODIOS includes a Python-to-Native compiler that transforms AI models and system code into bare-metal C/Assembly, enabling AI to run directly on hardware without a traditional OS layer.
+## What's New (January 2026)
 
-```bash
-> Turn on GPIO pin 17
-AI: Executing hardware control...
-[HARDWARE] GPIO Pin 17 -> HIGH
+- **GGUF Parser:** Full support for TinyLlama-1.1B, Phi-2, Mistral-7B
+- **BPE Tokenizer:** Proper tokenization loaded directly from GGUF vocabulary
+- **Multi-Model Registry:** Load, switch, unload up to 8 models at runtime
+- **Integer-Only Inference:** Transformer forward pass without FPU dependencies
+- **All Quantization Types:** Q4_K, Q5_K, Q6_K, Q8_0 support
 
-> Show system status
-AI: System Status Report
-[SYSTEM] Memory: 1.2GB allocated
-[SYSTEM] Uptime: 2m 34s
-[SYSTEM] Hardware: GPIO, UART, Timers active
-```
+## Current Status
+
+| Component | Status | Completion |
+|-----------|--------|------------|
+| **Kernel Foundation** | Memory management, boot process, I/O | 80% |
+| **AI Runtime** | GGUF parser, BPE tokenizer, transformer, model registry | 85% |
+| **Drivers** | PCI enumeration done (needs VirtIO, NVMe) | 20% |
+| **Performance** | SIMD ops implemented, needs benchmarking | 40% |
+| **Overall** | Foundation complete, AI runtime working | **65%** |
 
 ## Quick Start
 
-### Install EMBODIOS CLI
+### Clone with Documentation
 
 ```bash
-# Install from source
-git clone https://github.com/dddimcha/embodiOS.git
+# Clone with wiki submodule
+git clone --recurse-submodules https://github.com/dddimcha/embodiOS.git
 cd embodiOS
-pip install -e .
+
+# Or initialize submodule after clone
+git submodule update --init
 ```
 
-### Try It Out
+### Build and Run
 
 ```bash
-# Create a Modelfile
-cat > Modelfile << EOF
-FROM scratch
-MODEL huggingface:TinyLlama/TinyLlama-1.1B-Chat-v1.0
-QUANTIZE 4bit
-MEMORY 2G
-HARDWARE gpio:enabled
-EOF
+# Build the kernel (requires Linux or Docker)
+cd kernel
+make
 
-# Build EMBODIOS image
-embodi build -f Modelfile -t my-ai-os:latest
+# Run in QEMU
+qemu-system-x86_64 -kernel embodios.elf -m 256M -serial stdio
+```
 
-# Run it!
-embodi run my-ai-os:latest
+### Shell Commands
 
-# Or run a model directly (no container)
-embodi run test-model.aios --bare-metal
-
-# Create bootable bundle for real hardware
-embodi bundle create --model my-ai-os:latest --output embodios.iso --target bare-metal
+```bash
+EMBODIOS> help           # Show available commands
+EMBODIOS> models         # List loaded AI models
+EMBODIOS> model load tinystories   # Load TinyStories model
+EMBODIOS> ai Hello       # Generate text with AI
+EMBODIOS> bpeinit        # Initialize BPE tokenizer from GGUF
+EMBODIOS> mem            # Show memory stats
+EMBODIOS> lspci          # List PCI devices
 ```
 
 ## Key Features
 
-- **Natural Language Control**: Type commands in plain English - "turn on pin 17" instead of `gpio.write(17, HIGH)`
-- **AI-Powered Kernel**: Language models handle system operations, memory management, and hardware control
-- **Python-to-Native Compiler**: Transforms Python AI code to C/Assembly for bare-metal execution
-- **Bare Metal Performance**: Direct hardware access with <2ms response times
-- **Minimal Footprint**: Entire OS in ~16MB RAM (vs 100MB+ for traditional deployments)
-- **Hardware Abstraction**: Unified interface for GPIO, I2C, SPI, UART through natural language
-- **Docker-like Workflow**: Build, run, and deploy AI-OS images with familiar commands
-- **Real-time Processing**: 465+ commands/second throughput on commodity hardware
+| Feature | Description |
+|---------|-------------|
+| **GGUF Model Support** | Load models from Ollama ecosystem directly |
+| **BPE Tokenization** | SentencePiece-compatible tokenizer from GGUF |
+| **Multi-Model** | Hot-swap between up to 8 loaded models |
+| **Integer-Only Math** | No FPU required - runs on any x86_64 |
+| **SIMD Acceleration** | SSE2/AVX2 for matrix operations |
+| **Zero-Copy DMA** | Identity-mapped memory for direct hardware access |
+| **<1s Boot Time** | From power-on to AI inference ready |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    User Input                        │
+└─────────────────────┬───────────────────────────────┘
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│              BPE Tokenizer (from GGUF)              │
+│         SentencePiece-compatible encoding           │
+└─────────────────────┬───────────────────────────────┘
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│            Transformer Engine (Integer)             │
+│    Q4_K/Q5_K/Q6_K/Q8_0 quantized weights           │
+│         SIMD-accelerated matrix ops                 │
+└─────────────────────┬───────────────────────────────┘
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│              Hardware Abstraction                   │
+│         PCI • DMA • Memory-Mapped I/O               │
+└─────────────────────────────────────────────────────┘
+```
 
 ## Documentation
 
 The `docs/` folder is a **git submodule** pointing to the [EMBODIOS Wiki](https://github.com/dddimcha/embodiOS/wiki).
 
-### Wiki Documentation (docs/)
+### Project Status
 - [Home](docs/Home.md) - Wiki home page
 - [Current State Analysis](docs/Current-State-Analysis.md) - Project progress (65% complete)
 - [Three Strategic Pillars](docs/Three-Strategic-Pillars.md) - Implementation roadmap
 - [Pillar 1: Ollama GGUF Integration](docs/Pillar-1:-Ollama-GGUF-Integration.md) - AI runtime (85% complete)
 
-### Quick Start Guides (docs-archive/)
-- [Getting Started](docs-archive/getting-started.md)
-- [Modelfile Reference](docs-archive/modelfile-reference.md)
-- [Hardware Compatibility](docs-archive/hardware.md)
-- [API Documentation](docs-archive/api.md)
-- [Contributing Guide](CONTRIBUTING.md)
+### Quick Start Guides
+- [Getting Started](docs/Getting-Started.md) - Installation and first steps
+- [Modelfile Reference](docs/Modelfile-Reference.md) - Model configuration
+- [Hardware Requirements](docs/Hardware-Requirements.md) - Supported hardware
+- [API Reference](docs/API-Reference.md) - API documentation
 
-### Technical Details (docs-archive/)
-- [Performance Benchmarks](docs-archive/performance-benchmarks.md)
-- [Bare Metal Deployment](docs-archive/bare-metal-deployment.md)
-- [Quantized Integer Inference](docs-archive/quantized-integer-inference.md)
+### Technical Deep Dives
+- [Architecture Overview](docs/Architecture-Overview.md) - System architecture
+- [Quantized Integer Inference](docs/Quantized-Integer-Inference.md) - How integer-only AI works
+- [Performance Benchmarks](docs/Performance-Benchmarks.md) - Benchmark results
+- [Bare Metal Deployment](docs/Bare-Metal-Deployment.md) - Real hardware deployment
 
-## Use Cases
+## Performance Targets
 
-### Embedded Systems
-```dockerfile
-FROM scratch
-MODEL huggingface:microsoft/phi-2
-QUANTIZE 4bit
-MEMORY 1G
-HARDWARE gpio:enabled uart:enabled
-```
+| Metric | llama.cpp | EMBODIOS v1.0 | Advantage |
+|--------|-----------|---------------|-----------|
+| **Speed** | 83-86 tok/s | 100-120 tok/s | **20-40% faster** |
+| **Memory** | 160 MB | 120 MB | **25% less** |
+| **Latency Jitter** | ±5-10ms | ±0.5ms | **10-20x better** |
+| **Boot Time** | N/A | <1 sec | **Instant on** |
+| **First Token** | ~50ms | <20ms | **2.5x faster** |
+| **Context Switch** | ~1-5μs | 0 | **Zero overhead** |
 
-### Robotics
-```yaml
-name: robot-embodi
-model:
-  source: huggingface
-  name: microsoft/Phi-3-mini-4k-instruct
-capabilities:
-  - motion_control
-  - sensor_fusion
-  - path_planning
-```
+## Verified Models
 
-### Smart Home
-```dockerfile
-FROM scratch
-MODEL huggingface:TinyLlama/TinyLlama-1.1B-Chat-v1.0
-CAPABILITY home_automation voice_control
-HARDWARE wifi:enabled zigbee:enabled
-```
+| Model | Size | Quantization | Status |
+|-------|------|--------------|--------|
+| TinyLlama-1.1B | 638 MB | Q4_K_M | Tested |
+| Phi-2 | 1.7 GB | Q4_K_M | Tested |
+| Mistral-7B | 4.2 GB | Q4_K_M | Tested |
 
-## How It Works
+## Why Bare-Metal AI?
 
-The basic flow is simple: you type something, the language model figures out what you want, and then it talks directly to the hardware. No complicated APIs or system calls in between. The model processes your text and converts it into hardware instructions through memory-mapped I/O.
-
-```
-User Input (Natural Language)
-        ↓
-┌─────────────────┐
-│  NL Processor   │  ← Pattern matching &
-│                 │     intent extraction
-└────────┬────────┘
-         ↓
-┌─────────────────┐
-│  AI Inference   │  ← Transformer Model
-│     Engine      │     with hardware tokens
-└────────┬────────┘
-         ↓
-┌─────────────────┐
-│ Hardware Layer  │  ← Direct hardware
-│      (HAL)      │     control via MMIO
-└─────────────────┘
-```
-
-### Core Components
-
-- **Natural Language Processor**: Translates commands like "turn on the LED" into hardware operations
-- **Inference Engine**: Runs transformer models with special hardware control tokens
-- **Hardware Abstraction Layer**: Provides unified interface to GPIO, I2C, SPI, UART
-- **Runtime Kernel**: Manages system state, interrupts, and background services
-
-## Why EMBODIOS?
-
-Here's the thing - traditional operating systems have layers upon layers of abstractions. System calls, drivers, APIs, frameworks... it all adds up. EMBODIOS cuts through all that overhead.
-
-**The benefits are pretty straightforward:**
-
-- **Speed**: Direct hardware access means no kernel/userspace context switches. We're talking microseconds, not milliseconds.
-- **Resource Efficiency**: No background services, no daemons, no unnecessary processes. Just your model and the hardware. Perfect when every MB counts.
-- **Bare Metal Access**: Your commands go straight to the metal. No translation layers, no permission checks, no virtualization overhead.
-- **IoT Ready**: Built specifically for embedded devices where traditional OSes are too heavy. Runs great on a Raspberry Pi or even smaller boards.
-- **Cloud Cost Savings**: Why pay for cloud compute when your edge device can handle everything locally? No API calls, no bandwidth costs, no latency.
-
-Think about it - a typical Linux distro needs hundreds of MB just for the base system. EMBODIOS? The whole OS *is* the model. That's it. Your 1GB model handles everything from memory management to GPIO control.
-
-For IoT developers tired of stripping down Linux distributions, or anyone who wants their devices to actually understand what they're being asked to do - this might be worth a look.
-
-## Python-to-Native Compiler
-
-EMBODIOS includes a compiler that transforms Python AI code into native C/Assembly for bare-metal execution:
-
-```bash
-# Compile Python EMBODIOS to native code
-cd src/embodi/compiler
-python builder.py model.gguf output_dir/ native
-
-# Generated files:
-# - hal_gpio.c, hal_i2c.c, hal_uart.c - Hardware drivers
-# - nl_processor.c - Natural language processing
-# - kernel.c - Main kernel loop
-# - boot.S - Boot assembly
-# - weights.S - Model weights in assembly
-# - Makefile - Build configuration
-```
-
-The compiler:
-- Works without external dependencies (no NumPy, TVM, or Cython required)
-- Generates bootable kernel images
-- Embeds AI model weights directly in assembly
-- Creates hardware abstraction layer (HAL) in pure C
-- Produces ARM64 and x86-64 compatible code
+**Kernel-space AI enables:**
+- **Ultra-low latency:** 10x better consistency for real-time applications
+- **Minimal footprint:** 25% less memory for edge/embedded devices
+- **Direct hardware access:** No syscall overhead, zero-copy DMA
+- **Deterministic timing:** Critical for robotics, industrial control
 
 ## Contributing
 
-If you want to help out or have ideas, that's awesome. Check the contributing guide for the details.
-
 ```bash
 # Clone the repository
-git clone https://github.com/dddimcha/embodiOS.git
-cd core
+git clone --recurse-submodules https://github.com/dddimcha/embodiOS.git
 
-# Install dependencies
-make deps
-
-# Run tests
+# Build and test
+cd kernel && make
 make test
-
-# Build EMBODIOS
-make build
 ```
 
-## Performance
-
-Latest benchmark results show significant improvements over traditional deployments:
-
-### Real-World Comparison (2025-07-30)
-
-Using the same TinyLlama 1.1B model:
-
-| Deployment | Response Time | Speed | Notes |
-|------------|--------------|-------|--------|
-| **EMBODIOS** | 361ms | 165 tokens/sec | Direct model execution |
-| **Ollama** | 1,809ms | 133 tokens/sec | Service layer overhead |
-| **Improvement** | **5x faster** | 24% higher | Same model, better deployment |
-
-### Performance Metrics
-
-- **Boot Time**: <1 second to fully operational state
-- **Memory Usage**: 1.2GB total (vs 2GB+ for Ollama)
-- **Response Time**: 361ms (Python prototype) → 20-50ms (projected bare-metal)
-- **Throughput**: 165 tokens/second currently → 500+ tokens/sec on bare-metal
-- **Direct Hardware Control**: <1ms GPIO/I2C operations
-
-### Projected Bare-Metal Performance
-
-- **Python (current)**: 361ms average response
-- **C++ implementation**: ~50ms (7x faster)
-- **True bare-metal**: 10-20ms (18-36x faster)
-- **Custom silicon**: <5ms (72x faster)
-
-See [full benchmark results](docs/performance-benchmarks.md) for detailed comparisons.
+**Choose Your Pillar:**
+- **Kernel hacker?** → [Pillar 2: Linux Driver Compatibility](docs/Pillar-2:-Linux-Driver-Compatibility.md)
+- **AI researcher?** → [Pillar 1: Ollama GGUF Integration](docs/Pillar-1:-Ollama-GGUF-Integration.md)
+- **Performance engineer?** → [Pillar 3: Performance Optimization](docs/Pillar-3:-Performance-Optimization.md)
 
 ## Community
 
 - [Discord Server](https://discord.gg/xRsYfcdP)
+- [GitHub Wiki](https://github.com/dddimcha/embodiOS/wiki)
+- [Issues](https://github.com/dddimcha/embodiOS/issues)
 
 ## License
 
 EMBODIOS is open source software licensed under the [MIT License](LICENSE).
 
-## Acknowledgments
-
-This project pulls ideas from various places - Linux kernels, Docker's approach to containers, modern language models, and embedded systems. Just another unconventional approach to OS design that might interest someone out there.
-
 ---
 
-**EMBODIOS** - An experimental OS where you can control hardware through everyday language
+**EMBODIOS** - Bare-metal AI where transformers meet hardware directly.
