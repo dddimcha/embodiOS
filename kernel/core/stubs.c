@@ -51,6 +51,7 @@ void process_command(const char* command)
         console_printf("  lspci     - List PCI devices\n");
         console_printf("  pcitest   - Run PCI subsystem tests\n");
         console_printf("  pcistats  - Show PCI statistics\n");
+        console_printf("  locktest  - Run locking primitives tests\n");
         console_printf("  reboot    - Reboot the system\n");
     } else if (strncmp(command, "ai ", 3) == 0) {
         /* TinyStories interactive inference */
@@ -124,6 +125,9 @@ void process_command(const char* command)
         pci_run_tests();
     } else if (strcmp(command, "pcistats") == 0) {
         pci_print_stats();
+    } else if (strcmp(command, "locktest") == 0) {
+        extern int lock_run_tests(void);
+        lock_run_tests();
     } else if (strcmp(command, "reboot") == 0) {
         console_printf("Rebooting...\n");
         arch_reboot();
