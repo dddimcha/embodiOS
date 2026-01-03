@@ -1,13 +1,17 @@
 /* EMBODIOS Byte-Level BPE Tokenizer
- * 
+ *
  * Implements a byte-level BPE tokenizer suitable for TinyLlama models
  * Designed for efficient operation in kernel space
+ *
+ * NOTE: When bpe_tokenizer is initialized (from GGUF), this tokenizer
+ * forwards all calls to it for proper model-specific tokenization.
  */
 
 #include "embodios/types.h"
 #include "embodios/kernel.h"
 #include "embodios/console.h"
 #include "embodios/mm.h"
+#include "embodios/bpe_tokenizer.h"
 
 /* TinyLlama vocabulary configuration */
 #define VOCAB_SIZE 32000      /* TinyLlama vocab size */
@@ -259,68 +263,73 @@ static int utf8_char_length(uint8_t byte)
 /* Encode text to tokens using BPE */
 int tokenizer_encode(const char* text, int* tokens, int max_tokens)
 {
+    /* Forward to proper BPE tokenizer if available (from GGUF) */
+    if (bpe_tokenizer_is_initialized()) {
+        return bpe_tokenizer_encode(text, tokens, max_tokens, true, true);
+    }
+
+    /* Fallback to built-in tokenizer */
     if (!tokenizer_state.initialized) {
         console_printf("Tokenizer: Not initialized\n");
         return 0;
     }
-    
+
     int n_tokens = 0;
     int text_len = strlen(text);
-    
+
     /* Add BOS token */
     if (n_tokens < max_tokens) {
         tokens[n_tokens++] = TOKEN_BOS;
     }
-    
+
     /* Temporary buffer for BPE processing */
     uint16_t* work_buffer = kmalloc(text_len * sizeof(uint16_t));
     if (!work_buffer) {
         console_printf("Tokenizer: Failed to allocate work buffer\n");
         return n_tokens;
     }
-    
+
     /* Process text in chunks (respecting UTF-8 boundaries) */
     int i = 0;
     while (i < text_len && n_tokens < max_tokens - 1) {
-        int chunk_start = i;
         int work_len = 0;
-        
+
         /* Convert chunk to initial byte tokens */
         while (i < text_len && work_len < 512) {  /* Process in 512 byte chunks */
             uint8_t byte = (uint8_t)text[i];
             work_buffer[work_len++] = byte;
             i++;
-            
+
             /* Stop at word boundaries for better BPE */
             if (byte == ' ' || byte == '\n' || byte == '\t') {
                 break;
             }
         }
-        
+
         /* Apply BPE merges iteratively */
         int merge_applied = 1;
         while (merge_applied && work_len > 1) {
             int merge_pos;
             int merge_idx = find_best_merge(work_buffer, work_len, &merge_pos);
-            
+
             if (merge_idx >= 0) {
                 work_len = apply_merge(work_buffer, work_len, merge_idx, merge_pos);
             } else {
                 merge_applied = 0;
             }
         }
-        
+
         /* Add merged tokens to output */
         for (int j = 0; j < work_len && n_tokens < max_tokens - 1; j++) {
             tokens[n_tokens++] = work_buffer[j];
         }
     }
-    
+
     /* Add EOS token */
     if (n_tokens < max_tokens) {
         tokens[n_tokens++] = TOKEN_EOS;
     }
-    
+
     kfree(work_buffer);
     return n_tokens;
 }
@@ -328,6 +337,12 @@ int tokenizer_encode(const char* text, int* tokens, int max_tokens)
 /* Decode tokens to text */
 int tokenizer_decode(int* tokens, int n_tokens, char* text, int max_length)
 {
+    /* Forward to proper BPE tokenizer if available (from GGUF) */
+    if (bpe_tokenizer_is_initialized()) {
+        return bpe_tokenizer_decode(tokens, n_tokens, text, max_length);
+    }
+
+    /* Fallback to built-in tokenizer */
     if (!tokenizer_state.initialized) {
         console_printf("Tokenizer: Not initialized\n");
         return 0;
@@ -367,8 +382,14 @@ int tokenizer_decode(int* tokens, int n_tokens, char* text, int max_length)
 /* Decode single token */
 const char* tokenizer_decode_token(int token)
 {
+    /* Forward to proper BPE tokenizer if available (from GGUF) */
+    if (bpe_tokenizer_is_initialized()) {
+        return bpe_tokenizer_decode_token(token);
+    }
+
+    /* Fallback to built-in tokenizer */
     static char buffer[MAX_TOKEN_LEN + 16];  /* Extra space for formatting */
-    
+
     if (!tokenizer_state.initialized || token < 0 || token >= VOCAB_SIZE) {
         return "<?>";
     }

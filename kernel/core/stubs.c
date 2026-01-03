@@ -12,6 +12,7 @@
 #include "embodios/dma.h"
 #include "embodios/pci.h"
 #include "embodios/model_registry.h"
+#include "embodios/bpe_tokenizer.h"
 
 /* String function declarations */
 int strcmp(const char* s1, const char* s2);
@@ -88,6 +89,8 @@ void process_command(const char* command)
         console_printf("  locktest    - Run locking primitives tests\n");
         console_printf("  quanttest   - Run quantization tests\n");
         console_printf("  quantbench  - Run quantization benchmarks\n");
+        console_printf("  bpeinit     - Initialize BPE tokenizer from GGUF\n");
+        console_printf("  bpetest     - Test BPE tokenizer\n");
         console_printf("\n");
         console_printf("System:\n");
         console_printf("  reboot      - Reboot the system\n");
@@ -222,6 +225,23 @@ void process_command(const char* command)
     } else if (strcmp(command, "quantbench") == 0) {
         extern int run_quantized_benchmarks(void);
         run_quantized_benchmarks();
+    } else if (strcmp(command, "bpeinit") == 0) {
+        if (bpe_tokenizer_is_initialized()) {
+            console_printf("BPE tokenizer already initialized\n");
+        } else {
+            int result = bpe_tokenizer_init();
+            if (result == 0) {
+                console_printf("BPE tokenizer initialized successfully\n");
+            } else {
+                console_printf("BPE tokenizer initialization failed\n");
+            }
+        }
+    } else if (strcmp(command, "bpetest") == 0) {
+        if (!bpe_tokenizer_is_initialized()) {
+            console_printf("BPE tokenizer not initialized. Run 'bpeinit' first.\n");
+        } else {
+            bpe_tokenizer_test();
+        }
     } else if (strcmp(command, "reboot") == 0) {
         console_printf("Rebooting...\n");
         arch_reboot();
