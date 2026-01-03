@@ -67,13 +67,26 @@ embodi bundle create --model my-ai-os:latest --output embodios.iso --target bare
 
 ## Documentation
 
+### Quick Start Guides
 - [Getting Started](docs/getting-started.md)
 - [Modelfile Reference](docs/modelfile-reference.md)
 - [Hardware Compatibility](docs/hardware.md)
 - [API Documentation](docs/api.md)
+- [Contributing Guide](CONTRIBUTING.md)
+
+### Wiki Documentation
+For comprehensive technical documentation, visit the **[EMBODIOS Wiki](https://github.com/dddimcha/embodiOS/wiki)**:
+
+- [Current State Analysis](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis) - Project progress (65% complete)
+- [Three Strategic Pillars](https://github.com/dddimcha/embodiOS/wiki/Three-Strategic-Pillars) - Implementation roadmap
+- [Pillar 1: Ollama GGUF Integration](https://github.com/dddimcha/embodiOS/wiki/Pillar-1:-Ollama-GGUF-Integration) - AI runtime (85% complete)
+- [Architecture Overview](https://github.com/dddimcha/embodiOS/wiki/Architecture-Overview) - System design
+
+### Technical Details
 - [Performance Benchmarks](docs/performance-benchmarks.md)
 - [Bare Metal Deployment](docs/bare-metal-deployment.md)
-- [Contributing Guide](CONTRIBUTING.md)
+- [Quantized Integer Inference](docs/quantized-integer-inference.md)
+- [All Documentation](docs/README.md)
 
 ## Use Cases
 
