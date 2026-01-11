@@ -5,15 +5,15 @@
  * REAL AI INFERENCE - Ported from llama.c
  */
 
-#include <embodios/types.h>
-#include <embodios/console.h>
-#include <embodios/mm.h>
-#include <embodios/gguf_parser.h>
 #include <embodios/block.h>
+#include <embodios/console.h>
+#include <embodios/gguf_parser.h>
+#include <embodios/mm.h>
+#include <embodios/types.h>
 
 /* Forward declarations for kernel functions */
-extern void* memcpy(void* dest, const void* src, size_t n);
-extern void* memset(void* s, int c, size_t n);
+extern void *memcpy(void *dest, const void *src, size_t n);
+extern void *memset(void *s, int c, size_t n);
 // SSE-enabled math functions (implemented in lib/math.c)
 extern float sqrtf(float x);
 extern float expf(float x);
@@ -25,10 +25,11 @@ extern float fabsf(float x);
 extern float logf(float x);
 
 // Simple timer implementation using x86_64 TSC (time-stamp counter)
-static inline uint64_t get_timestamp(void) {
+static inline uint64_t get_timestamp(void)
+{
 #ifdef __x86_64__
     uint32_t lo, hi;
-    __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 #else
     return 0;
@@ -39,7 +40,7 @@ static inline uint64_t get_timestamp(void) {
 #ifdef __x86_64__
 /* Prevent mm_malloc.h from being included - it needs stdlib.h */
 #define _MM_MALLOC_H_INCLUDED
-#include <emmintrin.h>  // SSE2
+#include <emmintrin.h> // SSE2
 #endif
 
 // Model configuration (TinyStories-15M)
@@ -55,64 +56,62 @@ typedef struct {
 
 // Transformer weights (same layout as llama.c)
 typedef struct {
-    float* token_embedding_table;    // (vocab_size, dim)
-    float* rms_att_weight;           // (layer, dim) rmsnorm weights
-    float* rms_ffn_weight;           // (layer, dim)
-    float* wq;                       // (layer, dim, n_heads * head_size)
-    float* wk;                       // (layer, dim, n_kv_heads * head_size)
-    float* wv;                       // (layer, dim, n_kv_heads * head_size)
-    float* wo;                       // (layer, n_heads * head_size, dim)
-    float* w1;                       // (layer, hidden_dim, dim)
-    float* w2;                       // (layer, dim, hidden_dim)
-    float* w3;                       // (layer, hidden_dim, dim)
-    float* rms_final_weight;         // (dim,)
-    float* wcls;                     // classifier weights for logits
+    float *token_embedding_table; // (vocab_size, dim)
+    float *rms_att_weight;        // (layer, dim) rmsnorm weights
+    float *rms_ffn_weight;        // (layer, dim)
+    float *wq;                    // (layer, dim, n_heads * head_size)
+    float *wk;                    // (layer, dim, n_kv_heads * head_size)
+    float *wv;                    // (layer, dim, n_kv_heads * head_size)
+    float *wo;                    // (layer, n_heads * head_size, dim)
+    float *w1;                    // (layer, hidden_dim, dim)
+    float *w2;                    // (layer, dim, hidden_dim)
+    float *w3;                    // (layer, hidden_dim, dim)
+    float *rms_final_weight;      // (dim,)
+    float *wcls;                  // classifier weights for logits
 } TinyStoriesWeights;
 
 // Runtime state (same as llama.c RunState)
 typedef struct {
-    float* x;           // activation at current time stamp (dim,)
-    float* xb;          // same, but inside a residual branch (dim,)
-    float* xb2;         // an additional buffer just for convenience (dim,)
-    float* hb;          // buffer for hidden dimension in the ffn (hidden_dim,)
-    float* hb2;         // buffer for hidden dimension in the ffn (hidden_dim,)
-    float* q;           // query (dim,)
-    float* k;           // key (dim,)
-    float* v;           // value (dim,)
-    float* att;         // buffer for scores/attention values (n_heads, seq_len)
-    float* logits;      // output logits (vocab_size,)
-    float* key_cache;   // (layer, seq_len, kv_dim)
-    float* value_cache; // (layer, seq_len, kv_dim)
+    float *x;           // activation at current time stamp (dim,)
+    float *xb;          // same, but inside a residual branch (dim,)
+    float *xb2;         // an additional buffer just for convenience (dim,)
+    float *hb;          // buffer for hidden dimension in the ffn (hidden_dim,)
+    float *hb2;         // buffer for hidden dimension in the ffn (hidden_dim,)
+    float *q;           // query (dim,)
+    float *k;           // key (dim,)
+    float *v;           // value (dim,)
+    float *att;         // buffer for scores/attention values (n_heads, seq_len)
+    float *logits;      // output logits (vocab_size,)
+    float *key_cache;   // (layer, seq_len, kv_dim)
+    float *value_cache; // (layer, seq_len, kv_dim)
 } TinyStoriesRunState;
 
 // Vocabulary for tokenization
 typedef struct {
-    char** vocab;       // array of token strings
-    float* vocab_scores; // scores for each token
+    char **vocab;        // array of token strings
+    float *vocab_scores; // scores for each token
     int vocab_size;
     int max_token_length;
 } Vocabulary;
 
 // Default configuration (fallback when GGUF parsing fails)
 // TinyStories-15M values for backwards compatibility
-#define DEFAULT_DIM         288
-#define DEFAULT_HIDDEN_DIM  768
-#define DEFAULT_N_LAYERS    6
-#define DEFAULT_N_HEADS     6
-#define DEFAULT_N_KV_HEADS  6
-#define DEFAULT_VOCAB_SIZE  32000
-#define DEFAULT_SEQ_LEN     256
+#define DEFAULT_DIM        288
+#define DEFAULT_HIDDEN_DIM 768
+#define DEFAULT_N_LAYERS   6
+#define DEFAULT_N_HEADS    6
+#define DEFAULT_N_KV_HEADS 6
+#define DEFAULT_VOCAB_SIZE 32000
+#define DEFAULT_SEQ_LEN    256
 
 // Global model state - initialized with defaults, updated from GGUF if available
-static TinyStoriesConfig g_config = {
-    .dim = DEFAULT_DIM,
-    .hidden_dim = DEFAULT_HIDDEN_DIM,
-    .n_layers = DEFAULT_N_LAYERS,
-    .n_heads = DEFAULT_N_HEADS,
-    .n_kv_heads = DEFAULT_N_KV_HEADS,
-    .vocab_size = DEFAULT_VOCAB_SIZE,
-    .seq_len = DEFAULT_SEQ_LEN
-};
+static TinyStoriesConfig g_config = {.dim = DEFAULT_DIM,
+                                     .hidden_dim = DEFAULT_HIDDEN_DIM,
+                                     .n_layers = DEFAULT_N_LAYERS,
+                                     .n_heads = DEFAULT_N_HEADS,
+                                     .n_kv_heads = DEFAULT_N_KV_HEADS,
+                                     .vocab_size = DEFAULT_VOCAB_SIZE,
+                                     .seq_len = DEFAULT_SEQ_LEN};
 
 // Flag to track if config was loaded from GGUF
 static bool g_config_from_gguf = false;
@@ -122,8 +121,8 @@ static Vocabulary g_vocab;
 static bool g_model_loaded = false;
 
 // Token decoding buffers (llama.c pattern)
-static char g_token_fallback[32];  // fallback buffer for token strings
-static char g_byte_pieces[512];    // buffer for byte tokens (256 bytes * 2 chars each)
+static char g_token_fallback[32]; // fallback buffer for token strings
+static char g_byte_pieces[512];   // buffer for byte tokens (256 bytes * 2 chars each)
 
 // External symbols for embedded model (if available)
 extern const uint8_t _binary_tinystories_15m_bin_start[] __attribute__((weak));
@@ -140,7 +139,8 @@ extern const uint8_t _binary_tokenizer_bin_end[] __attribute__((weak));
  * RMS normalization (llama.c line 182)
  * SSE2-optimized for x86_64
  */
-static void rmsnorm(float* o, float* x, float* weight, int size) {
+static void rmsnorm(float *o, float *x, float *weight, int size)
+{
 #ifdef __x86_64__
     // SSE2: calculate sum of squares (4 floats at a time)
     __m128 ss_vec = _mm_setzero_ps();
@@ -194,7 +194,8 @@ static void rmsnorm(float* o, float* x, float* weight, int size) {
 /**
  * Softmax (llama.c line 197)
  */
-static void softmax(float* x, int size) {
+static void softmax(float *x, int size)
+{
     // find max value (for numerical stability)
     float max_val = x[0];
     for (int i = 1; i < size; i++) {
@@ -219,20 +220,21 @@ static void softmax(float* x, int size) {
  * W (d,n) @ x (n,) -> xout (d,)
  * SSE2-optimized for x86_64 (~4x faster than scalar)
  */
-static void matmul(float* xout, float* x, float* w, int n, int d) {
+static void matmul(float *xout, float *x, float *w, int n, int d)
+{
     // by far the most amount of time is spent inside this little function
 #ifdef __x86_64__
     // SSE2 version: process 4 floats at a time
     for (int i = 0; i < d; i++) {
-        __m128 sum_vec = _mm_setzero_ps();  // accumulator for 4 floats
+        __m128 sum_vec = _mm_setzero_ps(); // accumulator for 4 floats
         int j = 0;
 
         // Process 4 elements at a time with SSE2
         for (; j + 3 < n; j += 4) {
-            __m128 w_vec = _mm_loadu_ps(&w[i * n + j]);  // load 4 weights
-            __m128 x_vec = _mm_loadu_ps(&x[j]);           // load 4 inputs
-            __m128 prod = _mm_mul_ps(w_vec, x_vec);       // multiply
-            sum_vec = _mm_add_ps(sum_vec, prod);          // accumulate
+            __m128 w_vec = _mm_loadu_ps(&w[i * n + j]); // load 4 weights
+            __m128 x_vec = _mm_loadu_ps(&x[j]);         // load 4 inputs
+            __m128 prod = _mm_mul_ps(w_vec, x_vec);     // multiply
+            sum_vec = _mm_add_ps(sum_vec, prod);        // accumulate
         }
 
         // Horizontal sum of the 4 accumulators
@@ -266,8 +268,9 @@ static void matmul(float* xout, float* x, float* w, int n, int d) {
  * Map weight pointers into model memory (llama.c memory_map_weights)
  * Adapted for kernel: model data is already in memory
  */
-static void memory_map_weights(TinyStoriesWeights* w, TinyStoriesConfig* p,
-                               float* ptr, int shared_weights) {
+static void memory_map_weights(TinyStoriesWeights *w, TinyStoriesConfig *p, float *ptr,
+                               int shared_weights)
+{
     int head_size = p->dim / p->n_heads;
     // make sure the multiplications below are done in 64bit to fit large models
     unsigned long long n_layers = p->n_layers;
@@ -303,19 +306,20 @@ static void memory_map_weights(TinyStoriesWeights* w, TinyStoriesConfig* p,
  * Load vocabulary from model file (llama.c style)
  * Vocabulary comes after weights in the model file
  */
-static int load_vocabulary(const uint8_t* vocab_ptr, TinyStoriesConfig* p) {
+static int load_vocabulary(const uint8_t *vocab_ptr, TinyStoriesConfig *p)
+{
     console_printf("Loading vocabulary...\n");
 
     // Read max_token_length
-    const int* max_len_ptr = (const int*)vocab_ptr;
+    const int *max_len_ptr = (const int *)vocab_ptr;
     g_vocab.max_token_length = *max_len_ptr;
     g_vocab.vocab_size = p->vocab_size;
 
     console_printf("  max_token_length: %d\n", g_vocab.max_token_length);
 
     // Allocate arrays
-    g_vocab.vocab = (char**)heap_alloc(p->vocab_size * sizeof(char*));
-    g_vocab.vocab_scores = (float*)heap_alloc(p->vocab_size * sizeof(float));
+    g_vocab.vocab = (char **)heap_alloc(p->vocab_size * sizeof(char *));
+    g_vocab.vocab_scores = (float *)heap_alloc(p->vocab_size * sizeof(float));
 
     if (!g_vocab.vocab || !g_vocab.vocab_scores) {
         console_printf("ERROR: Failed to allocate vocabulary arrays\n");
@@ -323,19 +327,19 @@ static int load_vocabulary(const uint8_t* vocab_ptr, TinyStoriesConfig* p) {
     }
 
     // Read tokens (skip first int which is max_token_length)
-    const uint8_t* ptr = vocab_ptr + sizeof(int);
+    const uint8_t *ptr = vocab_ptr + sizeof(int);
 
     for (int i = 0; i < p->vocab_size; i++) {
         // Read score
-        g_vocab.vocab_scores[i] = *(const float*)ptr;
+        g_vocab.vocab_scores[i] = *(const float *)ptr;
         ptr += sizeof(float);
 
         // Read token length
-        int len = *(const int*)ptr;
+        int len = *(const int *)ptr;
         ptr += sizeof(int);
 
         // Allocate and copy token string
-        g_vocab.vocab[i] = (char*)heap_alloc(len + 1);
+        g_vocab.vocab[i] = (char *)heap_alloc(len + 1);
         if (!g_vocab.vocab[i]) {
             console_printf("ERROR: Failed to allocate token %d\n", i);
             return -1;
@@ -362,23 +366,24 @@ static int load_vocabulary(const uint8_t* vocab_ptr, TinyStoriesConfig* p) {
  * Allocate RunState buffers using kernel heap (llama.c malloc_run_state)
  * Adapted to use heap_alloc() instead of calloc()
  */
-static int malloc_run_state(TinyStoriesRunState* s, TinyStoriesConfig* p) {
+static int malloc_run_state(TinyStoriesRunState *s, TinyStoriesConfig *p)
+{
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
 
-    s->x = (float*)heap_alloc(p->dim * sizeof(float));
-    s->xb = (float*)heap_alloc(p->dim * sizeof(float));
-    s->xb2 = (float*)heap_alloc(p->dim * sizeof(float));
-    s->hb = (float*)heap_alloc(p->hidden_dim * sizeof(float));
-    s->hb2 = (float*)heap_alloc(p->hidden_dim * sizeof(float));
-    s->q = (float*)heap_alloc(p->dim * sizeof(float));
-    s->key_cache = (float*)heap_alloc(p->n_layers * p->seq_len * kv_dim * sizeof(float));
-    s->value_cache = (float*)heap_alloc(p->n_layers * p->seq_len * kv_dim * sizeof(float));
-    s->att = (float*)heap_alloc(p->n_heads * p->seq_len * sizeof(float));
-    s->logits = (float*)heap_alloc(p->vocab_size * sizeof(float));
+    s->x = (float *)heap_alloc(p->dim * sizeof(float));
+    s->xb = (float *)heap_alloc(p->dim * sizeof(float));
+    s->xb2 = (float *)heap_alloc(p->dim * sizeof(float));
+    s->hb = (float *)heap_alloc(p->hidden_dim * sizeof(float));
+    s->hb2 = (float *)heap_alloc(p->hidden_dim * sizeof(float));
+    s->q = (float *)heap_alloc(p->dim * sizeof(float));
+    s->key_cache = (float *)heap_alloc(p->n_layers * p->seq_len * kv_dim * sizeof(float));
+    s->value_cache = (float *)heap_alloc(p->n_layers * p->seq_len * kv_dim * sizeof(float));
+    s->att = (float *)heap_alloc(p->n_heads * p->seq_len * sizeof(float));
+    s->logits = (float *)heap_alloc(p->vocab_size * sizeof(float));
 
     // ensure all allocations succeeded
-    if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q
-     || !s->key_cache || !s->value_cache || !s->att || !s->logits) {
+    if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q || !s->key_cache ||
+        !s->value_cache || !s->att || !s->logits) {
         console_printf("ERROR: RunState allocation failed!\n");
         return -1;
     }
@@ -399,24 +404,25 @@ static int malloc_run_state(TinyStoriesRunState* s, TinyStoriesConfig* p) {
 }
 
 /* Disk-loaded model buffer */
-static uint8_t* g_disk_model_data = NULL;
+static uint8_t *g_disk_model_data = NULL;
 static size_t g_disk_model_size = 0;
 
 /**
  * Load model from raw data buffer
  * Called by tinystories_load_model() or tinystories_load_from_disk()
  */
-static int tinystories_load_from_data(const uint8_t* model_data, size_t model_size) {
+static int tinystories_load_from_data(const uint8_t *model_data, size_t model_size)
+{
     console_printf("Model size: %zu MB\n", model_size / (1024 * 1024));
 
     // Try GGUF format first (check magic number: "GGUF")
-    if (model_size >= 4 && model_data[0] == 'G' && model_data[1] == 'G' &&
-        model_data[2] == 'U' && model_data[3] == 'F') {
+    if (model_size >= 4 && model_data[0] == 'G' && model_data[1] == 'G' && model_data[2] == 'U' &&
+        model_data[3] == 'F') {
 
         console_printf("Detected GGUF format, parsing metadata...\n");
 
         if (gguf_parser_load(model_data, model_size) == 0) {
-            const struct gguf_model_arch* arch = gguf_parser_get_arch();
+            const struct gguf_model_arch *arch = gguf_parser_get_arch();
             if (arch) {
                 // Load config from GGUF metadata
                 g_config.dim = arch->embedding_length;
@@ -431,6 +437,12 @@ static int tinystories_load_from_data(const uint8_t* model_data, size_t model_si
                 console_printf("Configuration (from GGUF metadata):\n");
                 console_printf("  Model: %s\n", arch->general_name);
                 console_printf("  Architecture: %s\n", arch->general_architecture);
+
+                /* Initialize BPE tokenizer from GGUF vocabulary */
+                extern int bpe_tokenizer_init(void);
+                if (bpe_tokenizer_init() == 0) {
+                    console_printf("BPE tokenizer initialized from GGUF vocab\n");
+                }
             }
         } else {
             console_printf("GGUF parsing failed, using defaults\n");
@@ -457,14 +469,14 @@ static int tinystories_load_from_data(const uint8_t* model_data, size_t model_si
 
     // Determine weight layout based on format
     int shared_weights = 1;
-    float* weights_ptr;
+    float *weights_ptr;
 
     if (g_config_from_gguf) {
         // GGUF: weights start after header and metadata
-        weights_ptr = (float*)gguf_parser_get_tensor_data();
+        weights_ptr = (float *)gguf_parser_get_tensor_data();
     } else {
         // Legacy: weights start after 7-int config header
-        weights_ptr = (float*)(model_data + sizeof(TinyStoriesConfig));
+        weights_ptr = (float *)(model_data + sizeof(TinyStoriesConfig));
     }
 
     if (!weights_ptr) {
@@ -478,26 +490,26 @@ static int tinystories_load_from_data(const uint8_t* model_data, size_t model_si
     // Calculate vocabulary offset (after all weights)
     int head_size = g_config.dim / g_config.n_heads;
     size_t weights_size = 0;
-    weights_size += g_config.vocab_size * g_config.dim;  // token_embedding_table
-    weights_size += g_config.n_layers * g_config.dim;    // rms_att_weight
-    weights_size += g_config.n_layers * g_config.dim * (g_config.n_heads * head_size);  // wq
-    weights_size += g_config.n_layers * g_config.dim * (g_config.n_kv_heads * head_size);  // wk
-    weights_size += g_config.n_layers * g_config.dim * (g_config.n_kv_heads * head_size);  // wv
-    weights_size += g_config.n_layers * (g_config.n_heads * head_size) * g_config.dim;  // wo
-    weights_size += g_config.n_layers * g_config.dim;    // rms_ffn_weight
-    weights_size += g_config.n_layers * g_config.dim * g_config.hidden_dim;  // w1
-    weights_size += g_config.n_layers * g_config.hidden_dim * g_config.dim;  // w2
-    weights_size += g_config.n_layers * g_config.dim * g_config.hidden_dim;  // w3
-    weights_size += g_config.dim;                        // rms_final_weight
-    weights_size += g_config.seq_len * head_size / 2;    // freq_cis_real (skipped)
-    weights_size += g_config.seq_len * head_size / 2;    // freq_cis_imag (skipped)
+    weights_size += g_config.vocab_size * g_config.dim; // token_embedding_table
+    weights_size += g_config.n_layers * g_config.dim;   // rms_att_weight
+    weights_size += g_config.n_layers * g_config.dim * (g_config.n_heads * head_size);    // wq
+    weights_size += g_config.n_layers * g_config.dim * (g_config.n_kv_heads * head_size); // wk
+    weights_size += g_config.n_layers * g_config.dim * (g_config.n_kv_heads * head_size); // wv
+    weights_size += g_config.n_layers * (g_config.n_heads * head_size) * g_config.dim;    // wo
+    weights_size += g_config.n_layers * g_config.dim;                       // rms_ffn_weight
+    weights_size += g_config.n_layers * g_config.dim * g_config.hidden_dim; // w1
+    weights_size += g_config.n_layers * g_config.hidden_dim * g_config.dim; // w2
+    weights_size += g_config.n_layers * g_config.dim * g_config.hidden_dim; // w3
+    weights_size += g_config.dim;                                           // rms_final_weight
+    weights_size += g_config.seq_len * head_size / 2; // freq_cis_real (skipped)
+    weights_size += g_config.seq_len * head_size / 2; // freq_cis_imag (skipped)
     if (!shared_weights) {
-        weights_size += g_config.vocab_size * g_config.dim;  // wcls
+        weights_size += g_config.vocab_size * g_config.dim; // wcls
     }
 
     // Try to load vocabulary from embedded tokenizer first
     extern int tokenizer_embedded(void);
-    const uint8_t* vocab_ptr = NULL;
+    const uint8_t *vocab_ptr = NULL;
     if (tokenizer_embedded()) {
         console_printf("Loading vocabulary from embedded tokenizer...\n");
         vocab_ptr = _binary_tokenizer_bin_start;
@@ -538,7 +550,8 @@ extern int tinystories_model_embedded(void);
 /**
  * Load model from embedded binary data
  */
-int tinystories_load_model(void) {
+int tinystories_load_model(void)
+{
     console_printf("Loading AI model...\n");
 
     // Check if model weights are embedded using helper function
@@ -546,11 +559,12 @@ int tinystories_load_model(void) {
         console_printf("WARNING: No model weights embedded in kernel\n");
         console_printf("AI inference will use fallback mode.\n");
         console_printf("Use 'loadtiny' command to load from disk.\n");
-        return 0;  // Success but no weights
+        return 0; // Success but no weights
     }
 
-    const uint8_t* model_data = _binary_tinystories_15m_bin_start;
-    size_t model_size = (size_t)(_binary_tinystories_15m_bin_end - _binary_tinystories_15m_bin_start);
+    const uint8_t *model_data = _binary_tinystories_15m_bin_start;
+    size_t model_size =
+        (size_t)(_binary_tinystories_15m_bin_end - _binary_tinystories_15m_bin_start);
 
     return tinystories_load_from_data(model_data, model_size);
 }
@@ -559,12 +573,13 @@ int tinystories_load_model(void) {
  * Load TinyStories model from VirtIO block device
  * Reads the entire model file from disk sector 0 into heap memory
  */
-int tinystories_load_from_disk(void) {
+int tinystories_load_from_disk(void)
+{
     console_printf("\n");
     console_printf("Loading TinyStories model from disk...\n");
 
     // Get the first block device
-    block_device_t* dev = block_get_device_by_index(0);
+    block_device_t *dev = block_get_device_by_index(0);
     if (!dev) {
         console_printf("ERROR: No block device available\n");
         console_printf("Make sure QEMU has a VirtIO disk attached.\n");
@@ -581,8 +596,49 @@ int tinystories_load_from_disk(void) {
         return -2;
     }
 
-    // Parse config from header (first 28 bytes = 7 ints)
-    int* config = (int*)header;
+    // Check for GGUF magic first
+    if (header[0] == 'G' && header[1] == 'G' && header[2] == 'U' && header[3] == 'F') {
+        console_printf("Detected GGUF format on disk!\n");
+
+        // For GGUF, we need to read the entire file - get size from disk capacity
+        size_t total_bytes = dev->total_sectors * 512ULL;
+        console_printf("Reading GGUF model (%zu bytes)...\n", total_bytes);
+
+        // Allocate memory
+        g_disk_model_data = (uint8_t *)kmalloc(total_bytes);
+        if (!g_disk_model_data) {
+            console_printf("ERROR: Failed to allocate %zu bytes for GGUF\n", total_bytes);
+            return -4;
+        }
+        g_disk_model_size = total_bytes;
+
+        // Read all sectors
+        uint32_t sectors_per_read = 128; // 64KB chunks
+        for (uint32_t sector = 0; sector < dev->total_sectors; sector += sectors_per_read) {
+            uint32_t count = sectors_per_read;
+            if (sector + count > dev->total_sectors) {
+                count = (uint32_t)(dev->total_sectors - sector);
+            }
+            if (block_read(dev, sector, count, g_disk_model_data + sector * 512) != 0) {
+                console_printf("ERROR: Failed to read sector %u\n", sector);
+                kfree(g_disk_model_data);
+                g_disk_model_data = NULL;
+                return -5;
+            }
+        }
+
+        console_printf("GGUF read complete.\n");
+
+        // Load using GGUF-aware loader
+        int result = tinystories_load_from_data(g_disk_model_data, g_disk_model_size);
+        if (result == 0) {
+            g_model_loaded = true;
+        }
+        return result;
+    }
+
+    // Parse config from header (first 28 bytes = 7 ints) - .bin format
+    int *config = (int *)header;
     int dim = config[0];
     int hidden_dim = config[1];
     int n_layers = config[2];
@@ -592,12 +648,11 @@ int tinystories_load_from_disk(void) {
     int seq_len = config[6];
 
     // Validate config (basic sanity checks)
-    if (dim <= 0 || dim > 8192 || hidden_dim <= 0 || hidden_dim > 32768 ||
-        n_layers <= 0 || n_layers > 128 || n_heads <= 0 || n_heads > 256 ||
-        vocab_size <= 0 || vocab_size > 256000) {
+    if (dim <= 0 || dim > 8192 || hidden_dim <= 0 || hidden_dim > 32768 || n_layers <= 0 ||
+        n_layers > 128 || n_heads <= 0 || n_heads > 256 || vocab_size <= 0 || vocab_size > 256000) {
         console_printf("ERROR: Invalid model config in disk header\n");
-        console_printf("  dim=%d hidden=%d layers=%d heads=%d vocab=%d\n",
-                       dim, hidden_dim, n_layers, n_heads, vocab_size);
+        console_printf("  dim=%d hidden=%d layers=%d heads=%d vocab=%d\n", dim, hidden_dim,
+                       n_layers, n_heads, vocab_size);
         console_printf("This might not be a TinyStories .bin file.\n");
         return -3;
     }
@@ -610,21 +665,21 @@ int tinystories_load_from_disk(void) {
     // This is a rough estimate - the actual calculation is complex
     int head_size = dim / n_heads;
     size_t param_bytes = 0;
-    param_bytes += vocab_size * dim * 4;  // token embeddings
-    param_bytes += n_layers * dim * 4;    // rms_att
-    param_bytes += n_layers * dim * (n_heads * head_size) * 4;  // wq
-    param_bytes += n_layers * dim * (n_kv_heads * head_size) * 4;  // wk
-    param_bytes += n_layers * dim * (n_kv_heads * head_size) * 4;  // wv
-    param_bytes += n_layers * (n_heads * head_size) * dim * 4;  // wo
-    param_bytes += n_layers * dim * 4;    // rms_ffn
-    param_bytes += n_layers * dim * hidden_dim * 4;  // w1
-    param_bytes += n_layers * hidden_dim * dim * 4;  // w2
-    param_bytes += n_layers * dim * hidden_dim * 4;  // w3
-    param_bytes += dim * 4;               // rms_final
-    param_bytes += seq_len * head_size;   // freq_cis
+    param_bytes += vocab_size * dim * 4;                          // token embeddings
+    param_bytes += n_layers * dim * 4;                            // rms_att
+    param_bytes += n_layers * dim * (n_heads * head_size) * 4;    // wq
+    param_bytes += n_layers * dim * (n_kv_heads * head_size) * 4; // wk
+    param_bytes += n_layers * dim * (n_kv_heads * head_size) * 4; // wv
+    param_bytes += n_layers * (n_heads * head_size) * dim * 4;    // wo
+    param_bytes += n_layers * dim * 4;                            // rms_ffn
+    param_bytes += n_layers * dim * hidden_dim * 4;               // w1
+    param_bytes += n_layers * hidden_dim * dim * 4;               // w2
+    param_bytes += n_layers * dim * hidden_dim * 4;               // w3
+    param_bytes += dim * 4;                                       // rms_final
+    param_bytes += seq_len * head_size;                           // freq_cis
 
     // Add extra for vocab data (scores + token strings)
-    size_t model_size = param_bytes + 28 + vocab_size * 64;  // rough estimate
+    size_t model_size = param_bytes + 28 + vocab_size * 64; // rough estimate
 
     // Round up to sector boundary
     uint32_t sector_count = (model_size + 511) / 512;
@@ -635,7 +690,7 @@ int tinystories_load_from_disk(void) {
     }
 
     size_t total_bytes = sector_count * 512ULL;
-    console_printf("Reading %u sectors (%zu MB)...\n", sector_count, total_bytes / (1024*1024));
+    console_printf("Reading %u sectors (%zu MB)...\n", sector_count, total_bytes / (1024 * 1024));
 
     // Free any previously loaded disk model
     if (g_disk_model_data) {
@@ -644,20 +699,21 @@ int tinystories_load_from_disk(void) {
     }
 
     // Allocate memory for model
-    g_disk_model_data = (uint8_t*)heap_alloc(total_bytes);
+    g_disk_model_data = (uint8_t *)heap_alloc(total_bytes);
     if (!g_disk_model_data) {
         console_printf("ERROR: Failed to allocate %zu bytes for model\n", total_bytes);
         return -4;
     }
 
-    // Read model from disk in chunks
-    #define CHUNK_SECTORS 256  // Read 128KB at a time
+// Read model from disk in chunks
+#define CHUNK_SECTORS 256 // Read 128KB at a time
     uint32_t sectors_read = 0;
     uint32_t progress_last = 0;
 
     while (sectors_read < sector_count) {
         uint32_t chunk = sector_count - sectors_read;
-        if (chunk > CHUNK_SECTORS) chunk = CHUNK_SECTORS;
+        if (chunk > CHUNK_SECTORS)
+            chunk = CHUNK_SECTORS;
 
         int ret = block_read(dev, sectors_read, chunk, g_disk_model_data + sectors_read * 512);
         if (ret != 0) {
@@ -672,7 +728,7 @@ int tinystories_load_from_disk(void) {
         // Show progress every 10%
         uint32_t progress = (sectors_read * 100) / sector_count;
         if (progress >= progress_last + 10) {
-            console_printf("  %u%% (%u MB read)\n", progress, (sectors_read * 512) / (1024*1024));
+            console_printf("  %u%% (%u MB read)\n", progress, (sectors_read * 512) / (1024 * 1024));
             progress_last = progress;
         }
     }
@@ -691,11 +747,12 @@ int tinystories_load_from_disk(void) {
  * Forward pass through transformer to get logits for next token
  * This is the REAL inference engine from llama.c
  */
-static float* forward(int token, int pos) {
+static float *forward(int token, int pos)
+{
     // convenience variables
-    TinyStoriesConfig* p = &g_config;
-    TinyStoriesWeights* w = &g_weights;
-    TinyStoriesRunState* s = &g_state;
+    TinyStoriesConfig *p = &g_config;
+    TinyStoriesWeights *w = &g_weights;
+    TinyStoriesRunState *s = &g_state;
     float *x = s->x;
     int dim = p->dim;
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
@@ -707,14 +764,14 @@ static float* forward(int token, int pos) {
     float inv_sqrt_head_size = 1.0f / sqrtf((float)head_size);
 
     // copy the token embedding into x
-    float* content_row = w->token_embedding_table + token * dim;
-    memcpy(x, content_row, dim*sizeof(*x));
+    float *content_row = w->token_embedding_table + token * dim;
+    memcpy(x, content_row, dim * sizeof(*x));
 
     // forward all the layers
-    for(unsigned long long l = 0; l < p->n_layers; l++) {
+    for (unsigned long long l = 0; l < p->n_layers; l++) {
 
         // attention rmsnorm
-        rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
+        rmsnorm(s->xb, x, w->rms_att_weight + l * dim, dim);
 
         // key and value point to the kv cache
         int loff = l * p->seq_len * kv_dim; // kv cache layer offset for convenience
@@ -722,9 +779,9 @@ static float* forward(int token, int pos) {
         s->v = s->value_cache + loff + pos * kv_dim;
 
         // qkv matmuls for this position
-        matmul(s->q, s->xb, w->wq + l*dim*dim, dim, dim);
-        matmul(s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim);
-        matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
+        matmul(s->q, s->xb, w->wq + l * dim * dim, dim, dim);
+        matmul(s->k, s->xb, w->wk + l * dim * kv_dim, dim, kv_dim);
+        matmul(s->v, s->xb, w->wv + l * dim * kv_dim, dim, kv_dim);
 
         // RoPE relative positional encoding: complex-valued rotate q and k in each head
         // This is CRITICAL for the model to distinguish token positions
@@ -736,24 +793,24 @@ static float* forward(int token, int pos) {
             float fci = sinf(val);
             int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
             for (int v = 0; v < rotn; v++) {
-                float* vec = v == 0 ? s->q : s->k; // the vector to rotate (query or key)
+                float *vec = v == 0 ? s->q : s->k; // the vector to rotate (query or key)
                 float v0 = vec[i];
-                float v1 = vec[i+1];
-                vec[i]   = v0 * fcr - v1 * fci;
-                vec[i+1] = v0 * fci + v1 * fcr;
+                float v1 = vec[i + 1];
+                vec[i] = v0 * fcr - v1 * fci;
+                vec[i + 1] = v0 * fci + v1 * fcr;
             }
         }
 
         // multihead attention. iterate over all heads
         for (int h = 0; h < p->n_heads; h++) {
             // get the query vector for this head
-            float* q = s->q + h * head_size;
+            float *q = s->q + h * head_size;
             // attention scores for this head
-            float* att = s->att + h * p->seq_len;
+            float *att = s->att + h * p->seq_len;
             // iterate over all timesteps, including the current one
             for (int t = 0; t <= pos; t++) {
                 // get the key vector for this head and at this timestep
-                float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                float *k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
                 // calculate the attention score as the dot product of q and k
 #ifdef __x86_64__
                 // SSE2 dot product
@@ -786,11 +843,11 @@ static float* forward(int token, int pos) {
             softmax(att, pos + 1);
 
             // weighted sum of the values, store back into xb
-            float* xb = s->xb + h * head_size;
+            float *xb = s->xb + h * head_size;
             memset(xb, 0, head_size * sizeof(float));
             for (int t = 0; t <= pos; t++) {
                 // get the value vector for this head and at this timestep
-                float* v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                float *v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
                 // get the attention weight for this timestep
                 float a = att[t];
 #ifdef __x86_64__
@@ -817,7 +874,7 @@ static float* forward(int token, int pos) {
         }
 
         // final matmul to get the output of the attention
-        matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
+        matmul(s->xb2, s->xb, w->wo + l * dim * dim, dim, dim);
 
         // residual connection back into x
         for (int i = 0; i < dim; i++) {
@@ -825,12 +882,12 @@ static float* forward(int token, int pos) {
         }
 
         // ffn rmsnorm
-        rmsnorm(s->xb, x, w->rms_ffn_weight + l*dim, dim);
+        rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
-        matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
-        matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
+        matmul(s->hb, s->xb, w->w1 + l * dim * hidden_dim, dim, hidden_dim);
+        matmul(s->hb2, s->xb, w->w3 + l * dim * hidden_dim, dim, hidden_dim);
 
         // SwiGLU non-linearity
         for (int i = 0; i < hidden_dim; i++) {
@@ -843,7 +900,7 @@ static float* forward(int token, int pos) {
         }
 
         // final matmul to get the output of the ffn
-        matmul(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
+        matmul(s->xb, s->hb, w->w2 + l * dim * hidden_dim, hidden_dim, dim);
 
         // residual connection
         for (int i = 0; i < dim; i++) {
@@ -866,9 +923,10 @@ static float* forward(int token, int pos) {
  * Simple tokenizer (character-level for demo)
  * TODO: Replace with proper BPE tokenizer
  */
-static int tinystories_tokenize(const char* text, int* tokens, int max_tokens) {
+static int tinystories_tokenize(const char *text, int *tokens, int max_tokens)
+{
     int n = 0;
-    for (const char* p = text; *p && n < max_tokens; p++) {
+    for (const char *p = text; *p && n < max_tokens; p++) {
         if (*p >= 'a' && *p <= 'z') {
             tokens[n++] = (*p - 'a' + 1);
         } else if (*p >= 'A' && *p <= 'Z') {
@@ -884,10 +942,11 @@ static int tinystories_tokenize(const char* text, int* tokens, int max_tokens) {
  * Decode a token using the loaded vocabulary (BPE)
  * Fallback to simple ASCII if vocabulary not loaded
  */
-static const char* tinystories_decode_token(int token) {
+static const char *tinystories_decode_token(int token)
+{
     // If vocabulary is loaded, use it
     if (g_vocab.vocab != NULL && token >= 0 && token < g_vocab.vocab_size) {
-        const char* piece = g_vocab.vocab[token];
+        const char *piece = g_vocab.vocab[token];
 
         // Handle raw byte tokens like '<0x01>'
         // Parse and return the actual byte
@@ -932,7 +991,7 @@ static const char* tinystories_decode_token(int token) {
 
     // For other tokens, show token ID
     // Simple itoa implementation
-    char* p = g_token_fallback;
+    char *p = g_token_fallback;
     *p++ = '[';
 
     int num = token;
@@ -964,19 +1023,22 @@ static const char* tinystories_decode_token(int token) {
  */
 
 // RNG functions (xorshift)
-static unsigned int random_u32(unsigned long long *state) {
+static unsigned int random_u32(unsigned long long *state)
+{
     *state ^= *state >> 12;
     *state ^= *state << 25;
     *state ^= *state >> 27;
     return (*state * 0x2545F4914F6CDD1Dull) >> 32;
 }
 
-static float random_f32(unsigned long long *state) {
+static float random_f32(unsigned long long *state)
+{
     return (random_u32(state) >> 8) / 16777216.0f;
 }
 
 // Sample from probability distribution
-static int sample_mult(float* probabilities, int n, float coin) {
+static int sample_mult(float *probabilities, int n, float coin)
+{
     float cdf = 0.0f;
     for (int i = 0; i < n; i++) {
         cdf += probabilities[i];
@@ -991,7 +1053,8 @@ static int sample_mult(float* probabilities, int n, float coin) {
  * Run REAL inference using the transformer
  * NO MORE HARDCODED RESPONSES - this uses actual model weights
  */
-int tinystories_infer(const char* prompt, char* output, int max_output_len) {
+int tinystories_infer(const char *prompt, char *output, int max_output_len)
+{
     if (!g_model_loaded) {
         console_printf("ERROR: Model not loaded\n");
         return -1;
@@ -1020,7 +1083,7 @@ int tinystories_infer(const char* prompt, char* output, int max_output_len) {
 
     // Initialize RNG for sampling (using simple seed based on prompt)
     static unsigned long long rng_state = 1234567890ULL;
-    float temperature = 0.9f;  // temperature for sampling (0.9 = creative but coherent)
+    float temperature = 0.9f; // temperature for sampling (0.9 = creative but coherent)
 
     console_printf("Generating text");
 
@@ -1029,7 +1092,7 @@ int tinystories_infer(const char* prompt, char* output, int max_output_len) {
 
     // Process prompt tokens first (prefill)
     int pos = 0;
-    float* logits = NULL;  // Will hold logits from last forward pass
+    float *logits = NULL; // Will hold logits from last forward pass
     for (int i = 0; i < n_prompt_tokens; i++) {
         logits = forward(prompt_tokens[i], pos);
         pos++;
@@ -1054,13 +1117,13 @@ int tinystories_infer(const char* prompt, char* output, int max_output_len) {
         }
 
         // Decode token using BPE vocabulary
-        const char* token_str = tinystories_decode_token(next);
+        const char *token_str = tinystories_decode_token(next);
 
         // Append token string to output
         int token_len = 0;
-        for (const char* p = token_str; *p && output_len < max_output_len - 1; p++) {
+        for (const char *p = token_str; *p && output_len < max_output_len - 1; p++) {
             // Handle special BPE tokens that start with Ġ (space marker)
-            if (*p == (char)0xC4 && *(p+1) == (char)0xA0) {
+            if (*p == (char)0xC4 && *(p + 1) == (char)0xA0) {
                 // This is the BPE space token "Ġ" (U+0120 encoded as UTF-8)
                 output[output_len++] = ' ';
                 console_printf(" ");
@@ -1071,7 +1134,8 @@ int tinystories_infer(const char* prompt, char* output, int max_output_len) {
                 console_printf("%c", *p);
             }
             token_len++;
-            if (token_len > 100) break; // safety limit
+            if (token_len > 100)
+                break; // safety limit
         }
 
         // Get logits for NEXT token (ready for next iteration)
@@ -1092,7 +1156,7 @@ int tinystories_infer(const char* prompt, char* output, int max_output_len) {
 
     // Estimate elapsed time (assuming ~2 GHz CPU for QEMU/real hardware)
     // For more accuracy on real hardware, this should be calibrated
-    uint64_t cpu_freq_mhz = 2000;  // Assume 2 GHz = 2000 MHz
+    uint64_t cpu_freq_mhz = 2000; // Assume 2 GHz = 2000 MHz
     uint64_t elapsed_ms = elapsed_cycles / (cpu_freq_mhz * 1000);
 
     // Calculate tokens/second and ms/token
@@ -1110,12 +1174,13 @@ int tinystories_infer(const char* prompt, char* output, int max_output_len) {
     int mpt_frac = (int)((ms_per_token - mpt_whole) * 10);
 
     // Display performance metrics
-    console_printf("\n");  // Add blank line for readability
+    console_printf("\n"); // Add blank line for readability
     console_printf("Generated %d tokens in %d ms\n", max_gen_len, (int)elapsed_ms);
     console_printf("Performance: ");
     console_printf("%d", tps_whole);
     console_printf(".");
-    if (tps_frac < 10) console_printf("0");  // Manual zero-padding for 2 digits
+    if (tps_frac < 10)
+        console_printf("0"); // Manual zero-padding for 2 digits
     console_printf("%d", tps_frac);
     console_printf(" tokens/sec, ");
     console_printf("%d", mpt_whole);
@@ -1130,14 +1195,13 @@ int tinystories_infer(const char* prompt, char* output, int max_output_len) {
 /**
  * Check if TinyStories model is loaded
  */
-bool tinystories_is_loaded(void) {
-    return g_model_loaded;
-}
+bool tinystories_is_loaded(void) { return g_model_loaded; }
 
 /**
  * Interactive TinyStories - load model and wait for prompts
  */
-void tinystories_interactive_init(void) {
+void tinystories_interactive_init(void)
+{
     console_printf("\n");
     console_printf("═══════════════════════════════════════════════════════════\n");
     console_printf("  TinyStories-15M Interactive AI\n");
@@ -1150,8 +1214,8 @@ void tinystories_interactive_init(void) {
 
     if (g_model_loaded) {
         console_printf("AI Model Ready!\n");
-        console_printf("Model: %d layers, %d dim, %d vocab\n",
-                       g_config.n_layers, g_config.dim, g_config.vocab_size);
+        console_printf("Model: %d layers, %d dim, %d vocab\n", g_config.n_layers, g_config.dim,
+                       g_config.vocab_size);
         console_printf("\nType 'ai <prompt>' to generate text\n");
         console_printf("Example: ai Once upon a time\n");
     } else {
@@ -1166,7 +1230,8 @@ void tinystories_interactive_init(void) {
 /**
  * Test TinyStories model with REAL inference
  */
-void tinystories_test(void) {
+void tinystories_test(void)
+{
     console_printf("\n");
     console_printf("═══════════════════════════════════════════════════════════\n");
     console_printf("  TinyStories-15M REAL INFERENCE TEST\n");
@@ -1182,7 +1247,7 @@ void tinystories_test(void) {
 
     // Run test inference with REAL transformer
     char output[256];
-    const char* test_prompt = "Once upon a time";
+    const char *test_prompt = "Once upon a time";
 
     console_printf("Running REAL transformer inference (no hardcoded responses)\n\n");
     tinystories_infer(test_prompt, output, sizeof(output));
@@ -1195,4 +1260,3 @@ void tinystories_test(void) {
     console_printf("═══════════════════════════════════════════════════════════\n");
     console_printf("\n");
 }
-

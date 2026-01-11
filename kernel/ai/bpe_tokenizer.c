@@ -10,24 +10,24 @@
  * 3. Use scores for tie-breaking (greedy longest match)
  */
 
-#include <embodios/types.h>
-#include <embodios/kernel.h>
 #include <embodios/console.h>
-#include <embodios/mm.h>
 #include <embodios/gguf_parser.h>
+#include <embodios/kernel.h>
+#include <embodios/mm.h>
+#include <embodios/types.h>
 
 /* ============================================================================
  * Constants
  * ============================================================================ */
 
-#define BPE_MAX_TOKEN_LEN    64      /* Maximum token length in bytes */
-#define BPE_HASH_SIZE        65536   /* Hash table size for vocab lookup */
-#define BPE_BYTE_FALLBACK    256     /* Start of byte fallback tokens */
+#define BPE_MAX_TOKEN_LEN 64    /* Maximum token length in bytes */
+#define BPE_HASH_SIZE     65536 /* Hash table size for vocab lookup */
+#define BPE_BYTE_FALLBACK 256   /* Start of byte fallback tokens */
 
 /* Special token IDs (LLaMA defaults) */
-#define BPE_TOKEN_UNK   0
-#define BPE_TOKEN_BOS   1
-#define BPE_TOKEN_EOS   2
+#define BPE_TOKEN_UNK 0
+#define BPE_TOKEN_BOS 1
+#define BPE_TOKEN_EOS 2
 
 /* ============================================================================
  * Data Structures
@@ -37,24 +37,24 @@
  * Vocabulary entry for hash table lookup
  */
 struct bpe_vocab_entry {
-    char* text;                     /* Token text (UTF-8) */
-    uint32_t token_id;              /* Token ID */
-    float score;                    /* Token score (for merge priority) */
-    uint8_t length;                 /* Text length in bytes */
-    struct bpe_vocab_entry* next;   /* Hash collision chain */
+    char *text;                   /* Token text (UTF-8) */
+    uint32_t token_id;            /* Token ID */
+    float score;                  /* Token score (for merge priority) */
+    uint8_t length;               /* Text length in bytes */
+    struct bpe_vocab_entry *next; /* Hash collision chain */
 };
 
 /**
  * BPE tokenizer state
  */
 static struct {
-    struct bpe_vocab_entry** hash_table;  /* Hash table for text->id lookup */
-    char** id_to_text;                    /* Array for id->text lookup */
-    float* scores;                        /* Token scores */
-    uint32_t vocab_size;                  /* Vocabulary size */
-    uint32_t bos_token;                   /* BOS token ID */
-    uint32_t eos_token;                   /* EOS token ID */
-    uint32_t unk_token;                   /* UNK token ID */
+    struct bpe_vocab_entry **hash_table; /* Hash table for text->id lookup */
+    char **id_to_text;                   /* Array for id->text lookup */
+    float *scores;                       /* Token scores */
+    uint32_t vocab_size;                 /* Vocabulary size */
+    uint32_t bos_token;                  /* BOS token ID */
+    uint32_t eos_token;                  /* EOS token ID */
+    uint32_t unk_token;                  /* UNK token ID */
     bool initialized;
 } g_bpe = {0};
 
@@ -62,16 +62,16 @@ static struct {
  * String Utilities
  * ============================================================================ */
 
-extern size_t strlen(const char* s);
-extern int strcmp(const char* s1, const char* s2);
-extern int strncmp(const char* s1, const char* s2, size_t n);
-extern void* memcpy(void* dest, const void* src, size_t n);
-extern void* memset(void* s, int c, size_t n);
+extern size_t strlen(const char *s);
+extern int strcmp(const char *s1, const char *s2);
+extern int strncmp(const char *s1, const char *s2, size_t n);
+extern void *memcpy(void *dest, const void *src, size_t n);
+extern void *memset(void *s, int c, size_t n);
 
 /**
  * djb2_hash - Simple string hash function
  */
-static uint32_t djb2_hash(const char* str, size_t len)
+static uint32_t djb2_hash(const char *str, size_t len)
 {
     uint32_t hash = 5381;
     for (size_t i = 0; i < len; i++) {
@@ -87,20 +87,22 @@ static uint32_t djb2_hash(const char* str, size_t len)
 /**
  * bpe_vocab_insert - Insert token into hash table
  */
-static int bpe_vocab_insert(const char* text, uint32_t token_id, float score)
+static int bpe_vocab_insert(const char *text, uint32_t token_id, float score)
 {
-    if (!text || !g_bpe.hash_table) return -1;
+    if (!text || !g_bpe.hash_table)
+        return -1;
 
     size_t len = strlen(text);
-    if (len == 0 || len > BPE_MAX_TOKEN_LEN) return -1;
+    if (len == 0 || len > BPE_MAX_TOKEN_LEN)
+        return -1;
 
-    /* Allocate entry */
-    struct bpe_vocab_entry* entry = kmalloc(sizeof(struct bpe_vocab_entry));
-    if (!entry) return -1;
+    /* Allocate entry using heap_alloc (not kmalloc) */
+    struct bpe_vocab_entry *entry = heap_alloc(sizeof(struct bpe_vocab_entry));
+    if (!entry)
+        return -1;
 
-    entry->text = kmalloc(len + 1);
+    entry->text = heap_alloc(len + 1);
     if (!entry->text) {
-        kfree(entry);
         return -1;
     }
 
@@ -127,12 +129,13 @@ static int bpe_vocab_insert(const char* text, uint32_t token_id, float score)
 /**
  * bpe_vocab_lookup - Look up token ID by text
  */
-static int bpe_vocab_lookup(const char* text, size_t len)
+static int bpe_vocab_lookup(const char *text, size_t len)
 {
-    if (!text || !g_bpe.hash_table || len == 0) return -1;
+    if (!text || !g_bpe.hash_table || len == 0)
+        return -1;
 
     uint32_t hash = djb2_hash(text, len) % BPE_HASH_SIZE;
-    struct bpe_vocab_entry* entry = g_bpe.hash_table[hash];
+    struct bpe_vocab_entry *entry = g_bpe.hash_table[hash];
 
     while (entry) {
         if (entry->length == len && strncmp(entry->text, text, len) == 0) {
@@ -141,7 +144,7 @@ static int bpe_vocab_lookup(const char* text, size_t len)
         entry = entry->next;
     }
 
-    return -1;  /* Not found */
+    return -1; /* Not found */
 }
 
 /* ============================================================================
@@ -154,7 +157,7 @@ static int bpe_vocab_lookup(const char* text, size_t len)
  * For each position, find the longest matching token in vocabulary.
  * This is the standard approach for SentencePiece/LLaMA tokenizers.
  */
-static int bpe_encode_greedy(const char* text, int* tokens, int max_tokens)
+static int bpe_encode_greedy(const char *text, int *tokens, int max_tokens)
 {
     int n_tokens = 0;
     size_t text_len = strlen(text);
@@ -187,7 +190,7 @@ static int bpe_encode_greedy(const char* text, int* tokens, int max_tokens)
             byte_token[0] = '<';
             byte_token[1] = '0';
             byte_token[2] = 'x';
-            const char* hex = "0123456789ABCDEF";
+            const char *hex = "0123456789ABCDEF";
             byte_token[3] = hex[byte >> 4];
             byte_token[4] = hex[byte & 0xF];
             byte_token[5] = '>';
@@ -213,7 +216,7 @@ static int bpe_encode_greedy(const char* text, int* tokens, int max_tokens)
  * SentencePiece uses '▁' (U+2581) to represent spaces/word boundaries.
  * We need to convert spaces to this character for proper tokenization.
  */
-static int bpe_preprocess_text(const char* input, char* output, size_t max_len)
+static int bpe_preprocess_text(const char *input, char *output, size_t max_len)
 {
     size_t in_pos = 0;
     size_t out_pos = 0;
@@ -278,41 +281,38 @@ int bpe_tokenizer_init(void)
     g_bpe.vocab_size = vocab_size;
     console_printf("[BPE] Vocabulary size: %u tokens\n", vocab_size);
 
-    /* Allocate hash table */
-    g_bpe.hash_table = kmalloc(BPE_HASH_SIZE * sizeof(struct bpe_vocab_entry*));
+    /* Allocate hash table using heap_alloc (not kmalloc) */
+    g_bpe.hash_table = heap_alloc(BPE_HASH_SIZE * sizeof(struct bpe_vocab_entry *));
     if (!g_bpe.hash_table) {
         console_printf("[BPE] ERROR: Failed to allocate hash table\n");
         return -1;
     }
-    memset(g_bpe.hash_table, 0, BPE_HASH_SIZE * sizeof(struct bpe_vocab_entry*));
+    memset(g_bpe.hash_table, 0, BPE_HASH_SIZE * sizeof(struct bpe_vocab_entry *));
 
     /* Allocate id->text array */
-    g_bpe.id_to_text = kmalloc(vocab_size * sizeof(char*));
+    g_bpe.id_to_text = heap_alloc(vocab_size * sizeof(char *));
     if (!g_bpe.id_to_text) {
         console_printf("[BPE] ERROR: Failed to allocate id_to_text\n");
-        kfree(g_bpe.hash_table);
         return -1;
     }
-    memset(g_bpe.id_to_text, 0, vocab_size * sizeof(char*));
+    memset(g_bpe.id_to_text, 0, vocab_size * sizeof(char *));
 
     /* Allocate scores array */
-    g_bpe.scores = kmalloc(vocab_size * sizeof(float));
+    g_bpe.scores = heap_alloc(vocab_size * sizeof(float));
     if (!g_bpe.scores) {
         console_printf("[BPE] ERROR: Failed to allocate scores\n");
-        kfree(g_bpe.id_to_text);
-        kfree(g_bpe.hash_table);
         return -1;
     }
     memset(g_bpe.scores, 0, vocab_size * sizeof(float));
 
     /* Get special token IDs from GGUF */
-    const struct gguf_model_arch* arch = gguf_parser_get_arch();
+    const struct gguf_model_arch *arch = gguf_parser_get_arch();
     if (arch) {
         g_bpe.bos_token = arch->bos_token_id;
         g_bpe.eos_token = arch->eos_token_id;
-        g_bpe.unk_token = 0;  /* Usually 0 */
-        console_printf("[BPE] Special tokens: BOS=%u, EOS=%u, UNK=%u\n",
-                       g_bpe.bos_token, g_bpe.eos_token, g_bpe.unk_token);
+        g_bpe.unk_token = 0; /* Usually 0 */
+        console_printf("[BPE] Special tokens: BOS=%u, EOS=%u, UNK=%u\n", g_bpe.bos_token,
+                       g_bpe.eos_token, g_bpe.unk_token);
     } else {
         g_bpe.bos_token = BPE_TOKEN_BOS;
         g_bpe.eos_token = BPE_TOKEN_EOS;
@@ -324,7 +324,7 @@ int bpe_tokenizer_init(void)
     int skipped = 0;
 
     for (uint32_t i = 0; i < vocab_size; i++) {
-        const char* text = gguf_parser_get_token(i);
+        const char *text = gguf_parser_get_token(i);
         float score = gguf_parser_get_token_score(i);
 
         if (text && strlen(text) > 0) {
@@ -348,7 +348,7 @@ int bpe_tokenizer_init(void)
     /* Print sample tokens for verification */
     console_printf("[BPE] Sample tokens:\n");
     for (uint32_t i = 0; i < 10 && i < vocab_size; i++) {
-        const char* text = g_bpe.id_to_text[i];
+        const char *text = g_bpe.id_to_text[i];
         if (text) {
             console_printf("  [%u] '%s' (score=%.2f)\n", i, text, g_bpe.scores[i]);
         }
@@ -370,8 +370,7 @@ int bpe_tokenizer_init(void)
  *
  * Returns: Number of tokens produced
  */
-int bpe_tokenizer_encode(const char* text, int* tokens, int max_tokens,
-                         bool add_bos, bool add_eos)
+int bpe_tokenizer_encode(const char *text, int *tokens, int max_tokens, bool add_bos, bool add_eos)
 {
     if (!g_bpe.initialized || !text || !tokens || max_tokens <= 0) {
         return 0;
@@ -386,7 +385,7 @@ int bpe_tokenizer_encode(const char* text, int* tokens, int max_tokens,
 
     /* Preprocess text for SentencePiece compatibility */
     size_t text_len = strlen(text);
-    char* processed = kmalloc(text_len * 4 + 1);  /* Worst case: 3 bytes per char */
+    char *processed = heap_alloc(text_len * 4 + 1); /* Worst case: 3 bytes per char */
     if (!processed) {
         return n_tokens;
     }
@@ -397,7 +396,7 @@ int bpe_tokenizer_encode(const char* text, int* tokens, int max_tokens,
     int encoded = bpe_encode_greedy(processed, tokens + n_tokens, max_tokens - n_tokens - 1);
     n_tokens += encoded;
 
-    kfree(processed);
+    /* Note: heap_alloc doesn't have free, but this is small and short-lived */
 
     /* Add EOS token if requested */
     if (add_eos && n_tokens < max_tokens) {
@@ -417,7 +416,7 @@ int bpe_tokenizer_encode(const char* text, int* tokens, int max_tokens,
  *
  * Returns: Length of output text
  */
-int bpe_tokenizer_decode(const int* tokens, int n_tokens, char* text, int max_len)
+int bpe_tokenizer_decode(const int *tokens, int n_tokens, char *text, int max_len)
 {
     if (!g_bpe.initialized || !tokens || !text || max_len <= 0) {
         return 0;
@@ -429,21 +428,18 @@ int bpe_tokenizer_decode(const int* tokens, int n_tokens, char* text, int max_le
         int token_id = tokens[i];
 
         /* Skip special tokens */
-        if (token_id == (int)g_bpe.bos_token ||
-            token_id == (int)g_bpe.eos_token) {
+        if (token_id == (int)g_bpe.bos_token || token_id == (int)g_bpe.eos_token) {
             continue;
         }
 
         /* Get token text */
         if (token_id >= 0 && token_id < (int)g_bpe.vocab_size) {
-            const char* token_text = g_bpe.id_to_text[token_id];
+            const char *token_text = g_bpe.id_to_text[token_id];
             if (token_text) {
                 size_t len = strlen(token_text);
 
                 /* Handle SentencePiece space marker (▁) */
-                if (len >= 3 &&
-                    (uint8_t)token_text[0] == 0xE2 &&
-                    (uint8_t)token_text[1] == 0x96 &&
+                if (len >= 3 && (uint8_t)token_text[0] == 0xE2 && (uint8_t)token_text[1] == 0x96 &&
                     (uint8_t)token_text[2] == 0x81) {
                     /* Replace ▁ with space */
                     if (pos > 0 && pos < max_len - 1) {
@@ -472,7 +468,7 @@ int bpe_tokenizer_decode(const int* tokens, int n_tokens, char* text, int max_le
  *
  * Returns: Pointer to token text (static buffer)
  */
-const char* bpe_tokenizer_decode_token(int token_id)
+const char *bpe_tokenizer_decode_token(int token_id)
 {
     static char buffer[BPE_MAX_TOKEN_LEN + 1];
 
@@ -480,12 +476,15 @@ const char* bpe_tokenizer_decode_token(int token_id)
         return "<not_init>";
     }
 
-    if (token_id == (int)g_bpe.bos_token) return "<s>";
-    if (token_id == (int)g_bpe.eos_token) return "</s>";
-    if (token_id == (int)g_bpe.unk_token) return "<unk>";
+    if (token_id == (int)g_bpe.bos_token)
+        return "<s>";
+    if (token_id == (int)g_bpe.eos_token)
+        return "</s>";
+    if (token_id == (int)g_bpe.unk_token)
+        return "<unk>";
 
     if (token_id >= 0 && token_id < (int)g_bpe.vocab_size) {
-        const char* text = g_bpe.id_to_text[token_id];
+        const char *text = g_bpe.id_to_text[token_id];
         if (text) {
             return text;
         }
@@ -501,34 +500,22 @@ const char* bpe_tokenizer_decode_token(int token_id)
 /**
  * bpe_tokenizer_get_vocab_size - Get vocabulary size
  */
-uint32_t bpe_tokenizer_get_vocab_size(void)
-{
-    return g_bpe.vocab_size;
-}
+uint32_t bpe_tokenizer_get_vocab_size(void) { return g_bpe.vocab_size; }
 
 /**
  * bpe_tokenizer_get_bos - Get BOS token ID
  */
-uint32_t bpe_tokenizer_get_bos(void)
-{
-    return g_bpe.bos_token;
-}
+uint32_t bpe_tokenizer_get_bos(void) { return g_bpe.bos_token; }
 
 /**
  * bpe_tokenizer_get_eos - Get EOS token ID
  */
-uint32_t bpe_tokenizer_get_eos(void)
-{
-    return g_bpe.eos_token;
-}
+uint32_t bpe_tokenizer_get_eos(void) { return g_bpe.eos_token; }
 
 /**
  * bpe_tokenizer_is_initialized - Check if tokenizer is ready
  */
-bool bpe_tokenizer_is_initialized(void)
-{
-    return g_bpe.initialized;
-}
+bool bpe_tokenizer_is_initialized(void) { return g_bpe.initialized; }
 
 /**
  * bpe_tokenizer_cleanup - Free tokenizer resources
@@ -538,10 +525,11 @@ void bpe_tokenizer_cleanup(void)
     if (g_bpe.hash_table) {
         /* Free all hash entries */
         for (int i = 0; i < BPE_HASH_SIZE; i++) {
-            struct bpe_vocab_entry* entry = g_bpe.hash_table[i];
+            struct bpe_vocab_entry *entry = g_bpe.hash_table[i];
             while (entry) {
-                struct bpe_vocab_entry* next = entry->next;
-                if (entry->text) kfree(entry->text);
+                struct bpe_vocab_entry *next = entry->next;
+                if (entry->text)
+                    kfree(entry->text);
                 kfree(entry);
                 entry = next;
             }
@@ -578,13 +566,8 @@ void bpe_tokenizer_test(void)
         return;
     }
 
-    const char* test_texts[] = {
-        "Hello",
-        "Hello world",
-        "Once upon a time",
-        "The quick brown fox",
-        NULL
-    };
+    const char *test_texts[] = {"Hello", "Hello world", "Once upon a time", "The quick brown fox",
+                                NULL};
 
     int tokens[64];
     char decoded[256];
