@@ -99,25 +99,48 @@ void console_printf(const char* fmt, ...)
 {
     __builtin_va_list args;
     __builtin_va_start(args, fmt);
-    
+
     while (*fmt) {
         if (*fmt != '%') {
             console_putchar(*fmt++);
             continue;
         }
-        
+
         fmt++; /* Skip '%' */
-        
+
+        /* Handle length modifiers */
+        int is_long_long = 0;
+        if (*fmt == 'l') {
+            fmt++;
+            if (*fmt == 'l') {
+                is_long_long = 1;
+                fmt++;
+            }
+        }
+
         switch (*fmt) {
         case 'd':
         case 'i':
-            print_number(__builtin_va_arg(args, int), 10, true);
+            if (is_long_long) {
+                print_number(__builtin_va_arg(args, long long), 10, true);
+            } else {
+                print_number(__builtin_va_arg(args, int), 10, true);
+            }
             break;
         case 'u':
-            print_number(__builtin_va_arg(args, unsigned int), 10, false);
+            if (is_long_long) {
+                print_number(__builtin_va_arg(args, unsigned long long), 10, false);
+            } else {
+                print_number(__builtin_va_arg(args, unsigned int), 10, false);
+            }
             break;
         case 'x':
-            print_number(__builtin_va_arg(args, unsigned int), 16, false);
+        case 'X':
+            if (is_long_long) {
+                print_number(__builtin_va_arg(args, unsigned long long), 16, false);
+            } else {
+                print_number(__builtin_va_arg(args, unsigned int), 16, false);
+            }
             break;
         case 'p':
             console_puts("0x");
@@ -140,12 +163,15 @@ void console_printf(const char* fmt, ...)
             break;
         default:
             console_putchar('%');
+            if (is_long_long) {
+                console_puts("ll");
+            }
             console_putchar(*fmt);
             break;
         }
         fmt++;
     }
-    
+
     __builtin_va_end(args);
 }
 

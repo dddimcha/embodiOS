@@ -264,4 +264,28 @@ size_t ggml_type_block_elements(ggml_type_t type);
 #define GGUF_GET_CTX_LEN() \
     (gguf_parser_get_arch() ? gguf_parser_get_arch()->context_length : 0)
 
+/* ============================================================================
+ * Block Device Loading
+ * ============================================================================ */
+
+/* Forward declaration */
+struct block_device;
+typedef struct block_device block_device_t;
+
+/**
+ * Load GGUF model from block device
+ *
+ * @param dev       Block device to read from
+ * @param offset    Byte offset into device (usually 0)
+ * @param size      Size of model in bytes (0 = auto-detect from device size)
+ *
+ * @return 0 on success, negative error on failure
+ */
+int gguf_load_from_block(block_device_t* dev, uint64_t offset, size_t size);
+
+/**
+ * Free model data loaded from block device
+ */
+void gguf_free_block_buffer(void);
+
 #endif /* EMBODIOS_GGUF_PARSER_H */

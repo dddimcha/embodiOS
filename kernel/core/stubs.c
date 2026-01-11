@@ -1,23 +1,26 @@
 /* Temporary stub implementations for missing functions */
 
-#include "embodios/types.h"
-#include "embodios/kernel.h"
+#include "embodios/ai.h"
+#include "embodios/block.h"
+#include "embodios/bpe_tokenizer.h"
 #include "embodios/console.h"
 #include "embodios/cpu.h"
-#include "embodios/mm.h"
-#include "embodios/ai.h"
+#include "embodios/dma.h"
+#include "embodios/gguf_parser.h"
 #include "embodios/interrupt.h"
+#include "embodios/kernel.h"
+#include "embodios/mm.h"
+#include "embodios/model_registry.h"
+#include "embodios/pci.h"
 #include "embodios/task.h"
 #include "embodios/tvm.h"
-#include "embodios/dma.h"
-#include "embodios/pci.h"
-#include "embodios/model_registry.h"
-#include "embodios/bpe_tokenizer.h"
+#include "embodios/types.h"
+#include "embodios/virtio_blk.h"
 
 /* String function declarations */
-int strcmp(const char* s1, const char* s2);
-int strncmp(const char* s1, const char* s2, size_t n);
-size_t strlen(const char* s);
+int strcmp(const char *s1, const char *s2);
+int strncmp(const char *s1, const char *s2, size_t n);
+size_t strlen(const char *s);
 
 /* External function declarations */
 void arch_reboot(void);
@@ -25,12 +28,13 @@ void pmm_print_stats(void);
 void heap_stats(void);
 
 /* Helper to parse integer from string */
-static int parse_int(const char* s)
+static int parse_int(const char *s)
 {
     int result = 0;
     int sign = 1;
 
-    while (*s == ' ') s++;  /* Skip whitespace */
+    while (*s == ' ')
+        s++; /* Skip whitespace */
 
     if (*s == '-') {
         sign = -1;
@@ -46,7 +50,7 @@ static int parse_int(const char* s)
 }
 
 /* Command processor implementation */
-void command_processor_init(struct embodios_model* model)
+void command_processor_init(struct embodios_model *model)
 {
     if (model) {
         console_printf("Command processor initialized with model: %s\n", model->name);
@@ -56,7 +60,7 @@ void command_processor_init(struct embodios_model* model)
 }
 
 /* Enhanced command processing */
-void process_command(const char* command)
+void process_command(const char *command)
 {
     /* Basic built-in commands */
     if (strcmp(command, "help") == 0) {
@@ -85,20 +89,30 @@ void process_command(const char* command)
         console_printf("  pcitest     - Run PCI subsystem tests\n");
         console_printf("  pcistats    - Show PCI statistics\n");
         console_printf("\n");
+        console_printf("Storage:\n");
+        console_printf("  blkinfo     - Show VirtIO block device info\n");
+        console_printf("  blktest     - Run VirtIO block tests\n");
+        console_printf("  blkread <sector> [count] - Read sectors from disk\n");
+        console_printf("  blkdevs     - List all block devices\n");
+        console_printf("  loadmodel   - Load GGUF model from VirtIO disk\n");
+        console_printf("  loadtiny    - Load TinyStories model from disk\n");
+        console_printf("\n");
         console_printf("Testing:\n");
         console_printf("  locktest    - Run locking primitives tests\n");
         console_printf("  quanttest   - Run quantization tests\n");
         console_printf("  quantbench  - Run quantization benchmarks\n");
         console_printf("  bpeinit     - Initialize BPE tokenizer from GGUF\n");
         console_printf("  bpetest     - Test BPE tokenizer\n");
+        console_printf("  ggufinit    - Initialize GGUF inference engine\n");
+        console_printf("  gguf <prompt> - Generate text with GGUF model\n");
         console_printf("\n");
         console_printf("System:\n");
         console_printf("  reboot      - Reboot the system\n");
     } else if (strncmp(command, "ai ", 3) == 0) {
         /* TinyStories interactive inference */
-        const char* prompt = command + 3;
+        const char *prompt = command + 3;
 
-        extern int tinystories_infer(const char* prompt, char* output, size_t max_len);
+        extern int tinystories_infer(const char *prompt, char *output, size_t max_len);
         extern bool tinystories_is_loaded(void);
 
         if (!tinystories_is_loaded()) {
@@ -130,7 +144,7 @@ void process_command(const char* command)
         model_registry_print_status();
     } else if (strcmp(command, "model") == 0) {
         /* Show active model info */
-        struct embodios_model* model = model_registry_get_active();
+        struct embodios_model *model = model_registry_get_active();
         if (model) {
             int id = model_registry_get_active_id();
             console_printf("Active model [%d]: %s\n", id, model->name);
@@ -143,8 +157,9 @@ void process_command(const char* command)
         }
     } else if (strncmp(command, "model load ", 11) == 0) {
         /* Load embedded model by name */
-        const char* name = command + 11;
-        while (*name == ' ') name++;  /* Skip whitespace */
+        const char *name = command + 11;
+        while (*name == ' ')
+            name++; /* Skip whitespace */
 
         if (*name == '\0') {
             console_printf("Usage: model load <name>\n");
@@ -156,41 +171,39 @@ void process_command(const char* command)
         if (result >= 0) {
             console_printf("Model loaded successfully with ID %d\n", result);
         } else {
-            console_printf("Failed to load model: %s\n",
-                           model_registry_strerror(result));
+            console_printf("Failed to load model: %s\n", model_registry_strerror(result));
         }
     } else if (strncmp(command, "model switch ", 13) == 0) {
         /* Switch to model by ID */
-        const char* id_str = command + 13;
+        const char *id_str = command + 13;
         int model_id = parse_int(id_str);
 
         int result = model_registry_switch(model_id);
         if (result == 0) {
-            struct embodios_model* model = model_registry_get_active();
+            struct embodios_model *model = model_registry_get_active();
             console_printf("Switched to model %d: %s\n", model_id,
                            model ? model->name : "(unknown)");
         } else {
-            console_printf("Failed to switch: %s\n",
-                           model_registry_strerror(result));
+            console_printf("Failed to switch: %s\n", model_registry_strerror(result));
         }
     } else if (strncmp(command, "model unload ", 13) == 0) {
         /* Unload model by ID */
-        const char* id_str = command + 13;
+        const char *id_str = command + 13;
         int model_id = parse_int(id_str);
 
         int result = model_registry_unload(model_id);
         if (result == 0) {
             console_printf("Model %d unloaded\n", model_id);
         } else {
-            console_printf("Failed to unload: %s\n",
-                           model_registry_strerror(result));
+            console_printf("Failed to unload: %s\n", model_registry_strerror(result));
         }
     } else if (strncmp(command, "infer ", 6) == 0) {
-        const char* input = command + 6;
+        const char *input = command + 6;
 
         /* Use real TinyLlama inference with pattern-based responses */
         char response[512];
-        extern int real_tinyllama_inference(const char* prompt, char* response, size_t max_response);
+        extern int real_tinyllama_inference(const char *prompt, char *response,
+                                            size_t max_response);
 
         int result = real_tinyllama_inference(input, response, sizeof(response));
 
@@ -198,7 +211,8 @@ void process_command(const char* command)
             console_printf("TinyLlama> %s\n", response);
         } else {
             /* Fallback only if real inference completely fails */
-            console_printf("TinyLlama> I'm running in EMBODIOS kernel space. Model inference not yet fully implemented.\n");
+            console_printf("TinyLlama> I'm running in EMBODIOS kernel space. Model inference not "
+                           "yet fully implemented.\n");
         }
     } else if (strcmp(command, "tinystories") == 0) {
         extern void tinystories_test(void);
@@ -216,6 +230,71 @@ void process_command(const char* command)
         pci_run_tests();
     } else if (strcmp(command, "pcistats") == 0) {
         pci_print_stats();
+    } else if (strcmp(command, "blkinfo") == 0) {
+        virtio_blk_info();
+    } else if (strcmp(command, "blktest") == 0) {
+        virtio_blk_test();
+    } else if (strncmp(command, "blkread ", 8) == 0) {
+        /* Parse: blkread <sector> [count] */
+        const char *args = command + 8;
+        uint64_t sector = 0;
+        uint32_t count = 1;
+
+        /* Parse sector number */
+        while (*args >= '0' && *args <= '9') {
+            sector = sector * 10 + (*args - '0');
+            args++;
+        }
+
+        /* Skip whitespace and parse optional count */
+        while (*args == ' ')
+            args++;
+        if (*args >= '0' && *args <= '9') {
+            count = 0;
+            while (*args >= '0' && *args <= '9') {
+                count = count * 10 + (*args - '0');
+                args++;
+            }
+        }
+
+        virtio_blk_read_cmd(sector, count);
+    } else if (strcmp(command, "blkdevs") == 0) {
+        block_print_devices();
+    } else if (strcmp(command, "loadmodel") == 0) {
+        /* Load GGUF model from first VirtIO block device */
+        block_device_t *dev = block_get_device_by_index(0);
+        if (!dev) {
+            console_printf("ERROR: No block device available\n");
+            console_printf("Make sure QEMU is started with a VirtIO disk\n");
+            return;
+        }
+
+        console_printf("Loading GGUF model from %s...\n", dev->name);
+        int ret = gguf_load_from_block(dev, 0, 0); /* Auto-detect size */
+        if (ret == 0) {
+            console_printf("Model loaded successfully!\n");
+            gguf_parser_print_summary();
+
+            /* Initialize BPE tokenizer from loaded model */
+            console_printf("\nInitializing tokenizer...\n");
+            if (bpe_tokenizer_init() == 0) {
+                console_printf("Tokenizer ready.\n");
+            }
+        } else {
+            console_printf("Failed to load model (error %d)\n", ret);
+        }
+    } else if (strcmp(command, "loadtiny") == 0) {
+        /* Load TinyStories model from VirtIO disk */
+        extern int tinystories_load_from_disk(void);
+        int ret = tinystories_load_from_disk();
+        if (ret == 0) {
+            console_printf("TinyStories model ready for inference!\n");
+            console_printf("Use 'ai <prompt>' to generate text.\n");
+        } else {
+            console_printf("Failed to load TinyStories model (error %d)\n", ret);
+        }
+    } else if (strcmp(command, "blkstats") == 0) {
+        virtio_blk_print_stats();
     } else if (strcmp(command, "locktest") == 0) {
         extern int lock_run_tests(void);
         lock_run_tests();
@@ -242,6 +321,84 @@ void process_command(const char* command)
         } else {
             bpe_tokenizer_test();
         }
+    } else if (strcmp(command, "ggufinit") == 0) {
+        /* Initialize GGUF inference engine */
+        extern int gguf_inference_init(void);
+        extern bool gguf_inference_is_ready(void);
+
+        if (gguf_inference_is_ready()) {
+            console_printf("GGUF inference engine already initialized\n");
+        } else {
+            int result = gguf_inference_init();
+            if (result == 0) {
+                console_printf("GGUF inference engine initialized successfully\n");
+            } else {
+                console_printf("Failed to initialize GGUF inference engine\n");
+            }
+        }
+    } else if (strncmp(command, "gguf ", 5) == 0) {
+        /* GGUF model inference */
+        extern int gguf_inference_init(void);
+        extern bool gguf_inference_is_ready(void);
+        extern int gguf_inference_generate(const int *, int, int *, int);
+        extern const char *gguf_inference_get_token(int);
+
+        const char *prompt = command + 5;
+
+        if (!gguf_inference_is_ready()) {
+            console_printf("Initializing GGUF inference engine...\n");
+            if (gguf_inference_init() != 0) {
+                console_printf("ERROR: Failed to initialize GGUF inference\n");
+                return;
+            }
+        }
+
+        console_printf("\nGenerating with GGUF model...\n");
+        console_printf("Prompt: \"%s\"\n", prompt);
+
+        /* Simple tokenization - use BPE if available */
+        int prompt_tokens[256];
+        int prompt_len = 0;
+
+        if (bpe_tokenizer_is_initialized()) {
+            console_printf("Tokenizing with BPE...\n");
+            prompt_len = bpe_tokenizer_encode(prompt, prompt_tokens, 256, true, false);
+            console_printf("Tokenized: %d tokens\n", prompt_len);
+            if (prompt_len <= 0) {
+                console_printf("ERROR: Failed to tokenize prompt\n");
+                return;
+            }
+            /* Print tokens for debug */
+            console_printf("Token IDs: ");
+            for (int i = 0; i < prompt_len && i < 10; i++) {
+                console_printf("%d ", prompt_tokens[i]);
+            }
+            console_printf("\n");
+        } else {
+            /* Fallback: BOS token + simple char-to-token (not ideal) */
+            prompt_tokens[0] = 1; /* BOS */
+            prompt_len = 1;
+            console_printf("WARNING: BPE not initialized, using BOS only\n");
+        }
+
+        /* Generate */
+        console_printf("Starting inference...\n");
+        int output_tokens[128];
+        int generated = gguf_inference_generate(prompt_tokens, prompt_len, output_tokens, 50);
+        console_printf("Inference complete, generated=%d\n", generated);
+
+        if (generated > 0) {
+            console_printf("\nGenerated %d tokens:\n", generated);
+            for (int i = 0; i < generated; i++) {
+                const char *tok = gguf_inference_get_token(output_tokens[i]);
+                if (tok) {
+                    console_printf("%s", tok);
+                }
+            }
+            console_printf("\n");
+        } else {
+            console_printf("ERROR: Generation failed\n");
+        }
     } else if (strcmp(command, "reboot") == 0) {
         console_printf("Rebooting...\n");
         arch_reboot();
@@ -252,7 +409,7 @@ void process_command(const char* command)
 
 /* Note: transformer_init and transformer_reset_cache are now in transformer_full.c */
 
-int llama_model_load(const uint8_t* data, size_t size)
+int llama_model_load(const uint8_t *data, size_t size)
 {
     (void)data;
     (void)size;
@@ -260,7 +417,7 @@ int llama_model_load(const uint8_t* data, size_t size)
     return -1;
 }
 
-int llama_generate(const char* prompt, char* response, size_t max_response)
+int llama_generate(const char *prompt, char *response, size_t max_response)
 {
     (void)prompt;
     (void)response;
@@ -270,9 +427,9 @@ int llama_generate(const char* prompt, char* response, size_t max_response)
 }
 
 /* External declaration for quantized integer-only neural network inference */
-extern int quantized_neural_inference(const char* prompt, char* response, size_t max_response);
+extern int quantized_neural_inference(const char *prompt, char *response, size_t max_response);
 
-int real_tinyllama_inference(const char* prompt, char* response, size_t max_response)
+int real_tinyllama_inference(const char *prompt, char *response, size_t max_response)
 {
     /* Call REAL neural network inference using integer-only math */
     return quantized_neural_inference(prompt, response, max_response);
@@ -316,23 +473,32 @@ float expf(float x)
 */
 
 /* Stubs for GGUF/TVM functions not yet fully implemented */
-void* gguf_get_tensor(void* ctx, const char* name, size_t* size) {
-    (void)ctx; (void)name;
-    if (size) *size = 0;
+void *gguf_get_tensor(void *ctx, const char *name, size_t *size)
+{
+    (void)ctx;
+    (void)name;
+    if (size)
+        *size = 0;
     return NULL;
 }
 
-int gguf_get_model_config(void* ctx, void* config) {
-    (void)ctx; (void)config;
+int gguf_get_model_config(void *ctx, void *config)
+{
+    (void)ctx;
+    (void)config;
     return -1;
 }
 
-int tinyllama_forward_tvm(void* input, void* output) {
-    (void)input; (void)output;
+int tinyllama_forward_tvm(void *input, void *output)
+{
+    (void)input;
+    (void)output;
     return -1;
 }
 
-int tinyllama_forward(void* input, void* output) {
-    (void)input; (void)output;
+int tinyllama_forward(void *input, void *output)
+{
+    (void)input;
+    (void)output;
     return -1;
 }
