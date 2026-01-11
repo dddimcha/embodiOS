@@ -52,7 +52,7 @@ CXXFLAGS += -I llama_cpp/include -I llama_cpp/ggml -I llama_cpp/src
 # Architecture-specific flags
 ifeq ($(ARCH),x86_64)
     CFLAGS += -mno-red-zone -mcmodel=kernel
-    # NOTE: SSE2 enabled for AI inference SIMD and math functions (sqrtf, expf, etc.)
+    # NOTE: SSE2 enabled for AI inference SIMD and math functions
     CFLAGS += -msse2 -mfpmath=sse
     # Check if we're using cross-compiler or native tools
     ifneq (,$(findstring x86_64-elf,$(CC)))
@@ -118,6 +118,7 @@ KERNEL_C_SOURCES = \
     ai/tokenizer.c \
     ai/gguf_integer_loader.c \
     ai/gguf_parser.c \
+    ai/gguf_inference.c \
     ai/quantized_ops.c \
     ai/quantized_test.c \
     ai/quantized_inference.c \
