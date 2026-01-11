@@ -98,25 +98,25 @@ EMBODIOS> lspci          # List PCI devices
 
 ## Documentation
 
-The `docs/` folder is a **git submodule** pointing to the [EMBODIOS Wiki](https://github.com/dddimcha/embodiOS/wiki).
+Full documentation available on the [EMBODIOS Wiki](https://github.com/dddimcha/embodiOS/wiki).
 
 ### Project Status
-- [Home](docs/Home.md) - Wiki home page
-- [Current State Analysis](docs/Current-State-Analysis.md) - Project progress (65% complete)
-- [Three Strategic Pillars](docs/Three-Strategic-Pillars.md) - Implementation roadmap
-- [Pillar 1: Ollama GGUF Integration](docs/Pillar-1:-Ollama-GGUF-Integration.md) - AI runtime (85% complete)
+- [Home](https://github.com/dddimcha/embodiOS/wiki) - Wiki home page
+- [Current State Analysis](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis) - Project progress (65% complete)
+- [Three Strategic Pillars](https://github.com/dddimcha/embodiOS/wiki/Three-Strategic-Pillars) - Implementation roadmap
+- [Pillar 1: Ollama GGUF Integration](https://github.com/dddimcha/embodiOS/wiki/Pillar-1:-Ollama-GGUF-Integration) - AI runtime (85% complete)
 
 ### Quick Start Guides
-- [Getting Started](docs/Getting-Started.md) - Installation and first steps
-- [Modelfile Reference](docs/Modelfile-Reference.md) - Model configuration
-- [Hardware Requirements](docs/Hardware-Requirements.md) - Supported hardware
-- [API Reference](docs/API-Reference.md) - API documentation
+- [Getting Started](https://github.com/dddimcha/embodiOS/wiki/Getting-Started) - Installation and first steps
+- [Modelfile Reference](https://github.com/dddimcha/embodiOS/wiki/Modelfile-Reference) - Model configuration
+- [Hardware Requirements](https://github.com/dddimcha/embodiOS/wiki/Hardware-Requirements) - Supported hardware
+- [API Reference](https://github.com/dddimcha/embodiOS/wiki/API-Reference) - API documentation
 
 ### Technical Deep Dives
-- [Architecture Overview](docs/Architecture-Overview.md) - System architecture
-- [Quantized Integer Inference](docs/Quantized-Integer-Inference.md) - How integer-only AI works
-- [Performance Benchmarks](docs/Performance-Benchmarks.md) - Benchmark results
-- [Bare Metal Deployment](docs/Bare-Metal-Deployment.md) - Real hardware deployment
+- [Architecture Overview](https://github.com/dddimcha/embodiOS/wiki/Architecture-Overview) - System architecture
+- [Quantized Integer Inference](https://github.com/dddimcha/embodiOS/wiki/Quantized-Integer-Inference) - How integer-only AI works
+- [Performance Benchmarks](https://github.com/dddimcha/embodiOS/wiki/Performance-Benchmarks) - Benchmark results
+- [Bare Metal Deployment](https://github.com/dddimcha/embodiOS/wiki/Bare-Metal-Deployment) - Real hardware deployment
 
 ## Performance Targets
 
@@ -157,9 +157,9 @@ make test
 ```
 
 **Choose Your Pillar:**
-- **Kernel hacker?** → [Pillar 2: Linux Driver Compatibility](docs/Pillar-2:-Linux-Driver-Compatibility.md)
-- **AI researcher?** → [Pillar 1: Ollama GGUF Integration](docs/Pillar-1:-Ollama-GGUF-Integration.md)
-- **Performance engineer?** → [Pillar 3: Performance Optimization](docs/Pillar-3:-Performance-Optimization.md)
+- **Kernel hacker?** → [Pillar 2: Linux Driver Compatibility](https://github.com/dddimcha/embodiOS/wiki/Pillar-2:-Linux-Driver-Compatibility)
+- **AI researcher?** → [Pillar 1: Ollama GGUF Integration](https://github.com/dddimcha/embodiOS/wiki/Pillar-1:-Ollama-GGUF-Integration)
+- **Performance engineer?** → [Pillar 3: Performance Optimization](https://github.com/dddimcha/embodiOS/wiki/Pillar-3:-Performance-Optimization)
 
 ## Community
 
