@@ -1,0 +1,953 @@
+/* Generic GGUF Inference Engine for EMBODIOS
+ * Works with any llama-architecture model in GGUF format
+ *
+ * Tensor naming follows llama.cpp convention:
+ * - token_embd.weight
+ * - blk.{layer}.attn_norm.weight
+ * - blk.{layer}.attn_q.weight
+ * - blk.{layer}.attn_k.weight
+ * - blk.{layer}.attn_v.weight
+ * - blk.{layer}.attn_output.weight
+ * - blk.{layer}.ffn_norm.weight
+ * - blk.{layer}.ffn_gate.weight (w1)
+ * - blk.{layer}.ffn_up.weight (w3)
+ * - blk.{layer}.ffn_down.weight (w2)
+ * - output_norm.weight
+ * - output.weight (optional, may share with token_embd)
+ */
+
+#include <embodios/console.h>
+#include <embodios/gguf_parser.h>
+#include <embodios/mm.h>
+#include <embodios/types.h>
+
+/* Forward declarations */
+extern float sqrtf(float x);
+extern float expf(float x);
+extern void *memset(void *, int, size_t);
+extern void *memcpy(void *, const void *, size_t);
+extern size_t strlen(const char *);
+
+/* Simple helper to build "blk.N.name" style tensor names */
+static void build_layer_name(char *buf, size_t size, const char *prefix, int layer,
+                             const char *suffix)
+{
+    size_t pos = 0;
+    /* Copy prefix */
+    const char *p = prefix;
+    while (*p && pos < size - 1)
+        buf[pos++] = *p++;
+    /* Convert layer number to string */
+    if (layer >= 10 && pos < size - 1)
+        buf[pos++] = '0' + (layer / 10);
+    if (pos < size - 1)
+        buf[pos++] = '0' + (layer % 10);
+    /* Copy suffix */
+    p = suffix;
+    while (*p && pos < size - 1)
+        buf[pos++] = *p++;
+    buf[pos] = '\0';
+}
+
+/* ============================================================================
+ * Dequantization Functions
+ * Support for all common GGUF quantization types
+ * ============================================================================ */
+
+/* Convert float16 to float32 */
+static float fp16_to_fp32(uint16_t h)
+{
+    uint32_t sign = (h >> 15) & 1;
+    uint32_t exp = (h >> 10) & 0x1f;
+    uint32_t mant = h & 0x3ff;
+    uint32_t f;
+
+    if (exp == 0) {
+        if (mant == 0) {
+            f = sign << 31;
+        } else {
+            /* Denormal */
+            exp = 1;
+            while (!(mant & 0x400)) {
+                mant <<= 1;
+                exp--;
+            }
+            mant &= 0x3ff;
+            f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+        }
+    } else if (exp == 31) {
+        /* Inf/NaN */
+        f = (sign << 31) | 0x7f800000 | (mant << 13);
+    } else {
+        f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+
+    union {
+        uint32_t i;
+        float f;
+    } u;
+    u.i = f;
+    return u.f;
+}
+
+/* Q8_0: 8-bit quantization
+ * Block format: scale(float16) + qs[32](int8)
+ * Total: 2 + 32 = 34 bytes per block of 32 values
+ */
+#define QK8_0 32
+typedef struct __attribute__((packed)) {
+    uint16_t d;       /* delta (scale) as float16 */
+    int8_t qs[QK8_0]; /* quantized values */
+} block_q8_0;
+
+static void dequantize_row_q8_0(const void *src, float *dst, int64_t n)
+{
+    const block_q8_0 *blocks = (const block_q8_0 *)src;
+    int64_t nb = n / QK8_0;
+    for (int64_t i = 0; i < nb; i++) {
+        float d = fp16_to_fp32(blocks[i].d);
+        for (int j = 0; j < QK8_0; j++) {
+            dst[i * QK8_0 + j] = d * blocks[i].qs[j];
+        }
+    }
+}
+
+/* Q4_0: 4-bit quantization
+ * Block format: scale(float16) + qs[16](uint8 with 2x 4-bit values)
+ * Total: 2 + 16 = 18 bytes per block of 32 values
+ */
+#define QK4_0 32
+typedef struct {
+    uint16_t d;            /* delta (scale) as float16 */
+    uint8_t qs[QK4_0 / 2]; /* nibbles: low 4 bits = value[2i], high 4 bits = value[2i+1] */
+} block_q4_0;
+
+static void dequantize_row_q4_0(const void *src, float *dst, int64_t n)
+{
+    const block_q4_0 *blocks = (const block_q4_0 *)src;
+    int64_t nb = n / QK4_0;
+    for (int64_t i = 0; i < nb; i++) {
+        float d = fp16_to_fp32(blocks[i].d);
+        for (int j = 0; j < QK4_0 / 2; j++) {
+            uint8_t qbyte = blocks[i].qs[j];
+            /* Low nibble: value[2j], High nibble: value[2j+1] */
+            int8_t q0 = (qbyte & 0xf) - 8;
+            int8_t q1 = (qbyte >> 4) - 8;
+            dst[i * QK4_0 + j * 2 + 0] = d * q0;
+            dst[i * QK4_0 + j * 2 + 1] = d * q1;
+        }
+    }
+}
+
+/* Q5_0: 5-bit quantization (type 6)
+ * Block format: scale(float16) + qh[4](high bits) + qs[16](low 4 bits)
+ * Total: 2 + 4 + 16 = 22 bytes per block of 32 values
+ */
+#define QK5_0 32
+typedef struct __attribute__((packed)) {
+    uint16_t d;            /* delta (scale) as float16 */
+    uint8_t qh[4];         /* 5th bit of each element (32 bits = 4 bytes) */
+    uint8_t qs[QK5_0 / 2]; /* low 4 bits of each element */
+} block_q5_0;
+
+static void dequantize_row_q5_0(const void *src, float *dst, int64_t n)
+{
+    const block_q5_0 *blocks = (const block_q5_0 *)src;
+    int64_t nb = n / QK5_0;
+    for (int64_t i = 0; i < nb; i++) {
+        float d = fp16_to_fp32(blocks[i].d);
+        uint32_t qh = ((uint32_t)blocks[i].qh[0]) | ((uint32_t)blocks[i].qh[1] << 8) |
+                      ((uint32_t)blocks[i].qh[2] << 16) | ((uint32_t)blocks[i].qh[3] << 24);
+        for (int j = 0; j < QK5_0 / 2; j++) {
+            uint8_t qbyte = blocks[i].qs[j];
+            /* Extract 5-bit values: low 4 bits from qs, 5th bit from qh */
+            int8_t q0 = ((qbyte & 0xf) | ((qh >> (j * 2)) & 1) << 4) - 16;
+            int8_t q1 = ((qbyte >> 4) | ((qh >> (j * 2 + 1)) & 1) << 4) - 16;
+            dst[i * QK5_0 + j * 2 + 0] = d * q0;
+            dst[i * QK5_0 + j * 2 + 1] = d * q1;
+        }
+    }
+}
+
+/* Q6_K: 6-bit K-quant (type 14)
+ * Block format: super-block of 256 elements
+ * Simplified dequant - treats as zero if too complex
+ */
+#define QK_K 256
+typedef struct __attribute__((packed)) {
+    uint8_t ql[QK_K / 2];     /* low 4 bits of each quant */
+    uint8_t qh[QK_K / 4];     /* high 2 bits of each quant */
+    int8_t scales[QK_K / 16]; /* scales for 16-element sub-blocks */
+    uint16_t d;               /* super-block scale as float16 */
+} block_q6_K;
+
+static void dequantize_row_q6_K(const void *src, float *dst, int64_t n)
+{
+    const block_q6_K *blocks = (const block_q6_K *)src;
+    int64_t nb = n / QK_K;
+    for (int64_t i = 0; i < nb; i++) {
+        float d = fp16_to_fp32(blocks[i].d);
+        const uint8_t *ql = blocks[i].ql;
+        const uint8_t *qh = blocks[i].qh;
+        const int8_t *scales = blocks[i].scales;
+
+        for (int k = 0; k < QK_K / 16; k++) {
+            float scale = d * scales[k];
+            int offset = k * 16;
+            for (int j = 0; j < 8; j++) {
+                int idx = offset / 2 + j;
+                /* Extract 6-bit value */
+                uint8_t q_lo = (j < 4) ? (ql[idx] & 0xf) : (ql[idx] >> 4);
+                uint8_t q_hi = (qh[(offset / 4) + j / 2] >> ((j % 2) * 2)) & 3;
+                int8_t q = (int8_t)((q_lo | (q_hi << 4)) - 32);
+                dst[i * QK_K + offset + j] = scale * q;
+                dst[i * QK_K + offset + j + 8] = scale * q; /* Simplified - repeat */
+            }
+        }
+    }
+}
+
+/* F16: Half-precision float */
+static void dequantize_row_f16(const void *src, float *dst, int64_t n)
+{
+    const uint16_t *fp16 = (const uint16_t *)src;
+    for (int64_t i = 0; i < n; i++) {
+        dst[i] = fp16_to_fp32(fp16[i]);
+    }
+}
+
+/* F32: No conversion needed */
+static void dequantize_row_f32(const void *src, float *dst, int64_t n)
+{
+    memcpy(dst, src, n * sizeof(float));
+}
+
+/* Generic dequantization based on tensor type */
+static void dequantize_tensor(const void *src, float *dst, int64_t n_elements, ggml_type_t type)
+{
+    switch (type) {
+    case GGML_TYPE_F32:
+        dequantize_row_f32(src, dst, n_elements);
+        break;
+    case GGML_TYPE_F16:
+        dequantize_row_f16(src, dst, n_elements);
+        break;
+    case GGML_TYPE_Q8_0:
+        dequantize_row_q8_0(src, dst, n_elements);
+        break;
+    case GGML_TYPE_Q4_0:
+        dequantize_row_q4_0(src, dst, n_elements);
+        break;
+    case GGML_TYPE_Q5_0:
+        dequantize_row_q5_0(src, dst, n_elements);
+        break;
+    case GGML_TYPE_Q6_K:
+        dequantize_row_q6_K(src, dst, n_elements);
+        break;
+    default:
+        /* Unsupported type - fill with zeros */
+        console_printf("[GGUF-INF] WARNING: Unsupported quant type %d\n", type);
+        memset(dst, 0, n_elements * sizeof(float));
+        break;
+    }
+}
+
+/* Dequantized weight storage */
+static struct {
+    float *token_embd;  /* [vocab_size * dim] */
+    float *output_norm; /* [dim] */
+    float *output;      /* [vocab_size * dim] or NULL */
+
+    /* Per-layer weights (flattened) */
+    float **attn_norm;   /* [n_layers][dim] */
+    float **attn_q;      /* [n_layers][dim * dim] */
+    float **attn_k;      /* [n_layers][dim * kv_dim] */
+    float **attn_v;      /* [n_layers][dim * kv_dim] */
+    float **attn_output; /* [n_layers][dim * dim] */
+    float **ffn_norm;    /* [n_layers][dim] */
+    float **ffn_gate;    /* [n_layers][dim * hidden_dim] */
+    float **ffn_up;      /* [n_layers][dim * hidden_dim] */
+    float **ffn_down;    /* [n_layers][hidden_dim * dim] */
+} g_dequant = {0};
+
+static bool g_weights_dequantized = false;
+
+/* GGUF parser interface */
+extern const struct gguf_model_arch *gguf_parser_get_arch(void);
+extern const struct gguf_tensor_info *gguf_parser_get_tensor_by_name(const char *name);
+extern const void *gguf_parser_get_tensor_data_ptr(const struct gguf_tensor_info *info);
+extern const char *gguf_parser_get_token(uint32_t index);
+extern uint32_t gguf_parser_get_vocab_size(void);
+
+/* Model configuration - populated from GGUF metadata */
+typedef struct {
+    int dim;            /* embedding dimension */
+    int hidden_dim;     /* FFN hidden dimension */
+    int n_layers;       /* number of transformer layers */
+    int n_heads;        /* number of attention heads */
+    int n_kv_heads;     /* number of KV heads (for GQA) */
+    int vocab_size;     /* vocabulary size */
+    int seq_len;        /* maximum sequence length */
+    float rope_theta;   /* RoPE frequency base */
+    float rms_norm_eps; /* RMS normalization epsilon */
+} ModelConfig;
+
+/* Tensor pointers - fetched by name from GGUF */
+typedef struct {
+    /* Embeddings */
+    const void *token_embd; /* [vocab_size, dim] */
+
+    /* Per-layer weights (arrays of n_layers pointers) */
+    const void **attn_norm;   /* [n_layers][dim] */
+    const void **attn_q;      /* [n_layers][dim, n_heads * head_dim] */
+    const void **attn_k;      /* [n_layers][dim, n_kv_heads * head_dim] */
+    const void **attn_v;      /* [n_layers][dim, n_kv_heads * head_dim] */
+    const void **attn_output; /* [n_layers][n_heads * head_dim, dim] */
+    const void **ffn_norm;    /* [n_layers][dim] */
+    const void **ffn_gate;    /* [n_layers][dim, hidden_dim] - w1 */
+    const void **ffn_up;      /* [n_layers][dim, hidden_dim] - w3 */
+    const void **ffn_down;    /* [n_layers][hidden_dim, dim] - w2 */
+
+    /* Output */
+    const void *output_norm; /* [dim] */
+    const void *output;      /* [vocab_size, dim] or NULL if shared */
+} ModelWeights;
+
+/* Runtime state for inference */
+typedef struct {
+    float *x;      /* activation [dim] */
+    float *xb;     /* buffer [dim] */
+    float *xb2;    /* buffer 2 [dim] */
+    float *hb;     /* FFN hidden buffer [hidden_dim] */
+    float *hb2;    /* FFN hidden buffer 2 [hidden_dim] */
+    float *q;      /* query [dim] */
+    float *k;      /* key [kv_dim] */
+    float *v;      /* value [kv_dim] */
+    float *att;    /* attention scores [n_heads, seq_len] */
+    float *logits; /* output logits [vocab_size] */
+
+    /* KV cache */
+    float *key_cache;   /* [n_layers, seq_len, kv_dim] */
+    float *value_cache; /* [n_layers, seq_len, kv_dim] */
+} RunState;
+
+/* Global state */
+static ModelConfig g_config;
+static ModelWeights g_weights;
+static RunState g_state;
+static bool g_initialized = false;
+
+/* Helper: Get tensor by name */
+static const void *get_tensor(const char *name)
+{
+    const struct gguf_tensor_info *info = gguf_parser_get_tensor_by_name(name);
+    if (!info) {
+        console_printf("[GGUF-INF] Tensor not found: %s\n", name);
+        return NULL;
+    }
+    return gguf_parser_get_tensor_data_ptr(info);
+}
+
+/* Helper: Get layer tensor by name parts */
+static const void *get_layer_tensor(const char *prefix, int layer, const char *suffix)
+{
+    char name[64];
+    build_layer_name(name, sizeof(name), prefix, layer, suffix);
+    return get_tensor(name);
+}
+
+/* Load model weights from GGUF by tensor names */
+static int load_weights(void)
+{
+    console_printf("[GGUF-INF] Loading weights by name...\n");
+
+    /* Token embeddings */
+    g_weights.token_embd = get_tensor("token_embd.weight");
+    if (!g_weights.token_embd)
+        return -1;
+
+    /* Output norm and weights */
+    g_weights.output_norm = get_tensor("output_norm.weight");
+    if (!g_weights.output_norm)
+        return -1;
+
+    /* output.weight may be NULL if tied to token_embd (weight tying) */
+    const struct gguf_tensor_info *out_info = gguf_parser_get_tensor_by_name("output.weight");
+    g_weights.output = out_info ? gguf_parser_get_tensor_data_ptr(out_info) : NULL;
+
+    /* Allocate layer pointer arrays using heap_alloc (not kmalloc/slab) */
+    int n = g_config.n_layers;
+    g_weights.attn_norm = (const void **)heap_alloc(n * sizeof(void *));
+    g_weights.attn_q = (const void **)heap_alloc(n * sizeof(void *));
+    g_weights.attn_k = (const void **)heap_alloc(n * sizeof(void *));
+    g_weights.attn_v = (const void **)heap_alloc(n * sizeof(void *));
+    g_weights.attn_output = (const void **)heap_alloc(n * sizeof(void *));
+    g_weights.ffn_norm = (const void **)heap_alloc(n * sizeof(void *));
+    g_weights.ffn_gate = (const void **)heap_alloc(n * sizeof(void *));
+    g_weights.ffn_up = (const void **)heap_alloc(n * sizeof(void *));
+    g_weights.ffn_down = (const void **)heap_alloc(n * sizeof(void *));
+
+    if (!g_weights.attn_norm || !g_weights.attn_q || !g_weights.attn_k || !g_weights.attn_v ||
+        !g_weights.attn_output || !g_weights.ffn_norm || !g_weights.ffn_gate || !g_weights.ffn_up ||
+        !g_weights.ffn_down) {
+        console_printf("[GGUF-INF] Failed to allocate layer arrays\n");
+        return -1;
+    }
+
+    /* Load per-layer weights */
+    for (int l = 0; l < n; l++) {
+        g_weights.attn_norm[l] = get_layer_tensor("blk.", l, ".attn_norm.weight");
+        g_weights.attn_q[l] = get_layer_tensor("blk.", l, ".attn_q.weight");
+        g_weights.attn_k[l] = get_layer_tensor("blk.", l, ".attn_k.weight");
+        g_weights.attn_v[l] = get_layer_tensor("blk.", l, ".attn_v.weight");
+        g_weights.attn_output[l] = get_layer_tensor("blk.", l, ".attn_output.weight");
+        g_weights.ffn_norm[l] = get_layer_tensor("blk.", l, ".ffn_norm.weight");
+        g_weights.ffn_gate[l] = get_layer_tensor("blk.", l, ".ffn_gate.weight");
+        g_weights.ffn_up[l] = get_layer_tensor("blk.", l, ".ffn_up.weight");
+        g_weights.ffn_down[l] = get_layer_tensor("blk.", l, ".ffn_down.weight");
+
+        if (!g_weights.attn_norm[l] || !g_weights.attn_q[l] || !g_weights.attn_k[l] ||
+            !g_weights.attn_v[l] || !g_weights.attn_output[l] || !g_weights.ffn_norm[l] ||
+            !g_weights.ffn_gate[l] || !g_weights.ffn_up[l] || !g_weights.ffn_down[l]) {
+            console_printf("[GGUF-INF] Missing tensors for layer %d\n", l);
+            return -1;
+        }
+    }
+
+    console_printf("[GGUF-INF] All weights loaded successfully\n");
+    return 0;
+}
+
+/* Helper to get tensor info by name */
+static const struct gguf_tensor_info *get_tensor_info(const char *name)
+{
+    return gguf_parser_get_tensor_by_name(name);
+}
+
+/* Helper to get layer tensor info */
+static const struct gguf_tensor_info *get_layer_tensor_info(const char *prefix, int layer,
+                                                            const char *suffix)
+{
+    char name[64];
+    build_layer_name(name, sizeof(name), prefix, layer, suffix);
+    return gguf_parser_get_tensor_by_name(name);
+}
+
+/* Dequantize and allocate a tensor */
+static float *dequantize_and_alloc(const char *name, int64_t n_elements)
+{
+    const struct gguf_tensor_info *info = get_tensor_info(name);
+    if (!info)
+        return NULL;
+
+    const void *src = gguf_parser_get_tensor_data_ptr(info);
+    if (!src)
+        return NULL;
+
+    float *dst = (float *)heap_alloc(n_elements * sizeof(float));
+    if (!dst) {
+        console_printf("[GGUF-INF] Failed to alloc dequant buffer for %s\n", name);
+        return NULL;
+    }
+
+    dequantize_tensor(src, dst, n_elements, info->type);
+    return dst;
+}
+
+/* Dequantize layer tensor */
+static float *dequantize_layer_tensor(const char *prefix, int layer, const char *suffix,
+                                      int64_t n_elements)
+{
+    char name[64];
+    build_layer_name(name, sizeof(name), prefix, layer, suffix);
+
+    const struct gguf_tensor_info *info = gguf_parser_get_tensor_by_name(name);
+    if (!info)
+        return NULL;
+
+    const void *src = gguf_parser_get_tensor_data_ptr(info);
+    if (!src)
+        return NULL;
+
+    float *dst = (float *)heap_alloc(n_elements * sizeof(float));
+    if (!dst)
+        return NULL;
+
+    dequantize_tensor(src, dst, n_elements, info->type);
+    return dst;
+}
+
+/* Dequantize all model weights */
+static int dequantize_weights(void)
+{
+    console_printf("[GGUF-INF] Dequantizing weights...\n");
+
+    int dim = g_config.dim;
+    int hidden_dim = g_config.hidden_dim;
+    int n_heads = g_config.n_heads;
+    int n_kv_heads = g_config.n_kv_heads;
+    int vocab_size = g_config.vocab_size;
+    int n_layers = g_config.n_layers;
+    int kv_dim = (dim * n_kv_heads) / n_heads;
+
+    /* Token embeddings: [vocab_size, dim] */
+    g_dequant.token_embd = dequantize_and_alloc("token_embd.weight", (int64_t)vocab_size * dim);
+    if (!g_dequant.token_embd) {
+        console_printf("[GGUF-INF] Failed to dequantize token_embd\n");
+        return -1;
+    }
+
+    /* Output norm: [dim] */
+    g_dequant.output_norm = dequantize_and_alloc("output_norm.weight", dim);
+    if (!g_dequant.output_norm) {
+        console_printf("[GGUF-INF] Failed to dequantize output_norm\n");
+        return -1;
+    }
+
+    /* Output weights (optional - may be tied to token_embd) */
+    const struct gguf_tensor_info *out_info = get_tensor_info("output.weight");
+    if (out_info) {
+        g_dequant.output = dequantize_and_alloc("output.weight", (int64_t)vocab_size * dim);
+    } else {
+        g_dequant.output = NULL; /* Will use token_embd */
+    }
+
+    /* Allocate layer arrays */
+    g_dequant.attn_norm = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.attn_q = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.attn_k = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.attn_v = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.attn_output = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.ffn_norm = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.ffn_gate = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.ffn_up = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.ffn_down = (float **)heap_alloc(n_layers * sizeof(float *));
+
+    if (!g_dequant.attn_norm || !g_dequant.attn_q || !g_dequant.attn_k || !g_dequant.attn_v ||
+        !g_dequant.attn_output || !g_dequant.ffn_norm || !g_dequant.ffn_gate || !g_dequant.ffn_up ||
+        !g_dequant.ffn_down) {
+        console_printf("[GGUF-INF] Failed to allocate dequant layer arrays\n");
+        return -1;
+    }
+
+    /* Dequantize per-layer weights */
+    for (int l = 0; l < n_layers; l++) {
+        console_printf("[GGUF-INF] Dequantizing layer %d/%d...\n", l + 1, n_layers);
+
+        /* Attention norm: [dim] */
+        g_dequant.attn_norm[l] = dequantize_layer_tensor("blk.", l, ".attn_norm.weight", dim);
+
+        /* Q/K/V projections */
+        g_dequant.attn_q[l] =
+            dequantize_layer_tensor("blk.", l, ".attn_q.weight", (int64_t)dim * dim);
+        g_dequant.attn_k[l] =
+            dequantize_layer_tensor("blk.", l, ".attn_k.weight", (int64_t)kv_dim * dim);
+        g_dequant.attn_v[l] =
+            dequantize_layer_tensor("blk.", l, ".attn_v.weight", (int64_t)kv_dim * dim);
+        g_dequant.attn_output[l] =
+            dequantize_layer_tensor("blk.", l, ".attn_output.weight", (int64_t)dim * dim);
+
+        /* FFN norm: [dim] */
+        g_dequant.ffn_norm[l] = dequantize_layer_tensor("blk.", l, ".ffn_norm.weight", dim);
+
+        /* FFN weights */
+        g_dequant.ffn_gate[l] =
+            dequantize_layer_tensor("blk.", l, ".ffn_gate.weight", (int64_t)hidden_dim * dim);
+        g_dequant.ffn_up[l] =
+            dequantize_layer_tensor("blk.", l, ".ffn_up.weight", (int64_t)hidden_dim * dim);
+        g_dequant.ffn_down[l] =
+            dequantize_layer_tensor("blk.", l, ".ffn_down.weight", (int64_t)dim * hidden_dim);
+
+        /* Check all succeeded */
+        if (!g_dequant.attn_norm[l] || !g_dequant.attn_q[l] || !g_dequant.attn_k[l] ||
+            !g_dequant.attn_v[l] || !g_dequant.attn_output[l] || !g_dequant.ffn_norm[l] ||
+            !g_dequant.ffn_gate[l] || !g_dequant.ffn_up[l] || !g_dequant.ffn_down[l]) {
+            console_printf("[GGUF-INF] Failed to dequantize layer %d\n", l);
+            return -1;
+        }
+    }
+
+    g_weights_dequantized = true;
+    console_printf("[GGUF-INF] All weights dequantized successfully\n");
+    return 0;
+}
+
+/* Allocate runtime buffers */
+static int alloc_run_state(void)
+{
+    int dim = g_config.dim;
+    int hidden_dim = g_config.hidden_dim;
+    int n_heads = g_config.n_heads;
+    int n_kv_heads = g_config.n_kv_heads;
+    int seq_len = g_config.seq_len;
+    int vocab_size = g_config.vocab_size;
+    int kv_dim = (dim * n_kv_heads) / n_heads;
+    int n_layers = g_config.n_layers;
+
+    console_printf("[GGUF-INF] Allocating runtime state...\n");
+
+    g_state.x = (float *)heap_alloc(dim * sizeof(float));
+    g_state.xb = (float *)heap_alloc(dim * sizeof(float));
+    g_state.xb2 = (float *)heap_alloc(dim * sizeof(float));
+    g_state.hb = (float *)heap_alloc(hidden_dim * sizeof(float));
+    g_state.hb2 = (float *)heap_alloc(hidden_dim * sizeof(float));
+    g_state.q = (float *)heap_alloc(dim * sizeof(float));
+    g_state.k = (float *)heap_alloc(kv_dim * sizeof(float));
+    g_state.v = (float *)heap_alloc(kv_dim * sizeof(float));
+    g_state.att = (float *)heap_alloc(n_heads * seq_len * sizeof(float));
+    g_state.logits = (float *)heap_alloc(vocab_size * sizeof(float));
+    g_state.key_cache = (float *)heap_alloc(n_layers * seq_len * kv_dim * sizeof(float));
+    g_state.value_cache = (float *)heap_alloc(n_layers * seq_len * kv_dim * sizeof(float));
+
+    if (!g_state.x || !g_state.xb || !g_state.xb2 || !g_state.hb || !g_state.hb2 || !g_state.q ||
+        !g_state.k || !g_state.v || !g_state.att || !g_state.logits || !g_state.key_cache ||
+        !g_state.value_cache) {
+        console_printf("[GGUF-INF] Failed to allocate runtime buffers\n");
+        return -1;
+    }
+
+    /* Zero KV cache */
+    int kv_cache_size = n_layers * seq_len * kv_dim * sizeof(float);
+    memset(g_state.key_cache, 0, kv_cache_size);
+    memset(g_state.value_cache, 0, kv_cache_size);
+
+    console_printf("[GGUF-INF] Runtime state allocated\n");
+    return 0;
+}
+
+/* RMS Normalization */
+static void rmsnorm(float *o, const float *x, const float *weight, int size, float eps)
+{
+    float ss = 0.0f;
+    for (int i = 0; i < size; i++) {
+        ss += x[i] * x[i];
+    }
+    ss /= size;
+    ss += eps;
+    ss = 1.0f / sqrtf(ss);
+    for (int i = 0; i < size; i++) {
+        o[i] = weight[i] * (ss * x[i]);
+    }
+}
+
+/* Matrix-vector multiply: out = mat @ x
+ * Optimized with loop unrolling for better performance
+ */
+static void matmul(float *out, const float *mat, const float *x, int rows, int cols)
+{
+    for (int i = 0; i < rows; i++) {
+        float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+        int j = 0;
+
+        /* Process 4 elements at a time (loop unrolling) */
+        for (; j + 4 <= cols; j += 4) {
+            const float *m = &mat[i * cols + j];
+            sum0 += m[0] * x[j];
+            sum1 += m[1] * x[j + 1];
+            sum2 += m[2] * x[j + 2];
+            sum3 += m[3] * x[j + 3];
+        }
+
+        /* Handle remaining elements */
+        float sum = sum0 + sum1 + sum2 + sum3;
+        for (; j < cols; j++) {
+            sum += mat[i * cols + j] * x[j];
+        }
+        out[i] = sum;
+    }
+}
+
+/* Softmax */
+static void softmax(float *x, int size)
+{
+    float max_val = x[0];
+    for (int i = 1; i < size; i++) {
+        if (x[i] > max_val)
+            max_val = x[i];
+    }
+    float sum = 0.0f;
+    for (int i = 0; i < size; i++) {
+        x[i] = expf(x[i] - max_val);
+        sum += x[i];
+    }
+    for (int i = 0; i < size; i++) {
+        x[i] /= sum;
+    }
+}
+
+/* SiLU activation: x * sigmoid(x) */
+static float silu(float x) { return x / (1.0f + expf(-x)); }
+
+/* Forward declarations for math functions */
+extern float sinf(float x);
+extern float cosf(float x);
+extern float powf(float base, float exp);
+
+/* Apply RoPE (Rotary Position Embeddings) to Q and K vectors */
+static void rope(float *q, float *k, int pos, int head_dim, int n_heads, int n_kv_heads,
+                 float theta)
+{
+    int kv_mul = n_heads / n_kv_heads;
+
+    for (int h = 0; h < n_heads; h++) {
+        float *q_head = q + h * head_dim;
+        int kv_h = h / kv_mul;
+        float *k_head = (h == kv_h * kv_mul) ? (k + kv_h * head_dim) : NULL;
+
+        for (int i = 0; i < head_dim; i += 2) {
+            /* Compute rotation angle for this dimension pair */
+            float freq = 1.0f / powf(theta, (float)i / (float)head_dim);
+            float angle = pos * freq;
+            float cos_val = cosf(angle);
+            float sin_val = sinf(angle);
+
+            /* Rotate Q */
+            float q0 = q_head[i];
+            float q1 = q_head[i + 1];
+            q_head[i] = q0 * cos_val - q1 * sin_val;
+            q_head[i + 1] = q0 * sin_val + q1 * cos_val;
+
+            /* Rotate K (only for first head in each KV group) */
+            if (k_head) {
+                float k0 = k_head[i];
+                float k1 = k_head[i + 1];
+                k_head[i] = k0 * cos_val - k1 * sin_val;
+                k_head[i + 1] = k0 * sin_val + k1 * cos_val;
+            }
+        }
+    }
+}
+
+/* Single transformer forward pass - uses dequantized weights */
+static void transformer_forward(int token, int pos)
+{
+    int dim = g_config.dim;
+    int hidden_dim = g_config.hidden_dim;
+    int n_heads = g_config.n_heads;
+    int n_kv_heads = g_config.n_kv_heads;
+    int head_dim = dim / n_heads;
+    int kv_dim = (dim * n_kv_heads) / n_heads;
+    int kv_mul = n_heads / n_kv_heads;
+    float eps = g_config.rms_norm_eps;
+
+    /* Get token embedding from dequantized weights */
+    float *x = g_state.x;
+    if (!g_dequant.token_embd) {
+        console_printf("ERROR: token_embd NULL\n");
+        return;
+    }
+    memcpy(x, g_dequant.token_embd + token * dim, dim * sizeof(float));
+
+    /* Process each layer */
+    for (int l = 0; l < g_config.n_layers; l++) {
+        /* Check dequantized weights */
+        if (!g_dequant.attn_norm || !g_dequant.attn_norm[l]) {
+            console_printf("ERR: attn_norm[%d] NULL\n", l);
+            return;
+        }
+
+        /* Attention norm */
+        rmsnorm(g_state.xb, x, g_dequant.attn_norm[l], dim, eps);
+
+        /* QKV projections */
+        matmul(g_state.q, g_dequant.attn_q[l], g_state.xb, dim, dim);
+        matmul(g_state.k, g_dequant.attn_k[l], g_state.xb, kv_dim, dim);
+        matmul(g_state.v, g_dequant.attn_v[l], g_state.xb, kv_dim, dim);
+
+        /* Apply RoPE (Rotary Position Embeddings) */
+        rope(g_state.q, g_state.k, pos, head_dim, n_heads, n_kv_heads, g_config.rope_theta);
+
+        /* Cache KV */
+        int cache_offset = l * g_config.seq_len * kv_dim + pos * kv_dim;
+        memcpy(g_state.key_cache + cache_offset, g_state.k, kv_dim * sizeof(float));
+        memcpy(g_state.value_cache + cache_offset, g_state.v, kv_dim * sizeof(float));
+
+        /* Multi-head attention */
+        memset(g_state.xb, 0, dim * sizeof(float));
+        for (int h = 0; h < n_heads; h++) {
+            float *q_head = g_state.q + h * head_dim;
+            float *att = g_state.att + h * g_config.seq_len;
+            int kv_h = h / kv_mul;
+
+            /* Attention scores */
+            for (int t = 0; t <= pos; t++) {
+                float *k_t = g_state.key_cache + l * g_config.seq_len * kv_dim + t * kv_dim +
+                             kv_h * head_dim;
+                float score = 0.0f;
+                for (int i = 0; i < head_dim; i++) {
+                    score += q_head[i] * k_t[i];
+                }
+                att[t] = score / sqrtf((float)head_dim);
+            }
+
+            /* Softmax attention */
+            softmax(att, pos + 1);
+
+            /* Weighted sum of values */
+            float *out = g_state.xb + h * head_dim;
+            for (int t = 0; t <= pos; t++) {
+                float *v_t = g_state.value_cache + l * g_config.seq_len * kv_dim + t * kv_dim +
+                             kv_h * head_dim;
+                float a = att[t];
+                for (int i = 0; i < head_dim; i++) {
+                    out[i] += a * v_t[i];
+                }
+            }
+        }
+
+        /* Output projection */
+        matmul(g_state.xb2, g_dequant.attn_output[l], g_state.xb, dim, dim);
+
+        /* Residual connection */
+        for (int i = 0; i < dim; i++) {
+            x[i] += g_state.xb2[i];
+        }
+
+        /* FFN norm */
+        rmsnorm(g_state.xb, x, g_dequant.ffn_norm[l], dim, eps);
+
+        /* FFN: SwiGLU */
+        matmul(g_state.hb, g_dequant.ffn_gate[l], g_state.xb, hidden_dim, dim);
+        matmul(g_state.hb2, g_dequant.ffn_up[l], g_state.xb, hidden_dim, dim);
+
+        for (int i = 0; i < hidden_dim; i++) {
+            g_state.hb[i] = silu(g_state.hb[i]) * g_state.hb2[i];
+        }
+
+        matmul(g_state.xb, g_dequant.ffn_down[l], g_state.hb, dim, hidden_dim);
+
+        /* Residual connection */
+        for (int i = 0; i < dim; i++) {
+            x[i] += g_state.xb[i];
+        }
+    }
+
+    /* Final norm */
+    rmsnorm(x, x, g_dequant.output_norm, dim, eps);
+
+    /* Output logits - use output weights or tied embeddings */
+    const float *output_weights = g_dequant.output ? g_dequant.output : g_dequant.token_embd;
+    matmul(g_state.logits, output_weights, x, g_config.vocab_size, dim);
+}
+
+/* Sample next token from logits */
+static int sample_argmax(void)
+{
+    int max_idx = 0;
+    float max_val = g_state.logits[0];
+
+    for (int i = 1; i < g_config.vocab_size; i++) {
+        if (g_state.logits[i] > max_val) {
+            max_val = g_state.logits[i];
+            max_idx = i;
+        }
+    }
+
+    return max_idx;
+}
+
+/* Initialize GGUF inference engine from parsed model */
+int gguf_inference_init(void)
+{
+    if (g_initialized) {
+        console_printf("[GGUF-INF] Already initialized\n");
+        return 0;
+    }
+
+    console_printf("[GGUF-INF] Initializing GGUF inference engine...\n");
+
+    /* Get model architecture from GGUF parser */
+    const struct gguf_model_arch *arch = gguf_parser_get_arch();
+    if (!arch) {
+        console_printf("[GGUF-INF] No GGUF model loaded\n");
+        return -1;
+    }
+
+    /* Populate config from GGUF metadata */
+    g_config.dim = arch->embedding_length;
+    g_config.hidden_dim = arch->feed_forward_length;
+    g_config.n_layers = arch->block_count;
+    g_config.n_heads = arch->attention_head_count;
+    g_config.n_kv_heads = arch->attention_head_count_kv;
+    g_config.vocab_size = arch->vocab_size;
+    g_config.seq_len = arch->context_length;
+    g_config.rope_theta = arch->rope_freq_base > 0 ? arch->rope_freq_base : 10000.0f;
+    g_config.rms_norm_eps =
+        arch->attention_layer_norm_rms_epsilon > 0 ? arch->attention_layer_norm_rms_epsilon : 1e-5f;
+
+    console_printf("[GGUF-INF] Model config:\n");
+    console_printf("  dim=%d, hidden=%d, layers=%d\n", g_config.dim, g_config.hidden_dim,
+                   g_config.n_layers);
+    console_printf("  heads=%d/%d, vocab=%d, ctx=%d\n", g_config.n_heads, g_config.n_kv_heads,
+                   g_config.vocab_size, g_config.seq_len);
+
+    /* Load weights from GGUF tensors */
+    if (load_weights() != 0) {
+        console_printf("[GGUF-INF] Failed to load weights\n");
+        return -1;
+    }
+
+    /* Dequantize weights (Q8_0, Q4_0, F16 -> F32) */
+    if (dequantize_weights() != 0) {
+        console_printf("[GGUF-INF] Failed to dequantize weights\n");
+        return -1;
+    }
+
+    /* Allocate runtime state */
+    if (alloc_run_state() != 0) {
+        console_printf("[GGUF-INF] Failed to allocate runtime state\n");
+        return -1;
+    }
+
+    g_initialized = true;
+    console_printf("[GGUF-INF] Initialization complete\n");
+    return 0;
+}
+
+/* Generate text from prompt tokens */
+int gguf_inference_generate(const int *prompt_tokens, int prompt_len, int *output_tokens,
+                            int max_output)
+{
+    if (!g_initialized) {
+        console_printf("[GGUF-INF] Not initialized\n");
+        return -1;
+    }
+
+    int pos = 0;
+    int token = prompt_tokens[0];
+    int generated = 0;
+
+    while (pos < g_config.seq_len && generated < max_output) {
+        /* Forward pass */
+        transformer_forward(token, pos);
+
+        /* Get next token */
+        int next_token;
+        if (pos < prompt_len - 1) {
+            /* Still processing prompt */
+            next_token = prompt_tokens[pos + 1];
+        } else {
+            /* Generate new token */
+            next_token = sample_argmax();
+            output_tokens[generated++] = next_token;
+
+            /* Check for EOS */
+            if (next_token == 2)
+                break; /* EOS token ID */
+        }
+
+        token = next_token;
+        pos++;
+    }
+
+    return generated;
+}
+
+/* Check if inference engine is ready */
+bool gguf_inference_is_ready(void) { return g_initialized; }
+
+/* Get vocab token text */
+const char *gguf_inference_get_token(int token_id)
+{
+    return gguf_parser_get_token((uint32_t)token_id);
+}

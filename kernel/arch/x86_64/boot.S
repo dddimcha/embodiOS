@@ -319,25 +319,33 @@ print_error_32:
 enable_cpu_features:
     /* Enable SSE */
     mov %cr0, %rax
-    and $~0x04, %rax
-    or $0x02, %rax
+    and $~0x04, %rax      /* Clear EM (bit 2) */
+    or $0x02, %rax        /* Set MP (bit 1) */
     mov %rax, %cr0
-    
+
     mov %cr4, %rax
-    or $0x600, %rax
+    or $0x600, %rax       /* Set OSFXSR (bit 9) and OSXMMEXCPT (bit 10) */
     mov %rax, %cr4
-    
-    /* Check and enable AVX */
+
+    /* Check for OSXSAVE support before trying AVX */
     mov $1, %eax
     cpuid
-    test $(1 << 28), %ecx
+    test $(1 << 27), %ecx  /* Check OSXSAVE support (bit 27) */
     jz .no_avx
-    
+    test $(1 << 28), %ecx  /* Check AVX support (bit 28) */
+    jz .no_avx
+
+    /* Enable OSXSAVE in CR4 first - required before xgetbv/xsetbv */
+    mov %cr4, %rax
+    or $0x40000, %rax      /* Set OSXSAVE (bit 18) */
+    mov %rax, %cr4
+
+    /* Now we can use xgetbv/xsetbv to enable AVX */
     xor %rcx, %rcx
     xgetbv
-    or $0x07, %rax
+    or $0x07, %rax         /* Enable XMM and YMM state */
     xsetbv
-    
+
 .no_avx:
     ret
 
