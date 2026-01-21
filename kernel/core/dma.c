@@ -137,6 +137,31 @@ static void cache_invalidate_range(void* addr, size_t size) {
     cache_dsb();
 }
 
+/**
+ * Clean and invalidate cache line containing address (ARM64)
+ * Used for bidirectional DMA where both CPU and device may write
+ */
+static inline void cache_dc_civac(void* addr) {
+    __asm__ volatile("dc civac, %0" : : "r"(addr) : "memory");
+}
+
+/**
+ * Clean and invalidate cache for a memory range (ARM64)
+ * Optimal for bidirectional DMA operations
+ */
+static void cache_clean_invalidate_range(void* addr, size_t size) {
+    if (!addr || size == 0) return;
+
+    /* Align to cache line boundary */
+    uintptr_t start = (uintptr_t)addr & ~(DMA_CACHE_LINE_SIZE - 1);
+    uintptr_t end = (uintptr_t)addr + size;
+
+    for (uintptr_t p = start; p < end; p += DMA_CACHE_LINE_SIZE) {
+        cache_dc_civac((void*)p);
+    }
+    cache_dsb();
+}
+
 #endif
 
 /**
