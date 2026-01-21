@@ -92,21 +92,33 @@ static void cache_invalidate_range(void* addr, size_t size) {
 #else /* ARM64 or other */
 
 /**
- * Flush cache line containing address (ARM64)
+ * Clean data cache line by virtual address to point of coherency
+ *
+ * DC CVAC instruction writes dirty cache data back to memory, making it
+ * visible to other observers (e.g., DMA devices). Does not invalidate.
+ * Use before device reads memory written by CPU.
  */
 static inline void cache_dc_cvac(void* addr) {
     __asm__ volatile("dc cvac, %0" : : "r"(addr) : "memory");
 }
 
 /**
- * Data synchronization barrier (ARM64)
+ * Data synchronization barrier - ensure all memory operations complete
+ *
+ * DSB SY (full system barrier) ensures all prior cache and memory operations
+ * complete before any subsequent operations. Required after cache maintenance
+ * instructions to guarantee they take effect.
  */
 static inline void cache_dsb(void) {
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
 /**
- * Flush cache for a memory range (ARM64)
+ * Flush cache for a memory range
+ *
+ * Cleans all cache lines in the range using DC CVAC, writing dirty data back
+ * to memory. Use for DMA_TO_DEVICE to ensure device sees CPU writes.
+ * Note: Does not invalidate - cached data remains valid after operation.
  */
 static void cache_flush_range(void* addr, size_t size) {
     if (!addr || size == 0) return;
@@ -122,7 +134,11 @@ static void cache_flush_range(void* addr, size_t size) {
 }
 
 /**
- * Invalidate cache for a memory range (ARM64)
+ * Invalidate cache for a memory range
+ *
+ * Invalidates cache lines using DC IVAC, discarding cached data without
+ * writeback. Use for DMA_FROM_DEVICE to force CPU to read device writes
+ * from memory. WARNING: Will discard uncommitted CPU writes in range.
  */
 static void cache_invalidate_range(void* addr, size_t size) {
     if (!addr || size == 0) return;
@@ -138,16 +154,23 @@ static void cache_invalidate_range(void* addr, size_t size) {
 }
 
 /**
- * Clean and invalidate cache line containing address (ARM64)
- * Used for bidirectional DMA where both CPU and device may write
+ * Clean and invalidate data cache line by virtual address to point of coherency
+ *
+ * DC CIVAC instruction writes dirty data back to memory AND invalidates the
+ * cache line. Combines effects of CVAC and IVAC in single operation.
+ * Used for bidirectional DMA where both CPU and device may write to same buffer.
  */
 static inline void cache_dc_civac(void* addr) {
     __asm__ volatile("dc civac, %0" : : "r"(addr) : "memory");
 }
 
 /**
- * Clean and invalidate cache for a memory range (ARM64)
- * Optimal for bidirectional DMA operations
+ * Clean and invalidate cache for a memory range
+ *
+ * Performs DC CIVAC on all cache lines in range. Writes back dirty data and
+ * invalidates cache, forcing subsequent CPU reads to fetch from memory.
+ * Optimal for bidirectional DMA operations (DMA_BIDIRECTIONAL) where both
+ * CPU and device may modify the buffer.
  */
 static void cache_clean_invalidate_range(void* addr, size_t size) {
     if (!addr || size == 0) return;
