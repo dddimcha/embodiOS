@@ -91,11 +91,34 @@ static void cache_invalidate_range(void* addr, size_t size) {
 
 #else /* ARM64 or other */
 
+/**
+ * Flush cache line containing address (ARM64)
+ */
+static inline void cache_dc_cvac(void* addr) {
+    __asm__ volatile("dc cvac, %0" : : "r"(addr) : "memory");
+}
+
+/**
+ * Data synchronization barrier (ARM64)
+ */
+static inline void cache_dsb(void) {
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/**
+ * Flush cache for a memory range (ARM64)
+ */
 static void cache_flush_range(void* addr, size_t size) {
-    (void)addr;
-    (void)size;
-    /* TODO: Implement ARM64 cache operations */
-    /* dc cvac, dc civac instructions */
+    if (!addr || size == 0) return;
+
+    /* Align to cache line boundary */
+    uintptr_t start = (uintptr_t)addr & ~(DMA_CACHE_LINE_SIZE - 1);
+    uintptr_t end = (uintptr_t)addr + size;
+
+    for (uintptr_t p = start; p < end; p += DMA_CACHE_LINE_SIZE) {
+        cache_dc_cvac((void*)p);
+    }
+    cache_dsb();
 }
 
 static void cache_invalidate_range(void* addr, size_t size) {
