@@ -124,6 +124,19 @@ static bool g_model_loaded = false;
 static char g_token_fallback[32]; // fallback buffer for token strings
 static char g_byte_pieces[512];   // buffer for byte tokens (256 bytes * 2 chars each)
 
+// ----------------------------------------------------------------------------
+// Precomputed RoPE Tables
+// RoPE (Rotary Position Embedding) rotation angles precomputed for all positions
+// This eliminates 1,728+ trig calls per token position (288 dims × 6 layers)
+// Table size: 256 positions × 144 dimension pairs = 36,864 floats per table
+#define ROPE_TABLE_SIZE 256
+#define MAX_ROPE_DIM    144  // max head_dim/2 for TinyStories (288/2)
+
+static float rope_cos_table[ROPE_TABLE_SIZE][MAX_ROPE_DIM];
+static float rope_sin_table[ROPE_TABLE_SIZE][MAX_ROPE_DIM];
+static bool rope_tables_initialized = false;
+static int rope_head_dim = 0;
+
 // External symbols for embedded model (if available)
 extern const uint8_t _binary_tinystories_15m_bin_start[] __attribute__((weak));
 extern const uint8_t _binary_tinystories_15m_bin_end[] __attribute__((weak));
@@ -401,6 +414,63 @@ static int malloc_run_state(TinyStoriesRunState *s, TinyStoriesConfig *p)
     memset(s->logits, 0, p->vocab_size * sizeof(float));
 
     return 0;
+}
+
+/**
+ * Initialize precomputed RoPE frequency tables
+ * Following pattern from transformer_inference.c lines 302-333
+ *
+ * RoPE (Rotary Position Embedding) uses rotation to encode position:
+ *   angle = pos * freq, where freq = 1 / (10000^(2d/head_dim))
+ *
+ * For each position and dimension pair (d), we precompute:
+ *   cos_table[pos][d] = cos(angle)
+ *   sin_table[pos][d] = sin(angle)
+ *
+ * This creates frequency bands where:
+ *   - Low d (d=0,1): High frequency, captures local position
+ *   - High d (d=23 for dim=48): Low frequency, captures global position
+ */
+static void init_rope_tables(int head_dim)
+{
+    // Skip if already initialized for this head dimension
+    if (rope_tables_initialized && rope_head_dim == head_dim) {
+        return;
+    }
+
+    // Validate head_dim
+    if (head_dim <= 0) {
+        head_dim = 48; // default for TinyStories (288 / 6 heads)
+    }
+    if (head_dim > DEFAULT_DIM) {
+        head_dim = DEFAULT_DIM; // cap at model's max dimension
+    }
+
+    int half_dim = head_dim / 2;
+    if (half_dim > MAX_ROPE_DIM) {
+        half_dim = MAX_ROPE_DIM;
+    }
+
+    // Precompute cos/sin for all positions and dimension pairs
+    for (int pos = 0; pos < ROPE_TABLE_SIZE; pos++) {
+        for (int d = 0; d < half_dim; d++) {
+            // Compute frequency: freq = 1 / (10000^(2d/head_dim))
+            // This matches llama.c and Ollama's RoPE implementation
+            float freq = 1.0f / powf(10000.0f, (2.0f * d) / (float)head_dim);
+
+            // angle = pos * freq
+            float angle = (float)pos * freq;
+
+            // Precompute rotation angles
+            rope_cos_table[pos][d] = cosf(angle);
+            rope_sin_table[pos][d] = sinf(angle);
+        }
+    }
+
+    rope_head_dim = head_dim;
+    rope_tables_initialized = true;
+
+    console_printf("RoPE tables initialized: %d positions × %d dims\n", ROPE_TABLE_SIZE, half_dim);
 }
 
 /* Disk-loaded model buffer */
