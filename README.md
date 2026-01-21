@@ -1,28 +1,30 @@
 # EMBODIOS - Bare-Metal AI Operating System
 
-[![Status](https://img.shields.io/badge/Status-65%25%20Complete-yellow)](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis)
-[![AI Runtime](https://img.shields.io/badge/AI%20Runtime-85%25-green)](https://github.com/dddimcha/embodiOS/wiki/Pillar-1:-Ollama-GGUF-Integration)
+[![Status](https://img.shields.io/badge/Status-75%25%20Complete-green)](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis)
+[![AI Runtime](https://img.shields.io/badge/AI%20Runtime-90%25-brightgreen)](https://github.com/dddimcha/embodiOS/wiki/Pillar-1:-Ollama-GGUF-Integration)
+[![Drivers](https://img.shields.io/badge/Drivers-60%25-yellow)](https://github.com/dddimcha/embodiOS/wiki/Pillar-2:-Linux-Driver-Compatibility)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
 > **The world's first bare-metal AI operating system** - where the AI model runs directly on hardware as the OS kernel itself. No userspace. No OS overhead. Just transformers and hardware.
 
 ## What's New (January 2026)
 
-- **GGUF Parser:** Full support for TinyLlama-1.1B, Phi-2, Mistral-7B
-- **BPE Tokenizer:** Proper tokenization loaded directly from GGUF vocabulary
-- **Multi-Model Registry:** Load, switch, unload up to 8 models at runtime
-- **Integer-Only Inference:** Transformer forward pass without FPU dependencies
-- **All Quantization Types:** Q4_K, Q5_K, Q6_K, Q8_0 support
+- **NVMe Driver:** Direct SSD access for model loading
+- **Streaming Inference:** Memory-efficient inference engine
+- **Network Stack:** VirtIO-net, e1000e, TCP/IP foundations
+- **GDB Stub:** Kernel debugging support
+- **ARM64 Support:** Raspberry Pi 5 boot sequence
+- **Fixed-Point Ops:** Integer math for quantized models
 
 ## Current Status
 
 | Component | Status | Completion |
 |-----------|--------|------------|
-| **Kernel Foundation** | Memory management, boot process, I/O | 80% |
-| **AI Runtime** | GGUF parser, BPE tokenizer, transformer, model registry | 85% |
-| **Drivers** | PCI enumeration done (needs VirtIO, NVMe) | 20% |
-| **Performance** | SIMD ops implemented, needs benchmarking | 40% |
-| **Overall** | Foundation complete, AI runtime working | **65%** |
+| **Kernel Foundation** | Memory, boot, interrupts, DMA | 85% |
+| **AI Runtime** | GGUF, BPE, streaming inference, quantization | 90% |
+| **Drivers** | NVMe, VirtIO, e1000e, PCI, TCP/IP | 60% |
+| **Performance** | SIMD, fixed-point, parallel inference | 50% |
+| **Overall** | Core complete, drivers expanding | **75%** |
 
 ## Quick Start
 
@@ -102,9 +104,9 @@ Full documentation available on the [EMBODIOS Wiki](https://github.com/dddimcha/
 
 ### Project Status
 - [Home](https://github.com/dddimcha/embodiOS/wiki) - Wiki home page
-- [Current State Analysis](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis) - Project progress (65% complete)
+- [Current State Analysis](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis) - Project progress (75% complete)
 - [Three Strategic Pillars](https://github.com/dddimcha/embodiOS/wiki/Three-Strategic-Pillars) - Implementation roadmap
-- [Pillar 1: Ollama GGUF Integration](https://github.com/dddimcha/embodiOS/wiki/Pillar-1:-Ollama-GGUF-Integration) - AI runtime (85% complete)
+- [Pillar 1: Ollama GGUF Integration](https://github.com/dddimcha/embodiOS/wiki/Pillar-1:-Ollama-GGUF-Integration) - AI runtime (90% complete)
 
 ### Quick Start Guides
 - [Getting Started](https://github.com/dddimcha/embodiOS/wiki/Getting-Started) - Installation and first steps
