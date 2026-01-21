@@ -407,6 +407,19 @@ def update_apply(ctx, version, force):
     # Placeholder implementation - will be implemented in later subtasks
     console.print("[yellow]Update apply not yet implemented[/yellow]")
 
+@update.command('status')
+@click.pass_context
+def update_status(ctx):
+    """Show current update status
+
+    Examples:
+        embodi update status
+    """
+    console.print("[bold blue]Update Status[/bold blue]")
+
+    # Placeholder implementation - will be implemented in later subtasks
+    console.print("[yellow]Update status not yet implemented[/yellow]")
+
 def main():
     """Main entry point"""
     try:
