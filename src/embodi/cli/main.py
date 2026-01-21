@@ -385,6 +385,28 @@ def update_check(ctx):
     # Placeholder implementation - will be implemented in later subtasks
     console.print("[yellow]Update check not yet implemented[/yellow]")
 
+@update.command('apply')
+@click.option('--version', help='Specific version to apply')
+@click.option('--force', is_flag=True, help='Force apply update')
+@click.pass_context
+def update_apply(ctx, version, force):
+    """Apply EMBODIOS updates
+
+    Examples:
+        embodi update apply
+        embodi update apply --version 1.2.3
+        embodi update apply --force
+    """
+    console.print("[bold blue]Applying updates...[/bold blue]")
+
+    if version:
+        console.print(f"[blue]Target version: {version}[/blue]")
+    if force:
+        console.print("[yellow]Force mode enabled[/yellow]")
+
+    # Placeholder implementation - will be implemented in later subtasks
+    console.print("[yellow]Update apply not yet implemented[/yellow]")
+
 def main():
     """Main entry point"""
     try:
