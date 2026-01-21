@@ -859,19 +859,42 @@ static float *forward(int token, int pos)
 
         // RoPE relative positional encoding: complex-valued rotate q and k in each head
         // This is CRITICAL for the model to distinguish token positions
-        for (int i = 0; i < dim; i += 2) {
-            int head_dim = i % head_size;
-            float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
-            float val = pos * freq;
-            float fcr = cosf(val);
-            float fci = sinf(val);
-            int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
-            for (int v = 0; v < rotn; v++) {
-                float *vec = v == 0 ? s->q : s->k; // the vector to rotate (query or key)
-                float v0 = vec[i];
-                float v1 = vec[i + 1];
-                vec[i] = v0 * fcr - v1 * fci;
-                vec[i + 1] = v0 * fci + v1 * fcr;
+        // Use precomputed table lookups instead of inline trig calculations
+        int pos_idx = pos % ROPE_TABLE_SIZE;
+        if (pos_idx < 0) pos_idx = 0;
+
+        int half_dim = head_size / 2;
+        if (half_dim > MAX_ROPE_DIM) half_dim = MAX_ROPE_DIM;
+
+        // Apply to each query head
+        for (int h = 0; h < p->n_heads; h++) {
+            float* q_head = &s->q[h * head_size];
+
+            for (int d = 0; d < half_dim; d++) {
+                float cos_val = rope_cos_table[pos_idx][d];
+                float sin_val = rope_sin_table[pos_idx][d];
+
+                float q0 = q_head[d * 2];
+                float q1 = q_head[d * 2 + 1];
+
+                q_head[d * 2]     = q0 * cos_val - q1 * sin_val;
+                q_head[d * 2 + 1] = q0 * sin_val + q1 * cos_val;
+            }
+        }
+
+        // Apply to each key head
+        for (int h = 0; h < p->n_kv_heads; h++) {
+            float* k_head = &s->k[h * head_size];
+
+            for (int d = 0; d < half_dim; d++) {
+                float cos_val = rope_cos_table[pos_idx][d];
+                float sin_val = rope_sin_table[pos_idx][d];
+
+                float k0 = k_head[d * 2];
+                float k1 = k_head[d * 2 + 1];
+
+                k_head[d * 2]     = k0 * cos_val - k1 * sin_val;
+                k_head[d * 2 + 1] = k0 * sin_val + k1 * cos_val;
             }
         }
 
