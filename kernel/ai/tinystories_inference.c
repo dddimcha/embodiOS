@@ -537,6 +537,10 @@ static int tinystories_load_from_data(const uint8_t *model_data, size_t model_si
         return 0;
     }
 
+    // Initialize RoPE tables
+    int head_dim = g_config.dim / g_config.n_heads;
+    init_rope_tables(head_dim);
+
     // Determine weight layout based on format
     int shared_weights = 1;
     float *weights_ptr;
