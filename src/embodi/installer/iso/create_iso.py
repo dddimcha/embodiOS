@@ -117,7 +117,7 @@ LABEL embodi-debug
         """Create minimal initrd"""
         initrd_dir = self.work_dir / 'initrd'
         initrd_dir.mkdir(exist_ok=True)
-        
+
         # Create init script
         init_script = """#!/bin/sh
 echo "EMBODIOS Early Boot"
@@ -127,10 +127,38 @@ exec /embodi/kernel
 """
         (initrd_dir / 'init').write_text(init_script)
         (initrd_dir / 'init').chmod(0o755)
-        
-        # Create cpio archive
-        cmd = f"cd {initrd_dir} && find . | cpio -o -H newc | gzip > {self.work_dir}/embodi/initrd.img"
-        subprocess.run(cmd, shell=True, check=True)
+
+        # Create cpio archive using subprocess pipeline (no shell=True)
+        output_path = self.work_dir / 'embodi' / 'initrd.img'
+
+        # Run find . in initrd_dir
+        find_proc = subprocess.Popen(
+            ['find', '.'],
+            cwd=str(initrd_dir),
+            stdout=subprocess.PIPE
+        )
+
+        # Pipe to cpio
+        cpio_proc = subprocess.Popen(
+            ['cpio', '-o', '-H', 'newc'],
+            stdin=find_proc.stdout,
+            stdout=subprocess.PIPE
+        )
+        find_proc.stdout.close()
+
+        # Pipe to gzip and write to file
+        with open(output_path, 'wb') as f:
+            gzip_proc = subprocess.Popen(
+                ['gzip'],
+                stdin=cpio_proc.stdout,
+                stdout=f
+            )
+            cpio_proc.stdout.close()
+            gzip_proc.wait()
+
+        # Check for errors
+        if gzip_proc.returncode != 0:
+            raise subprocess.CalledProcessError(gzip_proc.returncode, 'gzip')
         
     def _create_boot_config(self, arch, features):
         """Create boot configuration"""
