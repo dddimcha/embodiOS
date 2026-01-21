@@ -3,9 +3,11 @@ Update manifest parser and validator for EMBODIOS OTA updates
 """
 
 import json
+import requests
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlparse
 
 
 class UpdateItem:
@@ -247,3 +249,62 @@ def save_manifest(manifest: UpdateManifest, path: Path) -> None:
 
     with open(path, 'w') as f:
         json.dump(manifest.to_dict(), f, indent=2)
+
+
+def fetch_manifest(url: Optional[str] = None, verify_tls: bool = True, timeout: int = 30) -> UpdateManifest:
+    """
+    Fetch and parse an update manifest from a remote URL.
+
+    Args:
+        url: URL to fetch manifest from. If None, uses default from config.
+        verify_tls: Whether to verify TLS certificates (default: True)
+        timeout: Request timeout in seconds (default: 30)
+
+    Returns:
+        Parsed UpdateManifest object
+
+    Raises:
+        ValueError: If URL is not HTTPS or manifest is invalid
+        requests.RequestException: If download fails
+        json.JSONDecodeError: If JSON is malformed
+
+    Examples:
+        >>> manifest = fetch_manifest('https://updates.embodi.ai/manifest.json')
+        >>> manifest.version
+        '0.3.0'
+    """
+    # Get URL from config if not provided
+    if url is None:
+        from .config import UpdateConfig
+        config = UpdateConfig()
+        url = config.manifest_url
+
+    # Enforce HTTPS for security
+    parsed = urlparse(url)
+    if parsed.scheme != 'https':
+        raise ValueError(f"Insecure URL not allowed: {url}. Only HTTPS URLs are permitted.")
+
+    try:
+        # Fetch manifest from remote server
+        response = requests.get(
+            url,
+            verify=verify_tls,
+            timeout=timeout,
+            headers={'User-Agent': 'EMBODIOS-Updater/0.1.0'}
+        )
+        response.raise_for_status()
+
+        # Parse JSON response
+        data = response.json()
+
+        # Create and validate manifest
+        manifest = UpdateManifest(data)
+
+        return manifest
+
+    except requests.RequestException as e:
+        raise requests.RequestException(f"Failed to fetch manifest from {url}: {e}")
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(f"Invalid JSON in manifest from {url}: {e}", e.doc, e.pos)
+    except ValueError as e:
+        raise ValueError(f"Invalid manifest from {url}: {e}")
