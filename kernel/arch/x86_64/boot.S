@@ -6,19 +6,29 @@ multiboot2_header:
     .long 0                         /* Architecture (i386) */
     .long multiboot2_header_end - multiboot2_header
     .long -(0xe85250d6 + 0 + (multiboot2_header_end - multiboot2_header))
-    
+
     /* Information request tag */
     .align 8
     .short 1                        /* Type */
     .short 0                        /* Flags */
     .long 8                         /* Size */
-    
+
     /* End tag */
     .align 8
     .short 0                        /* Type */
     .short 0                        /* Flags */
     .long 8                         /* Size */
 multiboot2_header_end:
+
+/* PVH ELF Note - Required by modern QEMU */
+.section .note.Xen, "a"
+    .align 4
+    .long 4                         /* Name size */
+    .long 4                         /* Descriptor size */
+    .long 18                        /* Type = XEN_ELFNOTE_PHYS32_ENTRY */
+    .asciz "Xen"                    /* Name */
+    .align 4
+    .long _start                    /* Entry point */
 
 .section .text.boot
 .global _start

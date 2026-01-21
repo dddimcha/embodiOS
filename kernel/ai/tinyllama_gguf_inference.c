@@ -5,13 +5,14 @@
 #include <embodios/types.h>
 #include <embodios/console.h>
 #include <embodios/mm.h>
+#include <embodios/bpe_tokenizer.h>
 
 /* External GGUF loader */
 extern int gguf_load_model(void* data, size_t size);
 
-/* External embedded model data - this is the 638MB GGUF file */
-extern const uint8_t _binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_start[];
-extern const uint8_t _binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_end[];
+/* External embedded model data - generic GGUF model embedded via Makefile */
+extern const uint8_t _binary_gguf_model_start[];
+extern const uint8_t _binary_gguf_model_end[];
 
 /* Math functions */
 extern float expf(float x);
@@ -47,9 +48,8 @@ int tinyllama_init(void)
     console_printf("[TinyLlama] Initializing from GGUF...\n");
 
     /* Get embedded model data size */
-    g_tinyllama.model_data = (void*)_binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_start;
-    g_tinyllama.model_size = (size_t)(_binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_end -
-                                       _binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_start);
+    g_tinyllama.model_data = (void*)_binary_gguf_model_start;
+    g_tinyllama.model_size = (size_t)(_binary_gguf_model_end - _binary_gguf_model_start);
 
     console_printf("[TinyLlama] Model size: %zu MB\n", g_tinyllama.model_size / (1024 * 1024));
 
@@ -59,17 +59,33 @@ int tinyllama_init(void)
         return -1;
     }
 
+    /* Initialize BPE tokenizer from loaded GGUF vocabulary */
+    if (!bpe_tokenizer_is_initialized()) {
+        if (bpe_tokenizer_init() < 0) {
+            console_printf("[TinyLlama] Warning: BPE tokenizer init failed, using fallback\n");
+        } else {
+            console_printf("[TinyLlama] BPE tokenizer initialized\n");
+        }
+    }
+
     g_tinyllama.loaded = 1;
     console_printf("[TinyLlama] Loaded successfully!\n");
 
     return 0;
 }
 
-/* Simple BPE-style tokenizer (placeholder - real BPE needs vocab loading) */
+/* Tokenize text using BPE tokenizer if available, otherwise fallback */
 static int tinyllama_tokenize(const char* text, int* tokens, int max_tokens)
 {
-    /* For now, use character-based tokenization as fallback */
-    /* Real implementation would load sentencepiece vocab from GGUF */
+    /* Use real BPE tokenizer if initialized */
+    if (bpe_tokenizer_is_initialized()) {
+        int n = bpe_tokenizer_encode(text, tokens, max_tokens, true, false);
+        console_printf("[TinyLlama] Using BPE tokenizer: %d tokens\n", n);
+        return n;
+    }
+
+    /* Fallback: character-based tokenization */
+    console_printf("[TinyLlama] WARNING: BPE tokenizer not initialized, using fallback\n");
     int n = 0;
     tokens[n++] = 1; /* BOS token */
 
@@ -98,6 +114,13 @@ static int tinyllama_tokenize(const char* text, int* tokens, int max_tokens)
 /* Detokenize tokens back to text */
 static void tinyllama_detokenize(int* tokens, int n_tokens, char* text, int max_len)
 {
+    /* Use real BPE tokenizer if initialized */
+    if (bpe_tokenizer_is_initialized()) {
+        bpe_tokenizer_decode(tokens, n_tokens, text, max_len);
+        return;
+    }
+
+    /* Fallback: character-based detokenization */
     int pos = 0;
 
     for (int i = 0; i < n_tokens && pos < max_len - 1; i++) {

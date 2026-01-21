@@ -5,10 +5,10 @@
 #include "embodios/mm.h"
 #include "embodios/console.h"
 
-/* Heap configuration */
-#define MIN_HEAP_SIZE   (16 * 1024 * 1024)   /* Minimum 16MB heap */
-#define MAX_HEAP_SIZE   (256 * 1024 * 1024)  /* Maximum 256MB - fits in order 16 buddy block */
-#define HEAP_PERCENT    50                    /* Use 50% for AI models (max 256MB) */
+/* Heap configuration - expanded for larger AI models */
+#define MIN_HEAP_SIZE   (64 * 1024 * 1024)   /* Minimum 64MB heap */
+#define MAX_HEAP_SIZE   (1024 * 1024 * 1024) /* Maximum 1GB for larger models */
+#define HEAP_PERCENT    70                    /* Use 70% of available memory for AI */
 #define MIN_BLOCK_SIZE  64
 #define ALIGNMENT       16
 
@@ -58,12 +58,16 @@ static size_t calculate_heap_size(void)
 /* Initialize heap */
 void heap_init(void)
 {
+    console_printf("Heap: Calculating size...\n");
     /* Calculate heap size based on available memory */
     size_t heap_size = calculate_heap_size();
     size_t heap_pages = heap_size / PAGE_SIZE;
+    console_printf("Heap: Need %zu MB (%zu pages)\n", heap_size / (1024*1024), heap_pages);
 
     /* Allocate heap memory from PMM */
+    console_printf("Heap: Allocating from PMM...\n");
     void* heap_mem = pmm_alloc_pages(heap_pages);
+    console_printf("Heap: PMM returned %p\n", heap_mem);
     if (!heap_mem) {
         /* Fallback: try with minimum heap size */
         console_printf("Heap: Failed to allocate %zu MB, trying minimum...\n",
@@ -78,17 +82,25 @@ void heap_init(void)
         }
     }
 
+    console_printf("Heap: Setting up state...\n");
     heap_state.start = heap_mem;
     heap_state.end = (void*)((uintptr_t)heap_mem + heap_size);
     heap_state.total_size = heap_size;
     heap_state.used_size = sizeof(block_header_t);
+    console_printf("Heap: State set, creating initial block...\n");
 
     /* Create initial free block */
+    console_printf("Heap: Writing to %p...\n", heap_mem);
     block_header_t *initial = (block_header_t*)heap_state.start;
+    console_printf("Heap: Writing size...\n");
     initial->size = heap_size - sizeof(block_header_t);
+    console_printf("Heap: Writing used flag...\n");
     initial->used = false;
+    console_printf("Heap: Writing next ptr...\n");
     initial->next = NULL;
+    console_printf("Heap: next done, writing prev ptr...\n");
     initial->prev = NULL;
+    console_printf("Heap: Block created\n");
 
     heap_state.free_list = initial;
     heap_state.initialized = true;
@@ -107,19 +119,23 @@ static size_t align_size(size_t size)
 static void split_block(block_header_t *block, size_t size)
 {
     size_t total_size = block->size + sizeof(block_header_t);
-    
+
     if (total_size >= size + sizeof(block_header_t) + MIN_BLOCK_SIZE) {
         /* Create new block after this one */
         block_header_t *new_block = (block_header_t*)((uint8_t*)block + sizeof(block_header_t) + size);
-        new_block->size = total_size - size - sizeof(block_header_t) - sizeof(block_header_t);
+
+        /* Calculate new block size avoiding underflow */
+        size_t new_size = total_size - size - sizeof(block_header_t) - sizeof(block_header_t);
+
+        new_block->size = new_size;
         new_block->used = false;
         new_block->next = block->next;
         new_block->prev = block;
-        
+
         if (block->next) {
             block->next->prev = new_block;
         }
-        
+
         block->next = new_block;
         block->size = size;
     }
@@ -131,27 +147,37 @@ void* heap_alloc(size_t size)
     if (!heap_state.initialized) {
         heap_init();
     }
-    
+
     if (size == 0) return NULL;
-    
+
     size = align_size(size);
-    
+
     /* Find first fit */
     block_header_t *current = heap_state.free_list;
+
     while (current) {
         if (!current->used && current->size >= size) {
             /* Found suitable block */
             split_block(current, size);
             current->used = true;
             heap_state.used_size += current->size + sizeof(block_header_t);
-            
+
             /* Return pointer after header */
             return (uint8_t*)current + sizeof(block_header_t);
         }
         current = current->next;
     }
-    
-    console_printf("Heap: Failed to allocate %zu bytes\n", size);
+
+    /* Debug: print all blocks when allocation fails */
+    console_printf("Heap: Failed to allocate %zu bytes - dumping blocks:\n", size);
+    block_header_t *dbg = heap_state.free_list;
+    int cnt = 0;
+    while (dbg && cnt < 20) {
+        console_printf("  [%d] %p: size=%zu used=%d next=%p\n",
+                       cnt, (void*)dbg, dbg->size, dbg->used, (void*)dbg->next);
+        dbg = dbg->next;
+        cnt++;
+    }
     return NULL;
 }
 

@@ -10,6 +10,9 @@
 #include <embodios/dma.h>
 #include <embodios/pci.h>
 #include <embodios/virtio_blk.h>
+#include <embodios/virtio_mmio.h>
+#include <embodios/virtio_net.h>
+#include <embodios/tcpip.h>
 #include <embodios/model_registry.h>
 
 /* Kernel version info */
@@ -47,14 +50,46 @@ extern void slab_init(void);
 /* Model runtime */
 static struct embodios_model* ai_model = NULL;
 
+/* Direct serial output for debug (before console init) */
+#if defined(__x86_64__)
+static inline void outb_debug(uint16_t port, uint8_t val) {
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline uint8_t inb_debug(uint16_t port) {
+    uint8_t ret;
+    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+static inline void debug_serial_char(char c) {
+    while (!(inb_debug(0x3FD) & 0x20));
+    outb_debug(0x3F8, c);
+}
+#elif defined(__aarch64__)
+/* ARM64: Use assembly UART for HVF compatibility */
+extern void uart_putchar(char c);
+static inline void debug_serial_char(char c) {
+    uart_putchar(c);
+}
+#else
+static inline void debug_serial_char(char c) { (void)c; }
+#endif
+
 void kernel_main(void)
 {
+    /* Debug: Mark kernel_main entry */
+    debug_serial_char('K');
+
     /* Early architecture setup */
+    debug_serial_char('a');
     arch_early_init();
-    
+    debug_serial_char('b');
+
     /* Initialize console for output */
+    debug_serial_char('c');
     console_init();
+    debug_serial_char('d');
     console_printf("EMBODIOS Native Kernel %s\n", kernel_version);
+    debug_serial_char('e');
     console_printf("Build: %s\n", kernel_build);
     console_printf("Kernel: %p - %p\n", _kernel_start, _kernel_end);
     
@@ -64,15 +99,19 @@ void kernel_main(void)
     
     /* CPU initialization */
     console_printf("Initializing CPU features...\n");
+    debug_serial_char('f');
     arch_cpu_init();
+    debug_serial_char('g');
     
     /* Memory management setup */
     console_printf("Initializing memory management...\n");
-    /* TODO: Parse multiboot memory map for actual available RAM.
-     * Using 512MB for faster x86 emulation boot. TinyStories model fits.
-     * For larger models, increase: 1024*1024*1024 for 1GB (slower boot) */
-    size_t mem_size = 512 * 1024 * 1024; /* 512MB for x86 emulation */
+    /* Calculate available memory after kernel
+     * Currently limited to 1GB due to page table setup in boot.S
+     * TODO: Extend page tables for larger memory support */
+    size_t total_ram = 1UL * 1024 * 1024 * 1024; /* 1GB - limited by page tables */
     void* mem_start = (void*)ALIGN_UP((uintptr_t)_kernel_end, PAGE_SIZE);
+    size_t kernel_size = (uintptr_t)mem_start - (uintptr_t)_kernel_start;
+    size_t mem_size = total_ram - kernel_size;
     pmm_init(mem_start, mem_size);
     vmm_init();
     slab_init();
@@ -89,9 +128,23 @@ void kernel_main(void)
     console_printf("Initializing PCI subsystem...\n");
     pci_init();
 
-    /* Initialize VirtIO block driver */
+    /* VirtIO block driver for loading models from disk */
     console_printf("Initializing VirtIO block driver...\n");
+#ifdef __aarch64__
+    /* ARM64: Use VirtIO-MMIO (QEMU virt machine uses MMIO, not PCI) */
+    virtio_mmio_init();
+#else
+    /* x86_64: Use VirtIO-PCI */
     virtio_blk_init();
+#endif
+
+    /* VirtIO network driver */
+    console_printf("Initializing VirtIO network driver...\n");
+    virtio_net_init();
+
+    /* TCP/IP stack */
+    console_printf("Initializing TCP/IP stack...\n");
+    tcpip_init();
 
     /* Initialize task scheduler */
     console_printf("Initializing task scheduler...\n");
@@ -101,52 +154,19 @@ void kernel_main(void)
     console_printf("Initializing AI runtime...\n");
     model_runtime_init();
 
-    /* Initialize model registry for multi-model support */
-    model_registry_init();
+    /* Check for embedded GGUF model */
+    extern int gguf_model_embedded(void);
+    extern const uint8_t* get_embedded_gguf_model(size_t* out_size);
 
-    /* Load TinyStories-15M model for interactive use */
-    extern void tinystories_interactive_init(void);
-    tinystories_interactive_init();
-
-    /* Try loading embedded GGUF model first */
-#if 0
-    /* Temporarily disabled - model embedding not configured */
-    extern const uint8_t _binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_start[];
-    extern const uint8_t _binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_end[];
-    extern int gguf_integer_load(void* data, size_t size);
-
-    size_t gguf_size = (size_t)(_binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_end -
-                                 _binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_start);
-    if (gguf_size > 0) {
-        console_printf("Loading GGUF model (%zu MB)...\n", gguf_size / (1024*1024));
-
-        if (gguf_integer_load((void*)_binary_tinyllama_1_1b_chat_v1_0_Q4_K_M_gguf_start, gguf_size) == 0) {
-            console_printf("GGUF model loaded successfully!\n");
-        } else {
-            console_printf("Failed to load GGUF model\n");
+    if (gguf_model_embedded()) {
+        size_t gguf_size = 0;
+        const uint8_t* gguf_data = get_embedded_gguf_model(&gguf_size);
+        if (gguf_data && gguf_size > 0) {
+            console_printf("GGUF model embedded: %zu MB\n", gguf_size / (1024*1024));
+            console_printf("Use 'benchmark' command to test inference\n");
         }
     } else {
-        console_printf("No embedded GGUF model found\n");
-    }
-#else
-    console_printf("GGUF model embedding not configured\n");
-#endif
-
-    /* Interrupt handling - DISABLED for UEFI compatibility */
-    console_printf("Interrupts disabled for UEFI boot compatibility\n");
-    /* arch_interrupt_init(); */  /* Causes crash in UEFI mode */
-
-    /* Load AI model if embedded (EMBODIOS format) */
-    size_t model_size = (uintptr_t)_model_weights_end - (uintptr_t)_model_weights_start;
-    if (model_size > 0) {
-        console_printf("Loading AI model (%zu bytes)...\n", model_size);
-        ai_model = model_load(_model_weights_start, model_size);
-        if (ai_model) {
-            console_printf("Model loaded: %s\n", ai_model->name);
-            console_printf("Parameters: %zu\n", ai_model->param_count);
-        } else {
-            console_printf("Failed to load AI model\n");
-        }
+        console_printf("No GGUF model embedded\n");
     }
     
     /* Initialize command processor */
@@ -161,6 +181,11 @@ void kernel_main(void)
     console_printf("\nEMBODIOS Ready (polling mode - no interrupts).\n");
     console_printf("Type 'help' for available commands.\n\n");
     
+    /* Auto-run benchmark for testing */
+    #ifdef AUTO_BENCHMARK
+    console_printf("Auto-running benchmark...\n");
+    process_command("benchmark");
+    #endif
     /* Main kernel loop */
     kernel_loop();
 }

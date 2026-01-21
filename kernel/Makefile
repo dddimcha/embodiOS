@@ -4,7 +4,7 @@
 ARCH ?= x86_64
 ARCH_DIR = arch/$(ARCH)
 
-# Tools
+# Tools - defaults
 CC ?= gcc
 CXX ?= g++
 AS ?= as
@@ -14,10 +14,33 @@ OBJCOPY ?= objcopy
 # Detect build OS early
 BUILD_OS := $(shell uname -s)
 
-# Cross-compilation prefix for ARM64
+# Cross-compilation for x86_64 (on macOS or Linux cross-compile)
+ifeq ($(ARCH),x86_64)
+    # Check for x86_64-elf cross-compiler (preferred for bare-metal ELF)
+    X86_64_ELF_GCC := $(shell which x86_64-elf-gcc 2>/dev/null)
+    ifneq ($(X86_64_ELF_GCC),)
+        # Use x86_64-elf-gcc cross-compiler (produces ELF)
+        CC := x86_64-elf-gcc
+        CXX := x86_64-elf-g++
+        AS := x86_64-elf-as
+        LD := x86_64-elf-ld
+        OBJCOPY := x86_64-elf-objcopy
+    endif
+endif
+
+# Cross-compilation for ARM64
 ifeq ($(ARCH),aarch64)
-    ifeq ($(BUILD_OS),Darwin)
-        # macOS ARM64 - use native tools
+    # Check for aarch64-elf cross-compiler (preferred for bare-metal ELF)
+    AARCH64_ELF_GCC := $(shell which aarch64-elf-gcc 2>/dev/null)
+    ifneq ($(AARCH64_ELF_GCC),)
+        # Use aarch64-elf-gcc cross-compiler (produces ELF)
+        CC := aarch64-elf-gcc
+        CXX := aarch64-elf-g++
+        AS := aarch64-elf-as
+        LD := aarch64-elf-ld
+        OBJCOPY := aarch64-elf-objcopy
+    else ifeq ($(BUILD_OS),Darwin)
+        # macOS ARM64 - use native tools (produces Mach-O, for testing only)
         CC := clang
         AS := as
         LD := ld
@@ -36,7 +59,8 @@ endif
 # Common flags for all architectures
 CFLAGS = -ffreestanding -nostdlib -fno-builtin -fno-stack-protector
 CFLAGS += -fno-pic -Wall -Wextra -O2
-CFLAGS += -I include -I include/arch/$(ARCH)
+# IMPORTANT: compat headers MUST come first to override system headers for llama.cpp
+CFLAGS += -I include/compat -I include -I include/arch/$(ARCH)
 CFLAGS += -I llama_cpp/include -I llama_cpp/ggml
 # Allow compiler builtin headers for GGML (needs stdbool.h, stdint.h, etc.)
 CFLAGS += -isystem $(shell $(CC) -print-file-name=include)
@@ -45,7 +69,8 @@ CFLAGS += -isystem $(shell $(CC) -print-file-name=include)
 # Start from scratch instead of inheriting CFLAGS to allow standard headers
 CXXFLAGS = -ffreestanding -nostdlib -fno-builtin -fno-stack-protector
 CXXFLAGS += -fno-pic -Wall -Wextra -O2
-CXXFLAGS += -I include -I include/arch/$(ARCH)
+# IMPORTANT: compat headers MUST come first to override system headers for llama.cpp
+CXXFLAGS += -I include/compat -I include -I include/arch/$(ARCH)
 CXXFLAGS += -fno-exceptions -fno-rtti -std=c++17
 CXXFLAGS += -I llama_cpp/include -I llama_cpp/ggml -I llama_cpp/src
 
@@ -54,6 +79,8 @@ ifeq ($(ARCH),x86_64)
     CFLAGS += -mno-red-zone -mcmodel=kernel
     # NOTE: SSE2 enabled for AI inference SIMD and math functions
     CFLAGS += -msse2 -mfpmath=sse
+    # AVX2 support disabled - QEMU TCG doesn't support AVX
+    # CFLAGS += -mavx2 -mfma
     # Check if we're using cross-compiler or native tools
     ifneq (,$(findstring x86_64-elf,$(CC)))
         # Cross-compiler (x86_64-elf-gcc)
@@ -75,10 +102,11 @@ endif
 
 ifeq ($(ARCH),aarch64)
     # ARM64-specific flags
-    ifeq ($(CC),aarch64-elf-gcc)
-        # Cross-compiler flags
-        CFLAGS += -march=armv8-a
-        CXXFLAGS += -march=armv8-a
+    ifneq ($(AARCH64_ELF_GCC),)
+        # aarch64-elf cross-compiler flags (produces ELF for bare-metal)
+        # -mno-outline-atomics: inline atomic ops instead of calling libgcc helpers
+        CFLAGS += -march=armv8-a+simd -mtune=cortex-a57 -mno-outline-atomics
+        CXXFLAGS += -march=armv8-a+simd -mtune=cortex-a57 -mno-outline-atomics
         ASFLAGS = -march=armv8-a
         LDFLAGS = -m aarch64elf
     else ifeq ($(BUILD_OS),Darwin)
@@ -104,11 +132,17 @@ KERNEL_C_SOURCES = \
     core/stubs.c \
     core/interrupt.c \
     core/task.c \
+    core/gdb_stub.c \
     core/dma.c \
     core/dma_test.c \
     core/lock_test.c \
     drivers/pci/pci.c \
     drivers/block/virtio_blk.c \
+    drivers/block/virtio_mmio.c \
+    drivers/nvme/nvme.c \
+    drivers/net/virtio_net.c \
+    drivers/net/e1000e.c \
+    net/tcpip.c \
     mm/pmm.c \
     mm/vmm.c \
     mm/slab.c \
@@ -118,6 +152,7 @@ KERNEL_C_SOURCES = \
     ai/tokenizer.c \
     ai/gguf_integer_loader.c \
     ai/gguf_parser.c \
+    ai/gguf_loader.c \
     ai/gguf_inference.c \
     ai/quantized_ops.c \
     ai/quantized_test.c \
@@ -139,9 +174,15 @@ KERNEL_C_SOURCES = \
     ai/transformer_inference.c \
     ai/inference_test.c \
     ai/tensor_ops.c \
+    ai/streaming_inference.c \
+    ai/parallel_inference.c \
+    ai/fixed_point.c \
+    ai/benchmark.c \
+    ai/tinyllama_gguf_inference.c \
     lib/string.c \
     lib/stdlib.c \
-    lib/math.c
+    lib/math.c \
+    lib/compat_stubs.c
 
 # Math library enabled (SSE enabled for AI inference)
 # ai/tvm_graph_executor.c \
@@ -156,10 +197,25 @@ KERNEL_C_SOURCES = \
 # ai/working_model.c \
 # ai/real_inference.c \
 
-# LLaMA.cpp integration - DISABLED for now (too complex for bare-metal)
-# Using simple built-in inference instead
-LLAMA_CPP_SOURCES =
-GGML_C_SOURCES =
+# LLaMA.cpp integration - ENABLED with full GGML support
+# The compat headers in kernel/include/compat/ provide bare-metal stubs for stdio.h, etc.
+# GGML sources synced from: https://github.com/ggerganov/llama.cpp/tree/master/ggml
+#
+# kernel_stubs.cpp provides:
+# - C++ runtime (new/delete operators)
+# - pthread stubs for single-threaded kernel
+
+LLAMA_CPP_SOURCES = \
+    llama_cpp/kernel_stubs.cpp
+
+# GGML core library - ENABLED
+# Complete GGML sources synced from llama.cpp repository
+# ggml-backend-stubs.c provides kernel-based implementations of backend functions
+GGML_C_SOURCES = \
+    llama_cpp/ggml/ggml.c \
+    llama_cpp/ggml/ggml-quants.c \
+    llama_cpp/ggml/ggml-alloc.c \
+    llama_cpp/ggml/ggml-backend-stubs.c
 
 # Architecture-specific sources
 ifeq ($(ARCH),x86_64)
@@ -176,13 +232,13 @@ endif
 
 ifeq ($(ARCH),aarch64)
     ifeq ($(BUILD_OS),Darwin)
-        ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S
+        # Use assembly UART for HVF compatibility (avoids post-indexed stores)
+        ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S $(ARCH_DIR)/mmu.S $(ARCH_DIR)/uart_asm.S
     else
-        ARCH_AS_SOURCES = $(ARCH_DIR)/boot_linux.S
+        ARCH_AS_SOURCES = $(ARCH_DIR)/boot_linux.S $(ARCH_DIR)/mmu.S $(ARCH_DIR)/uart_asm.S
     endif
     ARCH_C_SOURCES = \
         $(ARCH_DIR)/cpu.c \
-        $(ARCH_DIR)/uart.c \
         $(ARCH_DIR)/early_init.c
 endif
 
@@ -197,23 +253,40 @@ ARCH_C_OBJS = $(ARCH_C_SOURCES:.c=.o)
 # TinyStories model path (relative to kernel directory)
 TINYSTORIES_MODEL = ../models/tinystories-15m.bin
 TINYSTORIES_TOKENIZER = ../models/tokenizer.bin
+# GGUF model for embedded inference (smallest available: tinystories-656k.gguf ~732KB)
+# GGUF Model - can be overridden: make GGUF_MODEL=../models/qwen2.5-0.5b-q4_k_m.gguf
+GGUF_MODEL ?= ../models/qwen2.5-0.5b-q4_k_m.gguf
 
 # Enable model embedding for x86_64 builds if model files exist
 # Works on both Linux and macOS with cross-compilation
 # The kernel boots fine without embedded models - AI will just be unavailable
 ifeq ($(ARCH),x86_64)
+    MODEL_OBJS =
     # Check if model files exist before trying to embed them
     ifneq ($(wildcard $(TINYSTORIES_MODEL)),)
-        MODEL_OBJS = ai/tinystories_model.o ai/tinystories_model_flag.o
+        MODEL_OBJS += ai/tinystories_model.o ai/tinystories_model_flag.o
         $(info Model embedding enabled: $(TINYSTORIES_MODEL) found)
     else
-        MODEL_OBJS =
         $(info Model embedding disabled: $(TINYSTORIES_MODEL) not found)
     endif
     # Always embed tokenizer if available (small file, 433KB)
     ifneq ($(wildcard $(TINYSTORIES_TOKENIZER)),)
         MODEL_OBJS += ai/tinystories_tokenizer.o ai/tokenizer_flag.o
         $(info Tokenizer embedding enabled: $(TINYSTORIES_TOKENIZER) found)
+    endif
+    # Embed GGUF model if available
+    ifneq ($(wildcard $(GGUF_MODEL)),)
+        MODEL_OBJS += ai/gguf_model.o ai/gguf_model_flag.o
+        $(info GGUF embedding enabled: $(GGUF_MODEL) found)
+    endif
+else ifeq ($(ARCH),aarch64)
+    MODEL_OBJS =
+    # Embed GGUF model for ARM64 if available (used for speed testing)
+    ifneq ($(wildcard $(GGUF_MODEL)),)
+        MODEL_OBJS += ai/gguf_model.o ai/gguf_model_flag.o
+        $(info GGUF embedding enabled for ARM64: $(GGUF_MODEL) found)
+    else
+        $(info GGUF embedding disabled for ARM64: $(GGUF_MODEL) not found)
     endif
 else
     MODEL_OBJS =
@@ -225,12 +298,20 @@ ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS) $(LLAMA_CPP_OBJS) $(GGM
 all: embodios.elf embodios.bin
 
 embodios.elf: $(ALL_OBJS)
+ifeq ($(ARCH),aarch64)
+ifneq ($(AARCH64_ELF_GCC),)
+	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
+else
+	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS)
+endif
+else
 ifneq (,$(findstring x86_64-elf,$(LD)))
 	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
 else ifeq ($(BUILD_OS),Darwin)
 	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS)
 else
 	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
+endif
 endif
 
 embodios.bin: embodios.elf
@@ -249,7 +330,7 @@ embodios.bin: embodios.elf
 # Clean
 clean:
 	rm -f $(ALL_OBJS) embodios.elf embodios.bin embodios.iso
-	rm -f ai/tinystories_model_flag.o ai/tokenizer_flag.o
+	rm -f ai/tinystories_model_flag.o ai/tokenizer_flag.o ai/gguf_model_flag.o ai/gguf_model.o
 
 # Embed TinyStories model as binary object
 ai/tinystories_model.o: $(TINYSTORIES_MODEL)
@@ -294,13 +375,56 @@ else
 	@echo "int _tokenizer_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/tokenizer_flag.o
 endif
 
+# Embed GGUF model as binary object
+# We copy to a fixed temp name to get predictable symbol names
+GGUF_TEMP = ai/embedded_model.gguf
+ai/gguf_model.o: $(GGUF_MODEL)
+	@echo "Embedding GGUF model into kernel: $(GGUF_MODEL)"
+	@cp $(GGUF_MODEL) $(GGUF_TEMP)
+ifeq ($(ARCH),x86_64)
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+		--redefine-sym _binary_ai_embedded_model_gguf_start=_binary_gguf_model_start \
+		--redefine-sym _binary_ai_embedded_model_gguf_end=_binary_gguf_model_end \
+		--redefine-sym _binary_ai_embedded_model_gguf_size=_binary_gguf_model_size \
+		$(GGUF_TEMP) $@
+	@echo "int _gguf_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/gguf_model_flag.o
+	@rm -f $(GGUF_TEMP)
+else ifeq ($(ARCH),aarch64)
+	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+		--redefine-sym _binary_ai_embedded_model_gguf_start=_binary_gguf_model_start \
+		--redefine-sym _binary_ai_embedded_model_gguf_end=_binary_gguf_model_end \
+		--redefine-sym _binary_ai_embedded_model_gguf_size=_binary_gguf_model_size \
+		$(GGUF_TEMP) $@
+	@echo "int _gguf_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/gguf_model_flag.o
+	@rm -f $(GGUF_TEMP)
+endif
+
 # ISO for x86_64
 ifeq ($(ARCH),x86_64)
 iso: embodios.elf
 	mkdir -p iso/boot/grub
 	cp embodios.elf iso/boot/
-	echo 'menuentry "EMBODIOS" { multiboot2 /boot/embodios.elf }' > iso/boot/grub/grub.cfg
-	grub-mkrescue -o embodios.iso iso 2>/dev/null || echo "grub-mkrescue not available"
+	cp grub_iso/boot/grub/grub.cfg iso/boot/grub/grub.cfg
+	x86_64-elf-grub-mkrescue -o embodios.iso iso 2>&1 || grub-mkrescue -o embodios.iso iso 2>&1 || echo "grub-mkrescue not available"
+	@ls -lh embodios.iso 2>/dev/null || true
+
+# Production ISO with manifest
+iso-prod: embodios.elf
+	@echo "Building production ISO..."
+	./scripts/make_iso.sh
+
+# Production ISO with models included
+iso-full: embodios.elf
+	@echo "Building full ISO with models..."
+	./scripts/make_iso.sh --models
+
+# Quick ISO using existing GRUB setup
+iso-quick: embodios.elf
+	mkdir -p grub_iso/boot
+	cp embodios.elf grub_iso/boot/
+	grub-mkrescue -o embodios.iso grub_iso 2>/dev/null || echo "grub-mkrescue not available"
 endif
 
-.PHONY: all clean iso
+.PHONY: all clean iso iso-prod iso-full iso-quick

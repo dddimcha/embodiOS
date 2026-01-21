@@ -15,15 +15,31 @@
 # Ignore model files but not metadata
 /models/*/
 /models/*.bin
+/models/*.gguf
 !/models/.gitkeep
 !/models/README.md
 !/models/manifest.json
+!/models/example_models.json
+
+# Test environments
+/test_env/
 
 # Kernel build artifacts
 kernel/embodios.elf
 kernel/embodios.bin
 kernel/embodios.iso
 kernel/iso/
+kernel/*.iso
+kernel/*.img
+kernel/grub_iso/
+kernel/iso_*/
+kernel/core/*.with_autobenchmark
+kernel/test_*
+!kernel/test_*.c
+
+# ISO files (prevent test artifacts)
+*.iso
+*.img
 /images/
 /.embodi/
 /runtime/
@@ -57,6 +73,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+scripts/venv/
 .pytest_cache/
 
 # C/C++
@@ -102,3 +119,14 @@ secrets/
 
 # External dependencies (use submodules instead)
 llama.c/
+
+# Auto Claude data directory
+.auto-claude/
+
+# Auto Claude generated files
+.auto-claude-security.json
+.auto-claude-status
+.claude_settings.json
+.worktrees/
+.security-key
+logs/security/
