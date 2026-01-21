@@ -121,10 +121,20 @@ static void cache_flush_range(void* addr, size_t size) {
     cache_dsb();
 }
 
+/**
+ * Invalidate cache for a memory range (ARM64)
+ */
 static void cache_invalidate_range(void* addr, size_t size) {
-    (void)addr;
-    (void)size;
-    /* TODO: Implement ARM64 cache invalidation */
+    if (!addr || size == 0) return;
+
+    /* Align to cache line boundary */
+    uintptr_t start = (uintptr_t)addr & ~(DMA_CACHE_LINE_SIZE - 1);
+    uintptr_t end = (uintptr_t)addr + size;
+
+    for (uintptr_t p = start; p < end; p += DMA_CACHE_LINE_SIZE) {
+        __asm__ volatile("dc ivac, %0" : : "r"((void*)p) : "memory");
+    }
+    cache_dsb();
 }
 
 #endif
