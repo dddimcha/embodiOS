@@ -50,3 +50,37 @@ int tinystories_model_embedded(void) {
 int tokenizer_embedded(void) {
     return _tokenizer_present;
 }
+
+/* ============================================================================
+ * GGUF Model Stubs
+ * ============================================================================ */
+
+/* Weak flag - 0 by default, overridden to 1 when GGUF model embedded */
+int _gguf_model_present __attribute__((weak)) = 0;
+
+/* Placeholder stubs - only used when GGUF model not embedded */
+const uint8_t _binary_gguf_model_start[1] __attribute__((weak)) = {0};
+const uint8_t _binary_gguf_model_end[1] __attribute__((weak)) = {0};
+
+/**
+ * Check if GGUF model is embedded
+ * Returns 1 if embedded, 0 if using stubs
+ */
+int gguf_model_embedded(void) {
+    return _gguf_model_present;
+}
+
+/**
+ * Get embedded GGUF model data
+ * Returns pointer to embedded data and size via out parameter
+ */
+const uint8_t* get_embedded_gguf_model(size_t* out_size) {
+    if (!_gguf_model_present) {
+        if (out_size) *out_size = 0;
+        return NULL;
+    }
+    if (out_size) {
+        *out_size = (size_t)(_binary_gguf_model_end - _binary_gguf_model_start);
+    }
+    return _binary_gguf_model_start;
+}

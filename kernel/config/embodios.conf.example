@@ -1,0 +1,42 @@
+# EMBODIOS Configuration File
+# Copy to embodios.conf and modify as needed
+
+# Boot mode: normal, debug, safe
+boot.mode=normal
+
+# Serial console settings
+serial.enabled=true
+serial.port=COM1
+serial.baud=115200
+
+# Memory settings
+memory.heap_size=256M
+memory.model_cache=512M
+
+# AI Model settings
+model.default=tinystories-15m
+model.path=/models
+model.max_context=2048
+model.batch_size=512
+
+# Inference settings
+inference.threads=1
+inference.use_simd=true
+inference.use_avx2=true
+
+# Network settings
+network.enabled=true
+network.driver=auto
+
+# Debug settings
+debug.console_level=info
+debug.gdb_stub=false
+debug.profiling=false
+
+# Storage settings
+storage.nvme_enabled=true
+storage.virtio_enabled=true
+
+# Display settings
+display.vga_mode=text
+display.resolution=80x25

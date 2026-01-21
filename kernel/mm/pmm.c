@@ -31,8 +31,11 @@ static struct {
     size_t total_pages;
     size_t free_pages;
     bool initialized;
+    /* Simple linear allocator state */
+    size_t next_free_page;  /* Next page index to allocate */
 } pmm_state = {
-    .initialized = false
+    .initialized = false,
+    .next_free_page = 0
 };
 
 /* Bitmap operations */
@@ -158,49 +161,49 @@ static void merge_blocks(size_t page, uint32_t order)
 void pmm_init(void* start, size_t size)
 {
     console_printf("PMM: Initializing with %zu MB at %p\n", size / (1024 * 1024), start);
-    
+
     /* Align start and size */
     start = (void*)ALIGN_UP((uintptr_t)start, PAGE_SIZE);
     size = ALIGN_DOWN(size, PAGE_SIZE);
-    
+
+    console_printf("PMM: Aligned start=%p, size=%zu\n", start, size);
+
     pmm_state.mem_start = start;
     pmm_state.mem_end = (void*)((uintptr_t)start + size);
     pmm_state.total_pages = size >> PAGE_SHIFT;
     pmm_state.free_pages = 0;
-    
+
+    console_printf("PMM: Total pages=%zu\n", pmm_state.total_pages);
+
     /* Allocate bitmap (use first pages of memory) */
     size_t bitmap_pages = ALIGN_UP(pmm_state.total_pages / 8, PAGE_SIZE) >> PAGE_SHIFT;
+    console_printf("PMM: Bitmap pages=%zu\n", bitmap_pages);
+
     pmm_state.bitmap = (uint8_t*)start;
+    console_printf("PMM: Clearing bitmap...\n");
     memset(pmm_state.bitmap, 0, bitmap_pages << PAGE_SHIFT);
+    console_printf("PMM: Bitmap cleared\n");
     
+    console_printf("PMM: Marking bitmap pages...\n");
     /* Mark bitmap pages as used */
     for (size_t i = 0; i < bitmap_pages; i++) {
         bitmap_set(i);
     }
-    
+
+    console_printf("PMM: Initializing free lists...\n");
     /* Initialize free lists */
     for (int i = 0; i <= MAX_ORDER; i++) {
         pmm_state.free_lists[i].head = NULL;
         pmm_state.free_lists[i].count = 0;
     }
-    
-    /* Add all free memory to buddy allocator */
-    size_t current_page = bitmap_pages;
-    while (current_page < pmm_state.total_pages) {
-        /* Find largest power-of-2 block that fits */
-        uint32_t order = MAX_ORDER;
-        while (order > 0 && (current_page + (1UL << order)) > pmm_state.total_pages) {
-            order--;
-        }
-        
-        /* Add block to free list */
-        struct page_block* block = (struct page_block*)page_to_addr(current_page);
-        free_list_add(block, order);
-        pmm_state.free_pages += 1UL << order;
-        
-        current_page += 1UL << order;
-    }
-    
+
+    console_printf("PMM: Setting up linear allocator...\n");
+    /* Simple linear allocator: start allocating after bitmap pages */
+    pmm_state.next_free_page = bitmap_pages;
+    pmm_state.free_pages = pmm_state.total_pages - bitmap_pages;
+    console_printf("PMM: %zu pages available starting at page %zu\n",
+                   pmm_state.free_pages, pmm_state.next_free_page);
+
     pmm_state.initialized = true;
     
     console_printf("PMM: Initialized with %zu free pages (%zu MB)\n", 
@@ -213,52 +216,32 @@ void* pmm_alloc_page(void)
     return pmm_alloc_pages(1);
 }
 
-/* Allocate multiple pages */
+/* Allocate multiple pages - simple linear allocator */
 void* pmm_alloc_pages(size_t count)
 {
-    if (!pmm_state.initialized || count == 0 || count > (1UL << MAX_ORDER)) {
+    if (!pmm_state.initialized || count == 0) {
         return NULL;
     }
-    
-    /* Find order for requested pages */
-    uint32_t order = 0;
-    size_t size = 1;
-    while (size < count) {
-        size <<= 1;
-        order++;
-    }
-    
-    /* Find a free block */
-    struct page_block* block = NULL;
-    for (uint32_t current_order = order; current_order <= MAX_ORDER; current_order++) {
-        if (pmm_state.free_lists[current_order].head) {
-            block = pmm_state.free_lists[current_order].head;
-            free_list_remove(block, current_order);
-            
-            /* Split if necessary */
-            if (current_order > order) {
-                block = split_block(block, current_order, order);
-            }
-            break;
-        }
-    }
-    
-    if (!block) {
+
+    /* Check if we have enough pages */
+    if (pmm_state.next_free_page + count > pmm_state.total_pages) {
         return NULL;  /* Out of memory */
     }
-    
-    /* Mark pages as allocated */
-    size_t page = addr_to_page(block);
-    for (size_t i = 0; i < (1UL << order); i++) {
-        bitmap_set(page + i);
-    }
-    
-    pmm_state.free_pages -= 1UL << order;
-    
-    /* Clear the allocated memory */
-    memset(block, 0, (1UL << order) << PAGE_SHIFT);
-    
-    return block;
+
+    /* Allocate consecutive pages */
+    size_t page = pmm_state.next_free_page;
+    void* addr = page_to_addr(page);
+
+    /* Skip bitmap marking for speed - linear allocator doesn't need it */
+
+    /* Advance the allocator */
+    pmm_state.next_free_page += count;
+    pmm_state.free_pages -= count;
+
+    /* Skip memset for large allocations - caller can zero if needed */
+    /* This avoids 700MB+ memset which takes forever */
+
+    return addr;
 }
 
 /* Free a single page */

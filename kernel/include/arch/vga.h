@@ -18,4 +18,7 @@ void vga_clear(void);
 void vga_set_color(uint8_t color);
 void vga_set_cursor(uint16_t pos);
 
+/* Batch write - optimized for multiple characters (single cursor update) */
+void vga_write_batch(const char* buf, size_t len);
+
 #endif /* ARCH_VGA_H */
