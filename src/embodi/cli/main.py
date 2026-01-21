@@ -357,14 +357,33 @@ def bundle_create(ctx, model, output, target, arch, memory, features, compress):
 def bundle_write(ctx, bundle, device, verify):
     """Write bundle to USB device"""
     from embodi.installer.bundle.bundler import EMBODIOSBundler
-    
+
     bundler = EMBODIOSBundler()
-    
+
     if bundler.write_bundle(bundle, device, verify):
         console.print("[bold green]✓ Bundle written successfully[/bold green]")
     else:
         console.print("[bold red]✗ Failed to write bundle[/bold red]")
         sys.exit(1)
+
+@cli.group()
+@click.pass_context
+def update(ctx):
+    """Manage EMBODIOS updates"""
+    pass
+
+@update.command('check')
+@click.pass_context
+def update_check(ctx):
+    """Check for EMBODIOS updates
+
+    Examples:
+        embodi update check
+    """
+    console.print("[bold blue]Checking for updates...[/bold blue]")
+
+    # Placeholder implementation - will be implemented in later subtasks
+    console.print("[yellow]Update check not yet implemented[/yellow]")
 
 def main():
     """Main entry point"""
