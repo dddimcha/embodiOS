@@ -1,45 +1,58 @@
-/* EMBODIOS ARM64 Kernel Linker Script */
+/* EMBODIOS ARM64 Kernel Linker Script
+ * For QEMU virt machine (ARM64)
+ */
 
 ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x40000000;  /* Typical ARM64 kernel load address */
+    /* QEMU virt machine loads kernel at 0x40000000 */
+    . = 0x40000000;
+
     _kernel_start = .;
-    
+
     .text : {
-        *(.text.boot)
+        *(.text.boot)   /* Boot code first */
         *(.text)
         *(.text.*)
     }
-    
+
     .rodata : {
         *(.rodata)
         *(.rodata.*)
     }
-    
+
     .data : {
         *(.data)
         *(.data.*)
     }
-    
+
     .bss : {
         . = ALIGN(16);
-        _bss_start = .;
+        __bss_start = .;
+        _bss_start = .;     /* Alias for compatibility */
         *(.bss)
         *(.bss.*)
         *(COMMON)
         . = ALIGN(16);
-        _bss_end = .;
+        __bss_end = .;
+        _bss_end = .;       /* Alias for compatibility */
     }
-    
-    /* Model weights section */
+
+    /* Model weights section (for embedded models) */
     .model_weights : {
+        . = ALIGN(8);
         _model_weights_start = .;
         *(.model_weights)
         _model_weights_end = .;
     }
-    
-    /* End of kernel */
+
     _kernel_end = .;
+
+    /* Discard unwanted sections */
+    /DISCARD/ : {
+        *(.comment)
+        *(.note*)
+        *(.eh_frame*)
+    }
 }

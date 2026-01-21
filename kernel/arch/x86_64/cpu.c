@@ -4,6 +4,12 @@
 #include <embodios/console.h>
 #include "vga_io.h"
 
+/* Debug serial output for cpu.c */
+static inline void cpu_debug_char(char c) {
+    while (!(inb(0x3FD) & 0x20));
+    outb(0x3F8, c);
+}
+
 /* CPUID functions */
 #define CPUID_VENDOR        0x00000000
 #define CPUID_FEATURES      0x00000001
@@ -54,9 +60,12 @@ uint32_t cpu_get_id(void)
 void cpu_init(void)
 {
     uint32_t eax, ebx, ecx, edx;
-    
+
+    cpu_debug_char('1');
+
     /* Get vendor string */
     cpuid(CPUID_VENDOR, &eax, &ebx, &ecx, &edx);
+    cpu_debug_char('2');
     *((uint32_t*)&cpu_info.vendor[0]) = ebx;
     *((uint32_t*)&cpu_info.vendor[4]) = edx;
     *((uint32_t*)&cpu_info.vendor[8]) = ecx;
@@ -96,15 +105,23 @@ void cpu_init(void)
     if (ecx & CPUID_FEAT_ECX_AVX)
         cpu_info.features |= CPU_FEATURE_AVX;
     
+    cpu_debug_char('3');
+
     /* Check extended features */
     cpuid(7, &eax, &ebx, &ecx, &edx);
     if (ebx & CPUID_FEAT7_EBX_AVX2)
         cpu_info.features |= CPU_FEATURE_AVX2;
     if (ebx & CPUID_FEAT7_EBX_AVX512F)
         cpu_info.features |= CPU_FEATURE_AVX512;
-    
+
+    cpu_debug_char('4');
+
     /* Get brand string */
     cpuid(CPUID_EXT_MAX, &eax, &ebx, &ecx, &edx);
+    cpu_debug_char('5');
+    /* Skip brand string detection to avoid potential hang */
+    cpu_info.model[0] = '\0';
+#if 0
     if (eax >= CPUID_BRAND_STRING + 2) {
         uint32_t* model = (uint32_t*)cpu_info.model;
         for (int i = 0; i < 3; i++) {
@@ -116,18 +133,23 @@ void cpu_init(void)
         }
         cpu_info.model[47] = '\0';
     }
-    
+#endif
+    cpu_debug_char('6');
+
     /* Count logical processors */
     cpuid(1, &eax, &ebx, &ecx, &edx);
     cpu_info.cores = (ebx >> 16) & 0xFF;
     if (cpu_info.cores == 0) cpu_info.cores = 1;
+    cpu_debug_char('7');
 }
 
 /* Architecture-specific initialization */
 void arch_cpu_init(void)
 {
+    cpu_debug_char('C');
     cpu_init();
-    
+    cpu_debug_char('D');
+
     console_printf("CPU: %s\n", cpu_info.vendor);
     console_printf("Model: %s\n", cpu_info.model);
     console_printf("Family: %u, Model: %u, Stepping: %u\n", 

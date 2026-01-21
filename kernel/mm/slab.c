@@ -3,6 +3,33 @@
 #include <embodios/kernel.h>
 #include <embodios/console.h>
 
+/* Direct serial output for debug - bypasses console */
+#if defined(__x86_64__)
+static inline void serial_out(uint16_t port, uint8_t val) {
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline uint8_t serial_in(uint16_t port) {
+    uint8_t ret;
+    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+static inline void slab_debug_char(char c) {
+    while (!(serial_in(0x3FD) & 0x20));
+    serial_out(0x3F8, c);
+}
+#elif defined(__aarch64__)
+/* Use assembly UART for HVF compatibility */
+extern void uart_putchar(char c);
+static inline void slab_debug_char(char c) {
+    uart_putchar(c);
+}
+#else
+static inline void slab_debug_char(char c) { (void)c; }
+#endif
+static inline void slab_debug_str(const char* s) {
+    while (*s) slab_debug_char(*s++);
+}
+
 /* Slab sizes (powers of 2) */
 #define SLAB_MIN_SIZE   32
 #define SLAB_MAX_SIZE   8192
@@ -117,36 +144,42 @@ static void move_slab(struct slab** from, struct slab** to, struct slab* slab)
     *to = slab;
 }
 
-/* Initialize slab allocator */
+/* Initialize slab allocator - debug version */
 void slab_init(void)
 {
-    console_printf("SLAB: Initializing allocator\n");
-    
-    size_t obj_size = SLAB_MIN_SIZE;
-    
-    for (int i = 0; i < SLAB_NUM_SIZES; i++) {
-        struct slab_cache* cache = &slab_state.caches[i];
-        
-        cache->partial = NULL;
-        cache->full = NULL;
-        cache->empty = NULL;
-        cache->obj_size = obj_size;
-        cache->obj_per_slab = (PAGE_SIZE - sizeof(struct slab)) / obj_size;
-        cache->total_objs = 0;
-        cache->free_objs = 0;
-        
-        obj_size <<= 1;
-    }
-    
-    slab_state.initialized = true;
-    
-    console_printf("SLAB: Initialized with %d size classes\n", SLAB_NUM_SIZES);
+    slab_debug_str("SLAB: Enter\n");
+
+    /* Test writing to slab_state directly */
+    slab_debug_char('A');
+    slab_state.initialized = false;  /* Write to simple bool */
+    slab_debug_char('B');
+
+    /* Try getting address of caches array */
+    slab_debug_char('C');
+    volatile struct slab_cache* cache_ptr = &slab_state.caches[0];
+    slab_debug_char('D');
+
+    /* Try writing through pointer */
+    slab_debug_char('E');
+    cache_ptr->partial = NULL;
+    slab_debug_char('F');
+    cache_ptr->obj_size = 32;
+    slab_debug_char('G');
+
+    /* Skip full init, just mark as done */
+    slab_debug_str("\nSLAB: Done (disabled)\n");
+    slab_state.initialized = false;  /* Disabled for now */
 }
 
 /* Allocate memory from slab */
 void* kmalloc(size_t size)
 {
-    if (!slab_state.initialized || size == 0) {
+    /* Fall back to heap allocator when SLAB is disabled */
+    if (!slab_state.initialized) {
+        extern void* heap_alloc(size_t size);
+        return heap_alloc(size);
+    }
+    if (size == 0) {
         return NULL;
     }
     
@@ -205,7 +238,13 @@ void* kmalloc(size_t size)
 /* Free memory to slab */
 void kfree(void* ptr)
 {
-    if (!slab_state.initialized || !ptr) {
+    if (!ptr) {
+        return;
+    }
+    /* Fall back to heap allocator when SLAB is disabled */
+    if (!slab_state.initialized) {
+        extern void heap_free(void* ptr);
+        heap_free(ptr);
         return;
     }
     

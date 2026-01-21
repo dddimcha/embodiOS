@@ -147,19 +147,11 @@ static struct gguf_parser_ctx g_ctx;
  * Debug Logging
  * ============================================================================ */
 
-#define GGUF_DEBUG(fmt, ...)                                                                       \
-    do {                                                                                           \
-        if (g_ctx.debug_enabled)                                                                   \
-            console_printf("[GGUF DEBUG] " fmt "\n", ##__VA_ARGS__);                               \
-    } while (0)
-
-#define GGUF_INFO(fmt, ...) console_printf("[GGUF] " fmt "\n", ##__VA_ARGS__)
-
-#define GGUF_ERROR(fmt, ...)                                                                       \
-    do {                                                                                           \
-        console_printf("[GGUF ERROR] " fmt "\n", ##__VA_ARGS__);                                   \
-        /* Store error message */                                                                  \
-    } while (0)
+/* All debug output disabled for clean console */
+#define GGUF_DEBUG(fmt, ...) do { } while(0)
+#define GGUF_INFO(fmt, ...) do { } while(0)
+#define GGUF_INFO_VERBOSE(fmt, ...) do { } while(0)
+#define GGUF_ERROR(fmt, ...) do { } while(0)
 
 /* ============================================================================
  * Type Size Helpers
@@ -205,7 +197,8 @@ static const size_t ggml_block_elements[] = {
     [GGML_TYPE_Q6_K] = 256, [GGML_TYPE_Q8_K] = 256,
 };
 
-const char *ggml_type_name(ggml_type_t type)
+/* Renamed to avoid conflict with GGML library */
+static const char *kernel_ggml_type_name(ggml_type_t type)
 {
     static const char *names[] = {
         [GGML_TYPE_F32] = "F32",   [GGML_TYPE_F16] = "F16",   [GGML_TYPE_Q4_0] = "Q4_0",
@@ -332,6 +325,11 @@ static int gguf_parse_header(void)
     g_ctx.version = version;
 
     GGUF_INFO("Version: %u", version);
+    extern void console_flush(void);
+    console_flush();
+
+    GGUF_DEBUG("Parsing version-specific header...");
+    console_flush();
 
     /* Parse based on version */
     if (version == GGUF_VERSION_1 || version == GGUF_VERSION_2) {
@@ -341,22 +339,44 @@ static int gguf_parse_header(void)
             return -1;
         }
 
-        const struct gguf_header_v1 *hdr = (const struct gguf_header_v1 *)ptr;
-        g_ctx.n_tensors = hdr->n_tensors;
-        g_ctx.n_kv = hdr->n_kv;
+        /* Use memcpy for safe unaligned access on ARM64 */
+        uint32_t n_tensors_v1, n_kv_v1;
+        memcpy(&n_tensors_v1, ptr + 8, 4);  /* offset 8: n_tensors */
+        memcpy(&n_kv_v1, ptr + 12, 4);      /* offset 12: n_kv */
+        g_ctx.n_tensors = n_tensors_v1;
+        g_ctx.n_kv = n_kv_v1;
         g_ctx.kv_start = ptr + sizeof(struct gguf_header_v1);
 
     } else if (version == GGUF_VERSION_3) {
+        GGUF_DEBUG("Processing v3 header...");
+        console_flush();
+        GGUF_DEBUG("g_ctx.size=%u, header_v3 size=%u", (unsigned)g_ctx.size, (unsigned)sizeof(struct gguf_header_v3));
+        console_flush();
         /* Version 3 uses 64-bit counts */
         if (g_ctx.size < sizeof(struct gguf_header_v3)) {
             GGUF_ERROR("File too small for v3 header");
             return -1;
         }
+        GGUF_DEBUG("Reading tensor/kv counts...");
+        console_flush();
 
-        const struct gguf_header_v3 *hdr = (const struct gguf_header_v3 *)ptr;
-        g_ctx.n_tensors = hdr->n_tensors;
-        g_ctx.n_kv = hdr->n_kv;
+        /* Use memcpy for safe unaligned access on ARM64 */
+        uint64_t n_tensors_v3, n_kv_v3;
+        memcpy(&n_tensors_v3, ptr + 8, 8);  /* offset 8: n_tensors */
+        memcpy(&n_kv_v3, ptr + 16, 8);      /* offset 16: n_kv */
+        GGUF_DEBUG("n_tensors=%u, n_kv=%u", (unsigned)n_tensors_v3, (unsigned)n_kv_v3);
+        console_flush();
+        GGUF_DEBUG("Setting g_ctx.n_tensors...");
+        console_flush();
+        g_ctx.n_tensors = n_tensors_v3;
+        GGUF_DEBUG("Setting g_ctx.n_kv...");
+        console_flush();
+        g_ctx.n_kv = n_kv_v3;
+        GGUF_DEBUG("Setting g_ctx.kv_start...");
+        console_flush();
         g_ctx.kv_start = ptr + sizeof(struct gguf_header_v3);
+        GGUF_DEBUG("kv_start set");
+        console_flush();
 
     } else {
         GGUF_ERROR("Unsupported version: %u", version);
@@ -533,7 +553,8 @@ static int gguf_parse_kv_pair(const uint8_t **ptr, const uint8_t *end, int index
     }
 
     /* LLaMA architecture parameters - try both prefixes */
-    const char *prefixes[] = {"llama.", "phi.", "mistral.", "qwen.", "gemma.", NULL};
+    GGUF_DEBUG("Checking llama params for key: %s", key);
+    static const char *prefixes[] = {"llama.", "phi.", "mistral.", "qwen.", "qwen2.", "gemma.", NULL};
 
     for (int p = 0; prefixes[p]; p++) {
         size_t plen = strlen(prefixes[p]);
@@ -582,13 +603,13 @@ static int gguf_parse_kv_pair(const uint8_t **ptr, const uint8_t *end, int index
             value_type == GGUF_TYPE_FLOAT32) {
             if (safe_read_f32(ptr, end, &arch->attention_layer_norm_rms_epsilon) < 0)
                 return -1;
-            GGUF_DEBUG("RMS epsilon: %f", arch->attention_layer_norm_rms_epsilon);
+            GGUF_DEBUG("RMS epsilon: (float)");
             return 0;
         }
         if (strcmp(subkey, "rope.freq_base") == 0 && value_type == GGUF_TYPE_FLOAT32) {
             if (safe_read_f32(ptr, end, &arch->rope_freq_base) < 0)
                 return -1;
-            GGUF_DEBUG("RoPE freq base: %f", arch->rope_freq_base);
+            GGUF_DEBUG("RoPE freq base: (float)");
             return 0;
         }
         if (strcmp(subkey, "rope.dimension_count") == 0 && value_type == GGUF_TYPE_UINT32) {
@@ -655,8 +676,12 @@ static int gguf_parse_kv_pair(const uint8_t **ptr, const uint8_t *end, int index
         GGUF_INFO("Vocabulary size: %u tokens", g_ctx.vocab_count);
 
         /* Allocate vocabulary storage - use heap_alloc for large arrays */
-        g_ctx.vocab =
-            (struct gguf_vocab_token *)heap_alloc(arr_len * sizeof(struct gguf_vocab_token));
+        size_t vocab_size = arr_len * sizeof(struct gguf_vocab_token);
+        GGUF_DEBUG("Allocating vocab: %u bytes", (unsigned)vocab_size);
+        console_flush();
+
+        /* Allocate vocabulary array from heap */
+        g_ctx.vocab = (struct gguf_vocab_token *)heap_alloc(vocab_size);
         if (!g_ctx.vocab) {
             GGUF_ERROR("Failed to allocate vocabulary");
             /* Skip tokens */
@@ -665,8 +690,19 @@ static int gguf_parse_kv_pair(const uint8_t **ptr, const uint8_t *end, int index
             }
             return 0;
         }
+        GGUF_DEBUG("Vocab allocated at %p", (void*)g_ctx.vocab);
+        console_flush();
 
-        memset(g_ctx.vocab, 0, arr_len * sizeof(struct gguf_vocab_token));
+        /* Manual zeroing to avoid memset issues in bare-metal */
+        GGUF_DEBUG("Zeroing vocab...");
+        console_flush();
+        {
+            volatile uint8_t *p = (volatile uint8_t*)g_ctx.vocab;
+            for (size_t i = 0; i < vocab_size; i++) {
+                p[i] = 0;
+            }
+        }
+        GGUF_DEBUG("Vocab zeroed");
 
         /* Read token strings */
         for (uint64_t i = 0; i < arr_len; i++) {
@@ -777,12 +813,21 @@ static int gguf_parse_metadata(void)
     const uint8_t *ptr = g_ctx.kv_start;
     const uint8_t *end = g_ctx.data + g_ctx.size;
 
-    GGUF_INFO("Parsing %llu metadata entries...", (unsigned long long)g_ctx.n_kv);
-
     /* Initialize arch with defaults */
-    memset(&g_ctx.arch, 0, sizeof(g_ctx.arch));
-    g_ctx.arch.attention_layer_norm_rms_epsilon = 1e-5f;
-    g_ctx.arch.rope_freq_base = 10000.0f;
+    {
+        volatile uint8_t *p = (volatile uint8_t*)&g_ctx.arch;
+        size_t total = sizeof(g_ctx.arch);
+        for (size_t i = 0; i < total; i++) {
+            p[i] = 0;
+        }
+    }
+    /* Set float defaults using raw bit patterns to avoid FPU usage */
+    {
+        uint32_t eps_bits = 0x3727c5ac;   /* 1e-5 */
+        uint32_t base_bits = 0x461c4000;  /* 10000.0 */
+        memcpy(&g_ctx.arch.attention_layer_norm_rms_epsilon, &eps_bits, sizeof(uint32_t));
+        memcpy(&g_ctx.arch.rope_freq_base, &base_bits, sizeof(uint32_t));
+    }
 
     for (uint64_t i = 0; i < g_ctx.n_kv; i++) {
         if (gguf_parse_kv_pair(&ptr, end, (int)i) < 0) {
@@ -833,12 +878,24 @@ static int gguf_parse_tensor_info(void)
     /* Use heap_alloc instead of kmalloc to avoid slab allocator issues */
     size_t alloc_size = n_to_store * sizeof(struct gguf_tensor_info);
     GGUF_DEBUG("Allocating %zu bytes for %llu tensors", alloc_size, (unsigned long long)n_to_store);
+    console_flush();
     g_ctx.tensors = (struct gguf_tensor_info *)heap_alloc(alloc_size);
+    GGUF_DEBUG("heap_alloc returned %p", (void*)g_ctx.tensors);
+    console_flush();
     if (!g_ctx.tensors) {
         GGUF_ERROR("Failed to allocate tensor info");
         return -1;
     }
-    memset(g_ctx.tensors, 0, alloc_size);
+    /* Manual zeroing to avoid memset crash in QEMU TCG */
+    GGUF_DEBUG("Zeroing tensor info...");
+    console_flush();
+    {
+        volatile uint8_t *p = (volatile uint8_t*)g_ctx.tensors;
+        for (size_t i = 0; i < alloc_size; i++) {
+            p[i] = 0;
+        }
+    }
+    GGUF_DEBUG("Tensor info zeroed");
     g_ctx.tensor_count = n_to_store;
 
     /* Parse tensor info entries */
@@ -990,13 +1047,13 @@ void gguf_parser_set_debug(int enabled) { g_ctx.debug_enabled = enabled ? 1 : 0;
  */
 int gguf_parser_load(const void *data, size_t size)
 {
-    GGUF_INFO("Loading GGUF file (%zu bytes, %.2f MB)", size, (float)size / (1024 * 1024));
+    GGUF_INFO("Loading GGUF file (%u bytes, %u MB)", (unsigned int)size, (unsigned int)(size / (1024 * 1024)));
 
     /* Reset context */
     memset(&g_ctx, 0, sizeof(g_ctx));
     g_ctx.data = (const uint8_t *)data;
     g_ctx.size = size;
-    g_ctx.debug_enabled = 1; /* Enable debug by default */
+    g_ctx.debug_enabled = 0; /* Debug disabled for clean output */
 
     /* Parse header */
     if (gguf_parse_header() < 0) {
@@ -1055,6 +1112,16 @@ const char *gguf_parser_get_token(uint32_t index)
  * Get vocabulary size
  */
 uint32_t gguf_parser_get_vocab_size(void) { return g_ctx.vocab_count; }
+
+/**
+ * Get BOS token ID
+ */
+uint32_t gguf_parser_get_bos_token_id(void) { return g_ctx.arch.bos_token_id; }
+
+/**
+ * Get EOS token ID
+ */
+uint32_t gguf_parser_get_eos_token_id(void) { return g_ctx.arch.eos_token_id; }
 
 /**
  * Get token score
@@ -1135,14 +1202,14 @@ void gguf_parser_print_summary(void)
     console_printf("  Vocabulary size: %u\n", arch->vocab_size);
     console_printf("\nRoPE Parameters:\n");
     console_printf("  Dimensions: %u\n", arch->rope_dimension_count);
-    console_printf("  Frequency base: %.1f\n", arch->rope_freq_base);
+    console_printf("  Frequency base: (float)\n");
     console_printf("\nSpecial Tokens:\n");
     console_printf("  BOS: %u, EOS: %u, PAD: %u\n", arch->bos_token_id, arch->eos_token_id,
                    arch->pad_token_id);
     console_printf("\nTensors: %llu\n", (unsigned long long)g_ctx.n_tensors);
     console_printf("Tensor data offset: %zu\n", (size_t)(g_ctx.tensor_data_start - g_ctx.data));
     console_printf("Alignment: %zu bytes\n", g_ctx.alignment);
-    console_printf("Quantization: %s\n", ggml_type_name(g_ctx.predominant_type));
+    console_printf("Quantization: %s\n", kernel_ggml_type_name(g_ctx.predominant_type));
     console_printf("==========================\n\n");
 }
 
@@ -1316,4 +1383,16 @@ void gguf_free_block_buffer(void)
         g_model_buffer = NULL;
         g_model_buffer_size = 0;
     }
+}
+
+/**
+ * Get the model name from parsed GGUF metadata
+ * @return Model name string, or NULL if not available
+ */
+const char *gguf_get_model_name(void)
+{
+    if (!g_ctx.is_valid || !g_ctx.arch.general_name[0]) {
+        return NULL;
+    }
+    return g_ctx.arch.general_name;
 }

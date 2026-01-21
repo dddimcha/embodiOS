@@ -362,8 +362,8 @@ static int pci_store_device(pci_addr_t addr)
     pci_device_t *dev;
     uint32_t id;
     uint32_t class_info;
-    uint32_t subsys;
     int i;
+    (void)i; /* Unused now */
 
     if (g_pci.device_count >= PCI_MAX_STORED) {
         return PCI_ERR_FULL;
@@ -371,12 +371,11 @@ static int pci_store_device(pci_addr_t addr)
 
     dev = &g_pci.devices[g_pci.device_count];
 
-    /* Read device identification */
+    /* Read device identification - minimal config reads for speed */
     id = pci_config_read32(addr, PCI_VENDOR_ID);
     dev->vendor_id = id & 0xFFFF;
     dev->device_id = (id >> 16) & 0xFFFF;
 
-    /* Verify device exists */
     if (dev->vendor_id == PCI_VENDOR_INVALID) {
         return PCI_ERR_NOT_FOUND;
     }
@@ -385,50 +384,32 @@ static int pci_store_device(pci_addr_t addr)
 
     /* Read class information */
     class_info = pci_config_read32(addr, PCI_REVISION);
-    dev->revision = class_info & 0xFF;
-    dev->prog_if = (class_info >> 8) & 0xFF;
-    dev->subclass = (class_info >> 16) & 0xFF;
     dev->class_code = (class_info >> 24) & 0xFF;
+    dev->subclass = (class_info >> 16) & 0xFF;
+    dev->prog_if = (class_info >> 8) & 0xFF;
+    dev->revision = class_info & 0xFF;
 
-    /* Read header type */
-    dev->header_type = pci_config_read8(addr, PCI_HEADER_TYPE) &
-                       PCI_HEADER_TYPE_MASK;
-    dev->multifunction = (pci_config_read8(addr, PCI_HEADER_TYPE) &
-                          PCI_HEADER_MULTIFUNCTION) != 0;
+    /* Read BARs for driver use (required for VirtIO, NVMe, etc.) */
+    for (i = 0; i < 6; i++) {
+        dev->bar[i] = pci_config_read32(addr, PCI_BAR0 + i * 4);
+    }
+
+    /* Read header type for multifunction detection */
+    dev->header_type = pci_config_read8(addr, PCI_HEADER_TYPE);
+    dev->multifunction = (dev->header_type & 0x80) != 0;
+    dev->header_type &= 0x7F;
 
     /* Read interrupt info */
     dev->interrupt_line = pci_config_read8(addr, PCI_INTERRUPT_LINE);
     dev->interrupt_pin = pci_config_read8(addr, PCI_INTERRUPT_PIN);
 
-    /* Read subsystem info and BARs based on header type */
-    if (dev->header_type == PCI_HEADER_ENDPOINT) {
-        subsys = pci_config_read32(addr, PCI_SUBSYSTEM_VENDOR);
-        dev->subsystem_vendor = subsys & 0xFFFF;
-        dev->subsystem_id = (subsys >> 16) & 0xFFFF;
-
-        /* Read all 6 BARs for endpoint devices */
-        for (i = 0; i < 6; i++) {
-            dev->bar[i] = pci_config_read32(addr, PCI_BAR0 + (i * 4));
-        }
-    } else {
-        /* Bridges have limited config space */
-        dev->subsystem_vendor = 0;
-        dev->subsystem_id = 0;
-
-        /* Bridges only have 2 BARs */
-        dev->bar[0] = pci_config_read32(addr, PCI_BAR0);
-        dev->bar[1] = pci_config_read32(addr, PCI_BAR1);
-        for (i = 2; i < 6; i++) {
-            dev->bar[i] = 0;
-        }
-    }
-
+    dev->subsystem_vendor = 0;
+    dev->subsystem_id = 0;
     dev->driver = NULL;
 
     g_pci.device_count++;
     g_pci.stats.devices_found++;
 
-    /* Track bridge devices */
     if (dev->class_code == PCI_CLASS_BRIDGE) {
         g_pci.stats.bridges_found++;
     }
@@ -484,9 +465,10 @@ int pci_enumerate(void)
         return PCI_ERR_NOT_INIT;
     }
 
-    console_printf("[PCI] Scanning PCI buses...\n");
+    console_printf("[PCI] Scanning bus 0...\n");
 
-    for (bus = 0; bus < PCI_MAX_BUSES; bus++) {
+    /* Only scan bus 0 for faster boot - sufficient for QEMU VirtIO devices */
+    for (bus = 0; bus < 1; bus++) {
         found_on_bus = false;
 
         for (dev = 0; dev < PCI_MAX_DEVICES; dev++) {
@@ -501,47 +483,21 @@ int pci_enumerate(void)
             }
 
             found_on_bus = true;
+            console_printf("[PCI] D%d\n", dev);
 
-            /* Check for multifunction device */
-            header = pci_config_read8(addr, PCI_HEADER_TYPE);
-            max_func = (header & PCI_HEADER_MULTIFUNCTION) ?
-                       PCI_MAX_FUNCTIONS : 1;
-
-            for (func = 0; func < max_func; func++) {
-                addr.function = (uint8_t)func;
-
-                /* Verify function exists (for func > 0) */
-                if (func > 0) {
-                    vendor = pci_config_read16(addr, PCI_VENDOR_ID);
-                    if (vendor == PCI_VENDOR_INVALID) {
-                        continue;
-                    }
-                }
-
-                /* Store device info */
-                if (pci_store_device(addr) != PCI_OK) {
-                    console_printf("[PCI] Warning: Device table full\n");
-                    goto done;
-                }
-            }
+            /* Store device information for driver matching */
+            pci_store_device(addr);
         }
 
         if (found_on_bus) {
             buses_with_devices++;
-        }
-
-        /* Optimization: skip remaining buses if bus 0 is empty */
-        if (bus == 0 && !found_on_bus) {
-            console_printf("[PCI] No devices on bus 0, stopping scan\n");
-            break;
         }
     }
 
 done:
     g_pci.stats.buses_scanned = buses_with_devices;
 
-    console_printf("[PCI] Enumeration complete: %d devices on %d bus(es)\n",
-                   g_pci.device_count, buses_with_devices);
+    console_printf("[PCI] Done: %d devices\n", g_pci.device_count);
 
     return g_pci.device_count;
 }

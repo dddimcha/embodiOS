@@ -45,6 +45,13 @@ struct bpe_vocab_entry {
 };
 
 /**
+ * Tokenizer types - determines preprocessing style
+ */
+#define BPE_TYPE_UNKNOWN      0
+#define BPE_TYPE_SENTENCEPIECE 1  /* LLaMA/SentencePiece style - uses ▁ for spaces */
+#define BPE_TYPE_GPT2         2  /* GPT-2/BPE style - uses Ġ for spaces */
+
+/**
  * BPE tokenizer state
  */
 static struct {
@@ -55,7 +62,15 @@ static struct {
     uint32_t bos_token;                  /* BOS token ID */
     uint32_t eos_token;                  /* EOS token ID */
     uint32_t unk_token;                  /* UNK token ID */
+    int tokenizer_type;                  /* BPE_TYPE_* - preprocessing style */
     bool initialized;
+
+    /* Memory pools for O(1) allocation */
+    struct bpe_vocab_entry *entry_pool;  /* Pre-allocated entry pool */
+    uint32_t entry_pool_idx;             /* Next free entry index */
+    char *text_pool;                     /* Pre-allocated text pool */
+    size_t text_pool_idx;                /* Next free text position */
+    size_t text_pool_size;               /* Total text pool size */
 } g_bpe = {0};
 
 /* ============================================================================
@@ -89,22 +104,25 @@ static uint32_t djb2_hash(const char *str, size_t len)
  */
 static int bpe_vocab_insert(const char *text, uint32_t token_id, float score)
 {
-    if (!text || !g_bpe.hash_table)
+    if (!text || !g_bpe.hash_table || !g_bpe.entry_pool || !g_bpe.text_pool)
         return -1;
 
     size_t len = strlen(text);
     if (len == 0 || len > BPE_MAX_TOKEN_LEN)
         return -1;
 
-    /* Allocate entry using heap_alloc (not kmalloc) */
-    struct bpe_vocab_entry *entry = heap_alloc(sizeof(struct bpe_vocab_entry));
-    if (!entry)
+    /* Check pool space */
+    if (g_bpe.entry_pool_idx >= g_bpe.vocab_size)
+        return -1;
+    if (g_bpe.text_pool_idx + len + 1 > g_bpe.text_pool_size)
         return -1;
 
-    entry->text = heap_alloc(len + 1);
-    if (!entry->text) {
-        return -1;
-    }
+    /* Allocate entry from pool - O(1) */
+    struct bpe_vocab_entry *entry = &g_bpe.entry_pool[g_bpe.entry_pool_idx++];
+
+    /* Allocate text from pool - O(1) */
+    entry->text = &g_bpe.text_pool[g_bpe.text_pool_idx];
+    g_bpe.text_pool_idx += len + 1;
 
     memcpy(entry->text, text, len);
     entry->text[len] = '\0';
@@ -211,20 +229,57 @@ static int bpe_encode_greedy(const char *text, int *tokens, int max_tokens)
 }
 
 /**
- * bpe_handle_sentencepiece_space - Handle SentencePiece space prefix
+ * bpe_preprocess_text - Preprocess text based on tokenizer type
  *
- * SentencePiece uses '▁' (U+2581) to represent spaces/word boundaries.
- * We need to convert spaces to this character for proper tokenization.
+ * For SentencePiece (LLaMA): Convert spaces to '▁' (U+2581)
+ * For GPT-2/BPE: Pass through as-is (vocab already has Ġ for spaces)
  */
 static int bpe_preprocess_text(const char *input, char *output, size_t max_len)
 {
     size_t in_pos = 0;
     size_t out_pos = 0;
     size_t in_len = strlen(input);
+
+    /* GPT-2 style: convert spaces to 'Ġ' (U+0120 = 0xC4 0xA0 in UTF-8)
+     * The vocab has tokens like "Ġupon" for " upon", so we need to convert
+     * ASCII space (0x20) to the Ġ prefix (0xC4 0xA0) before words.
+     */
+    if (g_bpe.tokenizer_type == BPE_TYPE_GPT2) {
+        bool at_word_start = false;  /* First word doesn't get space prefix */
+
+        while (in_pos < in_len && out_pos < max_len - 3) {
+            uint8_t c = (uint8_t)input[in_pos];
+
+            if (c == ' ' || c == '\t') {
+                /* Space - next non-space char gets Ġ prefix */
+                at_word_start = true;
+                in_pos++;
+            } else if (c == '\n' || c == '\r') {
+                /* Newline - copy as-is, next char gets prefix */
+                output[out_pos++] = (char)c;
+                at_word_start = true;
+                in_pos++;
+            } else {
+                /* Regular character - add Ġ prefix if preceded by space */
+                if (at_word_start) {
+                    /* Add Ġ prefix (U+0120 = 0xC4 0xA0 in UTF-8) */
+                    output[out_pos++] = (char)0xC4;
+                    output[out_pos++] = (char)0xA0;
+                }
+                output[out_pos++] = (char)c;
+                at_word_start = false;
+                in_pos++;
+            }
+        }
+        output[out_pos] = '\0';
+        return (int)out_pos;
+    }
+
+    /* SentencePiece style: convert spaces to ▁ marker */
     bool at_word_start = true;
 
     /* SentencePiece underscore: ▁ (U+2581) = 0xE2 0x96 0x81 in UTF-8 */
-    const char sp_space[] = {0xE2, 0x96, 0x81, 0};
+    const char sp_space[] = {(char)0xE2, (char)0x96, (char)0x81, 0};
 
     while (in_pos < in_len && out_pos < max_len - 4) {
         uint8_t c = (uint8_t)input[in_pos];
@@ -235,7 +290,7 @@ static int bpe_preprocess_text(const char *input, char *output, size_t max_len)
             in_pos++;
         } else if (c == '\n' || c == '\r') {
             /* Newline - copy as-is */
-            output[out_pos++] = c;
+            output[out_pos++] = (char)c;
             at_word_start = true;
             in_pos++;
         } else {
@@ -246,7 +301,7 @@ static int bpe_preprocess_text(const char *input, char *output, size_t max_len)
                 output[out_pos++] = sp_space[1];
                 output[out_pos++] = sp_space[2];
             }
-            output[out_pos++] = c;
+            output[out_pos++] = (char)c;
             at_word_start = false;
             in_pos++;
         }
@@ -269,22 +324,19 @@ static int bpe_preprocess_text(const char *input, char *output, size_t max_len)
  */
 int bpe_tokenizer_init(void)
 {
-    console_printf("[BPE] Initializing tokenizer from GGUF vocabulary...\n");
-
     /* Check if GGUF vocabulary is loaded */
     uint32_t vocab_size = gguf_parser_get_vocab_size();
     if (vocab_size == 0) {
-        console_printf("[BPE] ERROR: No GGUF vocabulary loaded\n");
+        console_printf("Error: No vocabulary loaded\n");
         return -1;
     }
 
     g_bpe.vocab_size = vocab_size;
-    console_printf("[BPE] Vocabulary size: %u tokens\n", vocab_size);
 
     /* Allocate hash table using heap_alloc (not kmalloc) */
     g_bpe.hash_table = heap_alloc(BPE_HASH_SIZE * sizeof(struct bpe_vocab_entry *));
     if (!g_bpe.hash_table) {
-        console_printf("[BPE] ERROR: Failed to allocate hash table\n");
+        console_printf("Error: Tokenizer memory allocation failed\n");
         return -1;
     }
     memset(g_bpe.hash_table, 0, BPE_HASH_SIZE * sizeof(struct bpe_vocab_entry *));
@@ -292,7 +344,7 @@ int bpe_tokenizer_init(void)
     /* Allocate id->text array */
     g_bpe.id_to_text = heap_alloc(vocab_size * sizeof(char *));
     if (!g_bpe.id_to_text) {
-        console_printf("[BPE] ERROR: Failed to allocate id_to_text\n");
+        console_printf("Error: Tokenizer memory allocation failed\n");
         return -1;
     }
     memset(g_bpe.id_to_text, 0, vocab_size * sizeof(char *));
@@ -300,62 +352,69 @@ int bpe_tokenizer_init(void)
     /* Allocate scores array */
     g_bpe.scores = heap_alloc(vocab_size * sizeof(float));
     if (!g_bpe.scores) {
-        console_printf("[BPE] ERROR: Failed to allocate scores\n");
+        console_printf("Error: Tokenizer memory allocation failed\n");
         return -1;
     }
     memset(g_bpe.scores, 0, vocab_size * sizeof(float));
 
-    /* Get special token IDs from GGUF */
+    /* Pre-allocate entry pool - single allocation for all vocab entries */
+    g_bpe.entry_pool = heap_alloc(vocab_size * sizeof(struct bpe_vocab_entry));
+    if (!g_bpe.entry_pool) {
+        console_printf("Error: Tokenizer memory allocation failed\n");
+        return -1;
+    }
+    g_bpe.entry_pool_idx = 0;
+
+    /* Pre-allocate text pool - estimate ~16 bytes average per token */
+    g_bpe.text_pool_size = vocab_size * 16;
+    g_bpe.text_pool = heap_alloc(g_bpe.text_pool_size);
+    if (!g_bpe.text_pool) {
+        console_printf("Error: Tokenizer memory allocation failed\n");
+        return -1;
+    }
+    g_bpe.text_pool_idx = 0;
+
+    /* Get special token IDs and tokenizer type from GGUF */
     const struct gguf_model_arch *arch = gguf_parser_get_arch();
     if (arch) {
         g_bpe.bos_token = arch->bos_token_id;
         g_bpe.eos_token = arch->eos_token_id;
         g_bpe.unk_token = 0; /* Usually 0 */
-        console_printf("[BPE] Special tokens: BOS=%u, EOS=%u, UNK=%u\n", g_bpe.bos_token,
-                       g_bpe.eos_token, g_bpe.unk_token);
+
+        /* Detect tokenizer type from GGUF metadata */
+        if (arch->tokenizer_model[0] != '\0') {
+            if (strcmp(arch->tokenizer_model, "gpt2") == 0 ||
+                strcmp(arch->tokenizer_model, "smollm") == 0) {
+                g_bpe.tokenizer_type = BPE_TYPE_GPT2;
+            } else if (strcmp(arch->tokenizer_model, "llama") == 0 ||
+                       strncmp(arch->tokenizer_model, "sentence", 8) == 0) {
+                g_bpe.tokenizer_type = BPE_TYPE_SENTENCEPIECE;
+            } else {
+                /* Default to GPT-2 for unknown types (more common) */
+                g_bpe.tokenizer_type = BPE_TYPE_GPT2;
+            }
+        } else {
+            /* No tokenizer model specified, default to GPT-2 */
+            g_bpe.tokenizer_type = BPE_TYPE_GPT2;
+        }
     } else {
         g_bpe.bos_token = BPE_TOKEN_BOS;
         g_bpe.eos_token = BPE_TOKEN_EOS;
         g_bpe.unk_token = BPE_TOKEN_UNK;
+        g_bpe.tokenizer_type = BPE_TYPE_GPT2; /* Default */
     }
 
     /* Load all tokens into hash table */
-    int loaded = 0;
-    int skipped = 0;
-
     for (uint32_t i = 0; i < vocab_size; i++) {
         const char *text = gguf_parser_get_token(i);
         float score = gguf_parser_get_token_score(i);
 
         if (text && strlen(text) > 0) {
-            if (bpe_vocab_insert(text, i, score) == 0) {
-                loaded++;
-            } else {
-                skipped++;
-            }
-        } else {
-            skipped++;
-        }
-
-        /* Progress update every 10000 tokens */
-        if ((i + 1) % 10000 == 0) {
-            console_printf("[BPE] Loaded %u/%u tokens...\n", i + 1, vocab_size);
-        }
-    }
-
-    console_printf("[BPE] Loaded %d tokens, skipped %d\n", loaded, skipped);
-
-    /* Print sample tokens for verification */
-    console_printf("[BPE] Sample tokens:\n");
-    for (uint32_t i = 0; i < 10 && i < vocab_size; i++) {
-        const char *text = g_bpe.id_to_text[i];
-        if (text) {
-            console_printf("  [%u] '%s' (score=%.2f)\n", i, text, g_bpe.scores[i]);
+            bpe_vocab_insert(text, i, score);
         }
     }
 
     g_bpe.initialized = true;
-    console_printf("[BPE] Tokenizer initialized successfully\n");
     return 0;
 }
 
@@ -551,7 +610,6 @@ void bpe_tokenizer_cleanup(void)
 
     g_bpe.vocab_size = 0;
     g_bpe.initialized = false;
-    console_printf("[BPE] Tokenizer cleanup complete\n");
 }
 
 /**

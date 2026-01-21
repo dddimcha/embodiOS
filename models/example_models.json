@@ -1,0 +1,77 @@
+{
+  "description": "EMBODIOS Example Models Configuration",
+  "version": "1.0",
+  "models": [
+    {
+      "name": "tinystories-656k",
+      "description": "Tiny Stories 656K - Minimal demo model, fastest inference",
+      "format": "gguf",
+      "size_mb": 0.7,
+      "parameters": "656K",
+      "context_length": 512,
+      "recommended_memory_mb": 32,
+      "use_case": "Testing, demo, quick validation",
+      "performance": {
+        "tokens_per_sec_estimate": 200,
+        "load_time_ms": 100
+      },
+      "files": [
+        {
+          "name": "tinystories-656k.gguf",
+          "size": 749664
+        }
+      ]
+    },
+    {
+      "name": "smollm-135m",
+      "description": "SmolLM 135M - Small but capable language model",
+      "format": "gguf",
+      "size_mb": 100,
+      "parameters": "135M",
+      "context_length": 2048,
+      "recommended_memory_mb": 256,
+      "use_case": "General text generation, chat",
+      "performance": {
+        "tokens_per_sec_estimate": 85,
+        "load_time_ms": 500
+      },
+      "files": [
+        {
+          "name": "smollm-135m.gguf",
+          "size": 105454208
+        }
+      ]
+    },
+    {
+      "name": "tinyllama-1.1b",
+      "description": "TinyLlama 1.1B - Compact high-quality LLM",
+      "format": "gguf",
+      "size_mb": 638,
+      "parameters": "1.1B",
+      "context_length": 2048,
+      "quantization": "Q4_K_M",
+      "recommended_memory_mb": 1024,
+      "use_case": "Production inference, complex tasks",
+      "performance": {
+        "tokens_per_sec_estimate": 50,
+        "load_time_ms": 2000
+      },
+      "files": [
+        {
+          "name": "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+          "source": "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "size": 668800000
+        }
+      ]
+    }
+  ],
+  "recommended": {
+    "testing": "tinystories-656k",
+    "demo": "smollm-135m",
+    "production": "tinyllama-1.1b"
+  },
+  "qemu_examples": {
+    "tinystories-656k": "qemu-system-x86_64 -kernel embodios.elf -m 64M -drive file=tinystories-656k.img,format=raw,if=virtio -serial stdio",
+    "smollm-135m": "qemu-system-x86_64 -kernel embodios.elf -m 256M -drive file=smollm-135m.img,format=raw,if=virtio -serial stdio"
+  }
+}

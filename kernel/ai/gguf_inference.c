@@ -169,17 +169,120 @@ static void dequantize_row_q5_0(const void *src, float *dst, int64_t n)
     }
 }
 
+/* K-quant block size */
+#define QK_K 256
+#define K_SCALE_SIZE 12
+
+/* Q4_K: 4-bit K-quant (type 12)
+ * Block format: 256 elements, ~4.5 bits per weight
+ * Total: 2 + 2 + 12 + 128 = 144 bytes per block
+ */
+typedef struct __attribute__((packed)) {
+    uint16_t d;               /* super-block scale */
+    uint16_t dmin;            /* super-block min */
+    uint8_t scales[K_SCALE_SIZE]; /* scales and mins, quantized with 6 bits */
+    uint8_t qs[QK_K / 2];     /* 4-bit quants */
+} block_q4_K;
+
+/* Q5_K: 5-bit K-quant (type 13)
+ * Block format: 256 elements, ~5.5 bits per weight
+ * Total: 2 + 2 + 12 + 32 + 128 = 176 bytes per block
+ */
+typedef struct __attribute__((packed)) {
+    uint16_t d;               /* super-block scale */
+    uint16_t dmin;            /* super-block min */
+    uint8_t scales[K_SCALE_SIZE]; /* scales and mins, quantized with 6 bits */
+    uint8_t qh[QK_K / 8];     /* quants, high bit */
+    uint8_t qs[QK_K / 2];     /* quants, low 4 bits */
+} block_q5_K;
+
 /* Q6_K: 6-bit K-quant (type 14)
  * Block format: super-block of 256 elements
- * Simplified dequant - treats as zero if too complex
  */
-#define QK_K 256
 typedef struct __attribute__((packed)) {
     uint8_t ql[QK_K / 2];     /* low 4 bits of each quant */
     uint8_t qh[QK_K / 4];     /* high 2 bits of each quant */
     int8_t scales[QK_K / 16]; /* scales for 16-element sub-blocks */
     uint16_t d;               /* super-block scale as float16 */
 } block_q6_K;
+
+/* Helper to decode scale and min from Q4_K/Q5_K packed format - matches llama.cpp */
+static inline void get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m)
+{
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
+    }
+}
+
+/* Q4_K dequantization - matches llama.cpp exactly */
+static void dequantize_row_q4_K(const void *src, float *dst, int64_t n)
+{
+    const block_q4_K *x = (const block_q4_K *)src;
+    int64_t nb = n / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const uint8_t *q = x[i].qs;
+        float d = fp16_to_fp32(x[i].d);
+        float dmin = fp16_to_fp32(x[i].dmin);
+        float *y = dst + i * QK_K;
+
+        int is = 0;
+        uint8_t sc, m;
+        for (int j = 0; j < QK_K; j += 64) {
+            get_scale_min_k4(is + 0, x[i].scales, &sc, &m);
+            float d1 = d * sc;
+            float m1 = dmin * m;
+            get_scale_min_k4(is + 1, x[i].scales, &sc, &m);
+            float d2 = d * sc;
+            float m2 = dmin * m;
+            for (int l = 0; l < 32; ++l)
+                *y++ = d1 * (q[l] & 0xF) - m1;
+            for (int l = 0; l < 32; ++l)
+                *y++ = d2 * (q[l] >> 4) - m2;
+            q += 32;
+            is += 2;
+        }
+    }
+}
+
+/* Q5_K dequantization - matches llama.cpp exactly */
+static void dequantize_row_q5_K(const void *src, float *dst, int64_t n)
+{
+    const block_q5_K *x = (const block_q5_K *)src;
+    int64_t nb = n / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const uint8_t *ql = x[i].qs;
+        const uint8_t *qh = x[i].qh;
+        float d = fp16_to_fp32(x[i].d);
+        float dmin = fp16_to_fp32(x[i].dmin);
+        float *y = dst + i * QK_K;
+
+        int is = 0;
+        uint8_t sc, m;
+        uint8_t u1 = 1, u2 = 2;
+        for (int j = 0; j < QK_K; j += 64) {
+            get_scale_min_k4(is + 0, x[i].scales, &sc, &m);
+            float d1 = d * sc;
+            float m1 = dmin * m;
+            get_scale_min_k4(is + 1, x[i].scales, &sc, &m);
+            float d2 = d * sc;
+            float m2 = dmin * m;
+            for (int l = 0; l < 32; ++l)
+                *y++ = d1 * ((ql[l] & 0xF) + (qh[l] & u1 ? 16 : 0)) - m1;
+            for (int l = 0; l < 32; ++l)
+                *y++ = d2 * ((ql[l] >> 4) + (qh[l] & u2 ? 16 : 0)) - m2;
+            ql += 32;
+            is += 2;
+            u1 <<= 2;
+            u2 <<= 2;
+        }
+    }
+}
 
 static void dequantize_row_q6_K(const void *src, float *dst, int64_t n)
 {
@@ -240,6 +343,12 @@ static void dequantize_tensor(const void *src, float *dst, int64_t n_elements, g
         break;
     case GGML_TYPE_Q5_0:
         dequantize_row_q5_0(src, dst, n_elements);
+        break;
+    case GGML_TYPE_Q4_K:
+        dequantize_row_q4_K(src, dst, n_elements);
+        break;
+    case GGML_TYPE_Q5_K:
+        dequantize_row_q5_K(src, dst, n_elements);
         break;
     case GGML_TYPE_Q6_K:
         dequantize_row_q6_K(src, dst, n_elements);

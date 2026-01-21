@@ -207,9 +207,10 @@ typedef struct virtio_device {
 } virtio_device_t;
 
 /* ============================================================================
- * I/O Port Access (for legacy VirtIO)
+ * I/O Port Access (for legacy VirtIO) - x86_64 only
  * ============================================================================ */
 
+#if defined(__x86_64__) || defined(__i386__)
 /* x86 I/O port operations */
 static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
@@ -240,22 +241,42 @@ static inline void outw(uint16_t port, uint16_t val) {
 static inline void outl(uint16_t port, uint32_t val) {
     __asm__ volatile("outl %0, %1" : : "a"(val), "dN"(port));
 }
+#endif /* __x86_64__ || __i386__ */
+
+#ifdef __aarch64__
+/* ARM64 doesn't use I/O ports - use MMIO instead */
+/* These stubs prevent compilation errors when headers are included */
+static inline uint8_t inb(uint16_t port) { (void)port; return 0; }
+static inline uint16_t inw(uint16_t port) { (void)port; return 0; }
+static inline uint32_t inl(uint16_t port) { (void)port; return 0; }
+static inline void outb(uint16_t port, uint8_t val) { (void)port; (void)val; }
+static inline void outw(uint16_t port, uint16_t val) { (void)port; (void)val; }
+static inline void outl(uint16_t port, uint32_t val) { (void)port; (void)val; }
+#endif /* __aarch64__ */
 
 /* ============================================================================
  * Memory Barriers
  * ============================================================================ */
 
-/* Compiler barrier */
+/* Compiler barrier - architecture independent */
 #define barrier()           __asm__ volatile("" : : : "memory")
 
-/* Read memory barrier */
+#if defined(__x86_64__) || defined(__i386__)
+/* x86 memory barriers */
 #define rmb()               __asm__ volatile("lfence" : : : "memory")
-
-/* Write memory barrier */
 #define wmb()               __asm__ volatile("sfence" : : : "memory")
-
-/* Full memory barrier */
 #define mb()                __asm__ volatile("mfence" : : : "memory")
+#elif defined(__aarch64__)
+/* ARM64 memory barriers */
+#define rmb()               __asm__ volatile("dmb ld" : : : "memory")
+#define wmb()               __asm__ volatile("dmb st" : : : "memory")
+#define mb()                __asm__ volatile("dmb sy" : : : "memory")
+#else
+/* Generic fallback */
+#define rmb()               barrier()
+#define wmb()               barrier()
+#define mb()                barrier()
+#endif
 
 /* ============================================================================
  * VirtIO Common Functions
