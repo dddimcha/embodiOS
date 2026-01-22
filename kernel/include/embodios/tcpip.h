@@ -297,6 +297,7 @@ uint32_t ntohl(uint32_t val);
 void tcpip_get_stats(net_stats_t *stats);
 void tcpip_print_info(void);
 int tcpip_run_tests(void);
+int tcpip_start_server(uint16_t port);
 
 /* Macros for IP address handling */
 #define IP4(a,b,c,d) (((uint32_t)(a)<<24)|((uint32_t)(b)<<16)|((uint32_t)(c)<<8)|(uint32_t)(d))

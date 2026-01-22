@@ -968,3 +968,95 @@ int tcpip_run_tests(void)
     console_printf("=== All TCP/IP tests passed ===\n");
     return 0;
 }
+
+/* Simple TCP echo server for integration testing */
+int tcpip_start_server(uint16_t port)
+{
+    if (!tcpip_initialized) {
+        console_printf("ERROR: TCP/IP stack not initialized\n");
+        return NET_ERR_INIT;
+    }
+
+    /* Create TCP socket */
+    int server_fd = socket_create(SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        console_printf("ERROR: Failed to create socket\n");
+        return server_fd;
+    }
+
+    /* Bind to port */
+    int ret = socket_bind(server_fd, net_cfg.ip_addr, port);
+    if (ret != NET_OK) {
+        console_printf("ERROR: Failed to bind to port %d\n", port);
+        socket_close(server_fd);
+        return ret;
+    }
+
+    /* Start listening */
+    ret = socket_listen(server_fd, 1);
+    if (ret != NET_OK) {
+        console_printf("ERROR: Failed to listen\n");
+        socket_close(server_fd);
+        return ret;
+    }
+
+    char ip_str[16];
+    ip_to_string(net_cfg.ip_addr, ip_str, sizeof(ip_str));
+    console_printf("TCP echo server listening on %s:%d\n", ip_str, port);
+    console_printf("Socket FD: %d, State: LISTEN\n", server_fd);
+    console_printf("Connect with: nc <host> %d\n", port);
+    console_printf("Press Ctrl+C to stop server (not implemented yet)\n");
+    console_printf("\nServer running in polling mode - processing packets...\n\n");
+
+    /* Server loop */
+    int last_state = TCP_LISTEN;
+    while (1) {
+        /* Poll for packets */
+        tcpip_poll();
+
+        /* Check socket state */
+        if (sockets[server_fd].state != last_state) {
+            last_state = sockets[server_fd].state;
+            console_printf("Socket state changed to: %d\n", last_state);
+
+            if (last_state == TCP_ESTABLISHED) {
+                console_printf("Client connected from %d.%d.%d.%d:%d\n",
+                               (sockets[server_fd].remote_ip >> 24) & 0xFF,
+                               (sockets[server_fd].remote_ip >> 16) & 0xFF,
+                               (sockets[server_fd].remote_ip >> 8) & 0xFF,
+                               sockets[server_fd].remote_ip & 0xFF,
+                               sockets[server_fd].remote_port);
+
+                /* Send welcome message */
+                const char *welcome = "Welcome to EMBODIOS TCP Server!\r\n";
+                int sent = socket_send(server_fd, (const uint8_t*)welcome, strlen(welcome));
+                if (sent > 0) {
+                    console_printf("Sent welcome message (%d bytes)\n", sent);
+                } else {
+                    console_printf("Failed to send welcome message: %d\n", sent);
+                }
+            }
+        }
+
+        /* If established, check for received data and echo it back */
+        if (sockets[server_fd].state == TCP_ESTABLISHED) {
+            /* In a real implementation, we'd have a receive buffer
+             * For now, just demonstrate sending periodic heartbeats */
+            static int counter = 0;
+            if (++counter == 1000000) {
+                const char *msg = "Server heartbeat\r\n";
+                socket_send(server_fd, (const uint8_t*)msg, strlen(msg));
+                counter = 0;
+            }
+        }
+
+        /* Check for disconnection */
+        if (sockets[server_fd].state == TCP_CLOSED) {
+            console_printf("Connection closed\n");
+            break;
+        }
+    }
+
+    socket_close(server_fd);
+    return NET_OK;
+}
