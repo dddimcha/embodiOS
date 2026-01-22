@@ -688,3 +688,35 @@ bool can_is_error(const can_frame_t *frame)
 
     return (frame->flags & CAN_FLAG_ERR) != 0;
 }
+
+/* ============================================================================
+ * PCI Driver Registration
+ * ============================================================================ */
+
+/**
+ * PCI probe callback for CAN devices
+ * Called when a matching PCI device is discovered
+ */
+static int can_probe(pci_device_t *dev)
+{
+    console_printf("[CAN] PCI device detected: vendor=0x%04x device=0x%04x\n",
+                   dev->vendor_id, dev->device_id);
+
+    /* TODO: Initialize hardware in phase 2 */
+
+    return CAN_OK;
+}
+
+/**
+ * PCI driver structure for CAN controllers
+ */
+static pci_driver_t can_driver = {
+    .name = "can",
+    .vendor_id = PCI_ANY_ID,
+    .device_id = PCI_ANY_ID,
+    .class_code = PCI_CLASS_SERIAL,
+    .subclass = PCI_ANY_CLASS,
+    .probe = can_probe,
+    .remove = NULL,
+    .next = NULL
+};
