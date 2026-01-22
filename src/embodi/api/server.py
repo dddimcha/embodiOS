@@ -81,7 +81,8 @@ def create_app(model_path: Optional[str] = None, debug: bool = False) -> FastAPI
         return {
             "status": "healthy",
             "model_loaded": engine.model_loaded,
-            "version": "0.1.0"
+            "version": "0.1.0",
+            "metrics_enabled": True
         }
 
     # Root endpoint
