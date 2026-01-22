@@ -344,8 +344,13 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                     sockets[i].remote_ip = ntohl(ip->src_ip);
                     sockets[i].remote_port = ntohs(tcp->src_port);
                     sockets[i].ack_num = seq + 1;
+                    sockets[i].seq_num = 12345;  /* TODO: Random ISN */
                     sockets[i].state = TCP_SYN_RECEIVED;
-                    /* TODO: Send SYN+ACK */
+                    /* Send SYN+ACK */
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num,
+                                    sockets[i].ack_num, TCP_SYN | TCP_ACK,
+                                    NULL, 0);
                 }
                 break;
 
