@@ -304,3 +304,138 @@ class TestGetMetricsCollector:
                 "Should return same instance with preserved state"
             assert collector2._test_marker == 'test_value', \
                 "Instance state should be preserved"
+
+
+class TestMetricsEndpoint:
+    """Integration test suite for /metrics endpoint"""
+
+    @pytest.fixture(autouse=True)
+    def reset_metrics_collector(self):
+        """Reset global metrics collector and Prometheus registry before each test"""
+        import src.embodi.api.metrics as metrics_module
+        from prometheus_client import REGISTRY
+
+        # Define our metric names
+        our_metrics = {
+            'inference_requests', 'inference_requests_total', 'inference_requests_created',
+            'inference_latency_seconds', 'inference_latency_seconds_count',
+            'inference_latency_seconds_sum', 'inference_latency_seconds_bucket',
+            'inference_latency_seconds_created',
+            'inference_requests_in_progress', 'memory_usage_bytes',
+            'uptime_seconds', 'model_loaded'
+        }
+
+        # Unregister any existing collectors for our metrics
+        collectors_to_remove = []
+        for collector in list(REGISTRY._collector_to_names.keys()):
+            names = REGISTRY._collector_to_names.get(collector, set())
+            # Convert names to set if it's a list
+            if isinstance(names, list):
+                names = set(names)
+            # Check if this collector has any of our metric names
+            if names.intersection(our_metrics):
+                collectors_to_remove.append(collector)
+
+        for collector in collectors_to_remove:
+            try:
+                REGISTRY.unregister(collector)
+            except Exception:
+                pass  # Ignore if already unregistered
+
+        # Reset the singleton to allow fresh creation with real metrics
+        metrics_module._metrics_collector = None
+        yield
+
+        # Clean up after test - unregister collectors again
+        collectors_to_remove = []
+        for collector in list(REGISTRY._collector_to_names.keys()):
+            names = REGISTRY._collector_to_names.get(collector, set())
+            if isinstance(names, list):
+                names = set(names)
+            if names.intersection(our_metrics):
+                collectors_to_remove.append(collector)
+
+        for collector in collectors_to_remove:
+            try:
+                REGISTRY.unregister(collector)
+            except Exception:
+                pass
+
+        metrics_module._metrics_collector = None
+
+    def test_metrics_endpoint_returns_200(self):
+        """Test that GET /metrics returns 200 OK status"""
+        from fastapi.testclient import TestClient
+        from src.embodi.api.server import create_app
+
+        # Create test app without loading a model
+        app = create_app(model_path=None, debug=False)
+        client = TestClient(app)
+
+        # Make request to metrics endpoint
+        response = client.get("/metrics")
+
+        # Verify response status
+        assert response.status_code == 200, \
+            "Metrics endpoint should return 200 OK"
+
+    def test_metrics_endpoint_returns_prometheus_format(self):
+        """Test that /metrics returns Prometheus text exposition format"""
+        from fastapi.testclient import TestClient
+        from src.embodi.api.server import create_app
+        from prometheus_client import CONTENT_TYPE_LATEST
+
+        app = create_app(model_path=None, debug=False)
+        client = TestClient(app)
+
+        response = client.get("/metrics")
+
+        # Verify content type is Prometheus format
+        assert CONTENT_TYPE_LATEST in response.headers['content-type'], \
+            f"Should return Prometheus content type, got: {response.headers['content-type']}"
+
+    def test_metrics_endpoint_contains_expected_metrics(self):
+        """Test that /metrics response contains expected metric names"""
+        from fastapi.testclient import TestClient
+        from src.embodi.api.server import create_app
+
+        app = create_app(model_path=None, debug=False)
+        client = TestClient(app)
+
+        response = client.get("/metrics")
+        content = response.text
+
+        # Verify expected metrics are present in output
+        expected_metrics = [
+            'inference_requests_total',
+            'inference_latency_seconds',
+            'inference_requests_in_progress',
+            'memory_usage_bytes',
+            'uptime_seconds',
+            'model_loaded',
+        ]
+
+        for metric_name in expected_metrics:
+            assert metric_name in content, \
+                f"Metrics output should contain {metric_name}"
+
+    def test_metrics_endpoint_updates_system_metrics(self):
+        """Test that /metrics endpoint updates system metrics before returning"""
+        from fastapi.testclient import TestClient
+        from src.embodi.api.server import create_app
+
+        app = create_app(model_path=None, debug=False)
+        client = TestClient(app)
+
+        # Patch the collector to verify update_system_metrics is called
+        with patch('src.embodi.api.routes.get_metrics_collector') as mock_get_collector:
+            mock_collector = MagicMock()
+            mock_get_collector.return_value = mock_collector
+
+            # Mock generate_latest to return valid output
+            with patch('src.embodi.api.routes.generate_latest', return_value=b'# metrics'):
+                response = client.get("/metrics")
+
+                # Verify update_system_metrics was called
+                mock_collector.update_system_metrics.assert_called_once(), \
+                    "Should call update_system_metrics before generating output"
