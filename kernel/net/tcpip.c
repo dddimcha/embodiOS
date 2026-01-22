@@ -935,6 +935,31 @@ int tcpip_run_tests(void)
     socket_close(sock);
     console_printf("PASSED\n");
 
+    console_printf("TEST: TCP send... ");
+    int tcp_sock = socket_create(SOCK_STREAM, 0);
+    if (tcp_sock < 0) {
+        console_printf("FAILED (create)\n");
+        return -1;
+    }
+    /* Set up mock connection for testing */
+    socket_bind(tcp_sock, net_cfg.ip_addr, 8080);
+    sockets[tcp_sock].remote_ip = IP4(10, 0, 2, 2);
+    sockets[tcp_sock].remote_port = 80;
+    sockets[tcp_sock].state = TCP_ESTABLISHED;
+    sockets[tcp_sock].seq_num = 1000;
+    sockets[tcp_sock].ack_num = 2000;
+    /* Try to send (may fail due to no ARP entry, but tests the API) */
+    const char *test_data = "test";
+    int ret = socket_send(tcp_sock, test_data, 4);
+    /* Accept either success or unreachable (no ARP entry) */
+    if (ret < 0 && ret != NET_ERR_UNREACHABLE) {
+        console_printf("FAILED (send returned %d)\n", ret);
+        socket_close(tcp_sock);
+        return -1;
+    }
+    socket_close(tcp_sock);
+    console_printf("PASSED\n");
+
     console_printf("=== All TCP/IP tests passed ===\n");
     return 0;
 }
