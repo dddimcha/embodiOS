@@ -10,6 +10,7 @@
 #include <embodios/dma.h>
 #include <embodios/pci.h>
 #include <embodios/virtio_blk.h>
+#include <embodios/nvme.h>
 #include <embodios/virtio_mmio.h>
 #include <embodios/virtio_net.h>
 #include <embodios/tcpip.h>
@@ -137,6 +138,17 @@ void kernel_main(void)
     /* x86_64: Use VirtIO-PCI */
     virtio_blk_init();
 #endif
+
+    /* NVMe block driver for high-performance storage */
+    console_printf("Initializing NVMe driver...\n");
+    nvme_init();
+
+    /* Optional: Print NVMe info and run self-tests */
+    #ifdef NVME_RUN_TESTS
+    console_printf("Running NVMe diagnostics...\n");
+    nvme_print_info();
+    nvme_run_tests();
+    #endif
 
     /* VirtIO network driver */
     console_printf("Initializing VirtIO network driver...\n");
