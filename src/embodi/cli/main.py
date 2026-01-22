@@ -357,13 +357,67 @@ def bundle_create(ctx, model, output, target, arch, memory, features, compress):
 def bundle_write(ctx, bundle, device, verify):
     """Write bundle to USB device"""
     from embodi.installer.bundle.bundler import EMBODIOSBundler
-    
+
     bundler = EMBODIOSBundler()
-    
+
     if bundler.write_bundle(bundle, device, verify):
         console.print("[bold green]✓ Bundle written successfully[/bold green]")
     else:
         console.print("[bold red]✗ Failed to write bundle[/bold red]")
+        sys.exit(1)
+
+@cli.command()
+@click.option('--host', default='0.0.0.0', help='Server host (default: 0.0.0.0)')
+@click.option('--port', default=8000, type=int, help='Server port (default: 8000)')
+@click.option('--model', help='Path to .aios model file to load on startup')
+@click.option('--reload', is_flag=True, help='Enable auto-reload for development')
+@click.pass_context
+def serve(ctx, host, port, model, reload):
+    """Start API server for inference
+
+    Starts the EMBODIOS REST API server with OpenAI-compatible endpoints.
+    Optionally loads a model on startup.
+
+    Examples:
+        embodi serve
+        embodi serve --port 8080
+        embodi serve --model models/my-model.aios
+    """
+    from embodi.api.server import create_app
+
+    console.print("[bold blue]Starting EMBODIOS API server...[/bold blue]")
+
+    if model:
+        console.print(f"[blue]Model: {model}[/blue]")
+    console.print(f"[blue]Host: {host}[/blue]")
+    console.print(f"[blue]Port: {port}[/blue]")
+
+    try:
+        import uvicorn
+
+        # Create the FastAPI app
+        app = create_app(model_path=model, debug=ctx.obj['debug'])
+
+        console.print("[bold green]✓ Server starting...[/bold green]")
+        console.print(f"[green]API docs available at: http://{host}:{port}/docs[/green]")
+
+        # Run the server
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            reload=reload,
+            log_level="debug" if ctx.obj['debug'] else "info"
+        )
+
+    except ImportError:
+        console.print("[bold red]✗ uvicorn not installed[/bold red]")
+        console.print("Install with: pip install uvicorn")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[bold red]✗ Failed to start server: {e}[/bold red]")
+        if ctx.obj['debug']:
+            raise
         sys.exit(1)
 
 def main():
