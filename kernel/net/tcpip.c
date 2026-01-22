@@ -624,6 +624,75 @@ int tcpip_ping(uint32_t dst_ip, uint16_t id, uint16_t seq)
     return net_send(tx_buffer, sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(icmp_header_t));
 }
 
+static int tcp_send_packet(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port,
+                           uint32_t seq, uint32_t ack, uint8_t flags,
+                           const void *data, size_t len)
+{
+    if (!tcpip_initialized) return NET_ERR_INIT;
+
+    /* Resolve MAC address */
+    uint32_t next_hop = dst_ip;
+    if ((dst_ip & net_cfg.netmask) != (net_cfg.ip_addr & net_cfg.netmask)) {
+        next_hop = net_cfg.gateway;
+    }
+
+    arp_entry_t *entry = arp_lookup(next_hop);
+    if (!entry) {
+        arp_request(next_hop);
+        return NET_ERR_UNREACHABLE;
+    }
+
+    /* Build packet */
+    eth_header_t *eth = (eth_header_t *)tx_buffer;
+    ip_header_t *ip = (ip_header_t *)(tx_buffer + sizeof(eth_header_t));
+    tcp_header_t *tcp = (tcp_header_t *)(tx_buffer + sizeof(eth_header_t) + sizeof(ip_header_t));
+    uint8_t *payload = tx_buffer + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(tcp_header_t);
+
+    /* Ethernet */
+    memcpy(eth->dst, entry->mac, ETH_ALEN);
+    memcpy(eth->src, net_cfg.mac_addr, ETH_ALEN);
+    eth->type = htons(ETH_TYPE_IP);
+
+    /* IP */
+    ip->version_ihl = 0x45;
+    ip->tos = 0;
+    ip->total_len = htons(sizeof(ip_header_t) + sizeof(tcp_header_t) + len);
+    ip->id = 0;
+    ip->flags_frag = 0;
+    ip->ttl = 64;
+    ip->protocol = IP_PROTO_TCP;
+    ip->checksum = 0;
+    ip->src_ip = htonl(net_cfg.ip_addr);
+    ip->dst_ip = htonl(dst_ip);
+    ip->checksum = checksum(ip, sizeof(ip_header_t));
+
+    /* TCP */
+    tcp->src_port = htons(src_port);
+    tcp->dst_port = htons(dst_port);
+    tcp->seq_num = htonl(seq);
+    tcp->ack_num = htonl(ack);
+    tcp->data_offset = (sizeof(tcp_header_t) / 4) << 4;  /* Header length in 32-bit words */
+    tcp->flags = flags;
+    tcp->window = htons(8192);  /* Default window size */
+    tcp->checksum = 0;
+    tcp->urgent = 0;
+
+    /* Payload */
+    if (data && len > 0) {
+        memcpy(payload, data, len);
+    }
+
+    /* TCP checksum - simplified (set to 0 for now) */
+    /* TODO: Implement proper TCP checksum with pseudo-header */
+
+    size_t total_len = sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(tcp_header_t) + len;
+
+    net_stats.tx_packets++;
+    net_stats.tx_bytes += total_len;
+
+    return net_send(tx_buffer, total_len);
+}
+
 /* Socket API */
 int socket_create(int type, int protocol)
 {
