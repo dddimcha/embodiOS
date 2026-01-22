@@ -358,14 +358,22 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                 if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
                     sockets[i].ack_num = seq + 1;
                     sockets[i].state = TCP_ESTABLISHED;
-                    /* TODO: Send ACK */
+                    /* Send ACK */
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num,
+                                    sockets[i].ack_num, TCP_ACK,
+                                    NULL, 0);
                 }
                 break;
 
             case TCP_ESTABLISHED:
                 if (flags & TCP_FIN) {
                     sockets[i].state = TCP_CLOSE_WAIT;
-                    /* TODO: Send ACK */
+                    /* Send ACK */
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num,
+                                    sockets[i].ack_num, TCP_ACK,
+                                    NULL, 0);
                 } else if (flags & TCP_ACK) {
                     /* Handle data */
                     size_t header_len = (tcp->data_offset >> 4) * 4;
