@@ -11,6 +11,7 @@ docker>=6.0
 fastapi>=0.104
 uvicorn[standard]>=0.24
 pydantic>=2.0
+prometheus-client>=0.19
 
 # Model handling
 numpy>=1.21
