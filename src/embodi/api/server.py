@@ -10,6 +10,7 @@ import logging
 
 from ..core.inference import EMBODIOSInferenceEngine
 from .routes import router, set_inference_engine
+from .middleware.metrics_middleware import MetricsMiddleware
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +45,9 @@ def create_app(model_path: Optional[str] = None, debug: bool = False) -> FastAPI
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Add metrics middleware for request tracking
+    app.add_middleware(MetricsMiddleware)
 
     # Initialize inference engine
     engine = EMBODIOSInferenceEngine()
