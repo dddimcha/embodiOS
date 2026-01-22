@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 
 from ..core.inference import EMBODIOSInferenceEngine
-from .routes import router, set_inference_engine
+from .routes import router, metrics_router, set_inference_engine
 from .middleware.metrics_middleware import MetricsMiddleware
 
 # Configure logging
@@ -72,6 +72,7 @@ def create_app(model_path: Optional[str] = None, debug: bool = False) -> FastAPI
 
     # Include API routes
     app.include_router(router)
+    app.include_router(metrics_router)
 
     # Health check endpoint
     @app.get("/health")
