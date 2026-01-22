@@ -42,6 +42,11 @@ static net_send_fn net_send = NULL;
 static net_recv_fn net_recv = NULL;
 static net_mac_fn net_get_mac = NULL;
 
+/* Forward declarations */
+static int tcp_send_packet(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port,
+                           uint32_t seq, uint32_t ack, uint8_t flags,
+                           const void *data, size_t len);
+
 /* ============================================================================
  * Byte Order Conversion
  * ============================================================================ */
