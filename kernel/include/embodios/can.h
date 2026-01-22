@@ -271,6 +271,14 @@ int can_poll(void);
  * ============================================================================ */
 
 /**
+ * Set CAN acceptance filter at specific index
+ * @param filter_index Filter index (0 to CAN_MAX_FILTERS-1)
+ * @param filter    Filter configuration
+ * @return CAN_OK on success, error code on failure
+ */
+int can_set_filter(int filter_index, const can_filter_t *filter);
+
+/**
  * Add CAN acceptance filter
  * @param filter    Filter configuration
  * @return Filter index on success, negative error code on failure

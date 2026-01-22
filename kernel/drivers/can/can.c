@@ -417,6 +417,46 @@ int can_poll(void)
  * ============================================================================ */
 
 /**
+ * Set CAN acceptance filter at specific index
+ */
+int can_set_filter(int filter_index, const can_filter_t *filter)
+{
+    if (!g_can.initialized) {
+        return CAN_ERR_NOT_INIT;
+    }
+
+    if (!filter) {
+        return CAN_ERR_INVALID;
+    }
+
+    if (filter_index < 0 || filter_index >= CAN_MAX_FILTERS) {
+        return CAN_ERR_INVALID;
+    }
+
+    /* Set filter at specified index */
+    g_can.filters[filter_index] = *filter;
+
+    /* If this is a newly enabled filter, increment count */
+    if (filter->enabled && !g_can.filters[filter_index].enabled) {
+        g_can.filter_count++;
+    } else if (!filter->enabled && g_can.filters[filter_index].enabled) {
+        g_can.filter_count--;
+    }
+
+    g_can.filters[filter_index].enabled = filter->enabled;
+
+#ifdef CAN_DEBUG
+    console_printf("[CAN] Filter %d set: ID=0x%x Mask=0x%x %s\n",
+                  filter_index, filter->id, filter->mask,
+                  filter->enabled ? "enabled" : "disabled");
+#endif
+
+    /* TODO: Configure hardware filter in phase 2 */
+
+    return CAN_OK;
+}
+
+/**
  * Add CAN acceptance filter
  */
 int can_add_filter(const can_filter_t *filter)
