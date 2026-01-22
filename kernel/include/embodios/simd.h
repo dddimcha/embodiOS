@@ -5,6 +5,7 @@
 
 /* ARM NEON optimized operations */
 fixed_t vec_dot_neon(const fixed_t* a, const fixed_t* b, size_t n);
+void matmul_neon(const fixed_t* a, const fixed_t* b, fixed_t* out, size_t m, size_t n, size_t p);
 void matvec_neon(const fixed_t* mat, const fixed_t* vec, fixed_t* out, size_t rows, size_t cols);
 void rms_norm_neon(fixed_t* out, const fixed_t* x, const fixed_t* weight, size_t size);
 void softmax_neon(fixed_t* x, size_t size);

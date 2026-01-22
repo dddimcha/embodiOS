@@ -22,6 +22,7 @@
 #include <embodios/console.h>
 #include <embodios/types.h>
 #include <embodios/mm.h>
+#include <embodios/benchmark.h>
 
 /* ============================================================================
  * Module State
@@ -345,6 +346,117 @@ int block_write(block_device_t* dev, uint64_t sector,
     }
 
     return dev->ops->write(dev, sector, count, buffer);
+}
+
+int block_read_bytes(block_device_t* dev, uint64_t offset,
+                     size_t size, void* buffer) {
+    if (!dev || !buffer) {
+        return BLOCK_ERR_INVALID;
+    }
+
+    if (size == 0) {
+        return BLOCK_OK;
+    }
+
+    uint32_t sector_size = dev->sector_size;
+
+    /* Check if read is within device bounds */
+    if (offset + size > dev->total_sectors * sector_size) {
+        return BLOCK_ERR_INVALID;
+    }
+
+    /* Calculate sector-aligned range */
+    uint64_t start_sector = offset / sector_size;
+    uint64_t end_offset = offset + size;
+    uint64_t end_sector = (end_offset + sector_size - 1) / sector_size;
+    uint32_t sector_count = (uint32_t)(end_sector - start_sector);
+
+    /* Calculate byte offset within first sector */
+    uint32_t sector_offset = (uint32_t)(offset % sector_size);
+
+    /* Fast path: aligned read of whole sectors */
+    if (sector_offset == 0 && (size % sector_size) == 0) {
+        return block_read(dev, start_sector, sector_count, buffer);
+    }
+
+    /* Slow path: unaligned read - need temporary buffer */
+    size_t temp_size = sector_count * sector_size;
+    uint8_t* temp_buffer = (uint8_t*)heap_alloc(temp_size);
+    if (!temp_buffer) {
+        return BLOCK_ERR_NOMEM;
+    }
+
+    /* Read sectors into temporary buffer */
+    int ret = block_read(dev, start_sector, sector_count, temp_buffer);
+    if (ret != BLOCK_OK) {
+        heap_free(temp_buffer);
+        return ret;
+    }
+
+    /* Copy requested bytes from temporary buffer */
+    memcpy(buffer, temp_buffer + sector_offset, size);
+
+    heap_free(temp_buffer);
+    return BLOCK_OK;
+}
+
+int block_write_bytes(block_device_t* dev, uint64_t offset,
+                      size_t size, const void* buffer) {
+    if (!dev || !buffer) {
+        return BLOCK_ERR_INVALID;
+    }
+
+    if (dev->flags & BLOCK_FLAG_READONLY) {
+        return BLOCK_ERR_READONLY;
+    }
+
+    if (size == 0) {
+        return BLOCK_OK;
+    }
+
+    uint32_t sector_size = dev->sector_size;
+
+    /* Check if write is within device bounds */
+    if (offset + size > dev->total_sectors * sector_size) {
+        return BLOCK_ERR_INVALID;
+    }
+
+    /* Calculate sector-aligned range */
+    uint64_t start_sector = offset / sector_size;
+    uint64_t end_offset = offset + size;
+    uint64_t end_sector = (end_offset + sector_size - 1) / sector_size;
+    uint32_t sector_count = (uint32_t)(end_sector - start_sector);
+
+    /* Calculate byte offset within first sector */
+    uint32_t sector_offset = (uint32_t)(offset % sector_size);
+
+    /* Fast path: aligned write of whole sectors */
+    if (sector_offset == 0 && (size % sector_size) == 0) {
+        return block_write(dev, start_sector, sector_count, buffer);
+    }
+
+    /* Slow path: unaligned write - need read-modify-write */
+    size_t temp_size = sector_count * sector_size;
+    uint8_t* temp_buffer = (uint8_t*)heap_alloc(temp_size);
+    if (!temp_buffer) {
+        return BLOCK_ERR_NOMEM;
+    }
+
+    /* Read sectors into temporary buffer */
+    int ret = block_read(dev, start_sector, sector_count, temp_buffer);
+    if (ret != BLOCK_OK) {
+        heap_free(temp_buffer);
+        return ret;
+    }
+
+    /* Modify the requested bytes in temporary buffer */
+    memcpy(temp_buffer + sector_offset, buffer, size);
+
+    /* Write modified sectors back */
+    ret = block_write(dev, start_sector, sector_count, temp_buffer);
+
+    heap_free(temp_buffer);
+    return ret;
 }
 
 void block_print_devices(void) {
@@ -1029,4 +1141,130 @@ void virtio_blk_read_cmd(uint64_t sector, uint32_t count) {
     }
 
     dma_free_coherent(buffer, size, 0);
+}
+
+void virtio_blk_perf_test(void) {
+    console_printf("\n=== VirtIO Block Performance Test ===\n");
+
+    if (virtio_blk_count == 0) {
+        console_printf("SKIP: No VirtIO block devices available\n");
+        return;
+    }
+
+    virtio_blk_dev_t* dev = &virtio_blk_devices[0];
+
+    /* Test parameters */
+    const size_t TEST_SIZE_MB = 50;  /* Read 50MB for accurate measurement */
+    const size_t TEST_SIZE_BYTES = TEST_SIZE_MB * 1024 * 1024;
+    const uint32_t SECTORS_TO_READ = TEST_SIZE_BYTES / 512;
+
+    /* Check if device is large enough */
+    if (dev->capacity < SECTORS_TO_READ) {
+        console_printf("SKIP: Device too small (%llu sectors, need %u)\n",
+                       dev->capacity, SECTORS_TO_READ);
+        console_printf("  Create larger disk: dd if=/dev/zero of=test.img bs=1M count=100\n");
+        return;
+    }
+
+    console_printf("Test configuration:\n");
+    console_printf("  Device:      %s\n", dev->block_dev.name);
+    console_printf("  Capacity:    %llu MB\n", (dev->capacity * 512) / (1024 * 1024));
+    console_printf("  Test size:   %zu MB (%u sectors)\n", TEST_SIZE_MB, SECTORS_TO_READ);
+    console_printf("  Target:      100 MB/s\n");
+    console_printf("\n");
+
+    /* Allocate buffer for reads - use smaller chunks to avoid allocation failures */
+    const size_t CHUNK_SIZE = 1024 * 1024;  /* 1MB chunks */
+    const uint32_t SECTORS_PER_CHUNK = CHUNK_SIZE / 512;
+    uint8_t* buffer = (uint8_t*)dma_alloc_coherent(CHUNK_SIZE, NULL);
+    if (!buffer) {
+        console_printf("FAIL: Could not allocate %zu byte buffer\n", CHUNK_SIZE);
+        return;
+    }
+
+    /* Get CPU timestamp counter for timing */
+    extern uint64_t rdtsc(void);
+
+    console_printf("Starting sequential read test...\n");
+
+    /* Start timing */
+    uint64_t start_tsc = rdtsc();
+
+    /* Read data in chunks */
+    uint32_t sectors_read = 0;
+    int errors = 0;
+
+    while (sectors_read < SECTORS_TO_READ) {
+        uint32_t sectors_to_read = SECTORS_PER_CHUNK;
+        if (sectors_read + sectors_to_read > SECTORS_TO_READ) {
+            sectors_to_read = SECTORS_TO_READ - sectors_read;
+        }
+
+        int ret = virtio_blk_read(dev, sectors_read, sectors_to_read, buffer);
+        if (ret != VIRTIO_OK) {
+            console_printf("ERROR: Read failed at sector %u (error %d)\n", sectors_read, ret);
+            errors++;
+            break;
+        }
+
+        sectors_read += sectors_to_read;
+
+        /* Show progress every 10MB */
+        if (sectors_read % (10 * 1024 * 1024 / 512) == 0) {
+            console_printf("  Progress: %u MB / %zu MB\r",
+                          (sectors_read * 512) / (1024 * 1024), TEST_SIZE_MB);
+        }
+    }
+
+    /* End timing */
+    uint64_t end_tsc = rdtsc();
+
+    dma_free_coherent(buffer, CHUNK_SIZE, 0);
+
+    if (errors > 0) {
+        console_printf("\nFAIL: Test aborted due to read errors\n");
+        return;
+    }
+
+    console_printf("\nRead complete: %u sectors (%zu MB)\n",
+                   sectors_read, (size_t)(sectors_read * 512) / (1024 * 1024));
+
+    /* Calculate throughput */
+    uint64_t elapsed_cycles = end_tsc - start_tsc;
+
+    /* Assume CPU frequency ~2.0 GHz for rough estimate */
+    /* In real hardware, we'd query CPUID or calibrate the TSC */
+    const uint64_t CPU_FREQ_MHZ = 2000;  /* 2.0 GHz */
+    uint64_t elapsed_us = elapsed_cycles / CPU_FREQ_MHZ;
+
+    if (elapsed_us == 0) {
+        console_printf("ERROR: Timer resolution too low\n");
+        return;
+    }
+
+    /* Calculate MB/s */
+    uint64_t bytes_read = (uint64_t)sectors_read * 512;
+    uint64_t throughput_mbps = (bytes_read * 1000000ULL) / (elapsed_us * 1024 * 1024);
+
+    console_printf("\nPerformance results:\n");
+    console_printf("  Elapsed time:  %llu us (%.2f ms)\n",
+                   elapsed_us, (double)elapsed_us / 1000.0);
+    console_printf("  Throughput:    %llu MB/s\n", throughput_mbps);
+    console_printf("\n");
+
+    /* Check against target */
+    const uint64_t TARGET_MBPS = 100;
+    if (throughput_mbps >= TARGET_MBPS) {
+        console_printf("✓ PASS: Throughput meets target (%llu MB/s >= %llu MB/s)\n",
+                       throughput_mbps, TARGET_MBPS);
+    } else {
+        console_printf("✗ FAIL: Throughput below target (%llu MB/s < %llu MB/s)\n",
+                       throughput_mbps, TARGET_MBPS);
+    }
+
+    console_printf("\nNote: Actual throughput may vary based on:\n");
+    console_printf("  - CPU frequency (assumed %llu MHz)\n", CPU_FREQ_MHZ);
+    console_printf("  - QEMU I/O backend configuration\n");
+    console_printf("  - Host disk performance\n");
+    console_printf("  - Virtualization overhead\n");
 }
