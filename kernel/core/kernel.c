@@ -161,7 +161,7 @@ void kernel_main(void)
 
     /* CAN bus driver */
     console_printf("Initializing CAN bus driver...\n");
-    can_init();
+    can_init(NULL);
 
     /* Initialize task scheduler */
     console_printf("Initializing task scheduler...\n");
