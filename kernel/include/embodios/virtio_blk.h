@@ -226,6 +226,13 @@ void virtio_blk_info(void);
  */
 void virtio_blk_read_cmd(uint64_t sector, uint32_t count);
 
+/**
+ * Run performance test (blkperf command)
+ *
+ * Tests read throughput and verifies it meets 100MB/s target.
+ */
+void virtio_blk_perf_test(void);
+
 /* ============================================================================
  * Statistics
  * ============================================================================ */

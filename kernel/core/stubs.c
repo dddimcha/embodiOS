@@ -91,7 +91,7 @@ void process_command(const char *command)
         console_printf("  dmatest, dmastats, pcitest, pcistats\n");
         console_printf("\n");
         console_printf("Storage:\n");
-        console_printf("  blkinfo, blktest, blkread, blkdevs, loadmodel, loadtiny\n");
+        console_printf("  blkinfo, blktest, blkperf, blkread, blkdevs, loadmodel, loadtiny\n");
         console_printf("\n");
         console_printf("Network:\n");
         console_printf("  net, netinfo, nettest, ping <ip>\n");
@@ -311,6 +311,8 @@ void process_command(const char *command)
         virtio_blk_info();
     } else if (strcmp(command, "blktest") == 0) {
         virtio_blk_test();
+    } else if (strcmp(command, "blkperf") == 0) {
+        virtio_blk_perf_test();
     } else if (strncmp(command, "blkread ", 8) == 0) {
         /* Parse: blkread <sector> [count] */
         const char *args = command + 8;
