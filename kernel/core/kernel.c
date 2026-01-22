@@ -14,6 +14,7 @@
 #include <embodios/virtio_mmio.h>
 #include <embodios/virtio_net.h>
 #include <embodios/tcpip.h>
+#include <embodios/can.h>
 #include <embodios/model_registry.h>
 
 /* Kernel version info */
@@ -157,6 +158,10 @@ void kernel_main(void)
     /* TCP/IP stack */
     console_printf("Initializing TCP/IP stack...\n");
     tcpip_init();
+
+    /* CAN bus driver */
+    console_printf("Initializing CAN bus driver...\n");
+    can_init();
 
     /* Initialize task scheduler */
     console_printf("Initializing task scheduler...\n");
