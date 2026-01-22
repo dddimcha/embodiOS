@@ -770,7 +770,9 @@ int socket_connect(int fd, uint32_t ip, uint16_t port)
     /* TCP: Send SYN */
     sockets[fd].seq_num = 12345;  /* TODO: Random ISN */
     sockets[fd].state = TCP_SYN_SENT;
-    /* TODO: Actually send SYN packet */
+    tcp_send_packet(sockets[fd].remote_ip, sockets[fd].remote_port,
+                    sockets[fd].local_port, sockets[fd].seq_num,
+                    0, TCP_SYN, NULL, 0);
 
     return NET_OK;
 }
