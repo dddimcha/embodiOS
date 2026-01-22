@@ -136,6 +136,7 @@ KERNEL_C_SOURCES = \
     core/dma.c \
     core/dma_test.c \
     core/lock_test.c \
+    core/hal_cpu.c \
     drivers/pci/pci.c \
     drivers/block/virtio_blk.c \
     drivers/block/virtio_mmio.c \
