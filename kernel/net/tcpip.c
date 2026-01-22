@@ -790,7 +790,20 @@ int socket_send(int fd, const void *data, size_t len)
     }
 
     /* TCP send - simplified */
-    return NET_ERR_INVALID;  /* TODO: Implement TCP send */
+    if (sockets[fd].state != TCP_ESTABLISHED) {
+        return NET_ERR_INVALID;  /* Connection not established */
+    }
+
+    int ret = tcp_send_packet(sockets[fd].remote_ip, sockets[fd].remote_port,
+                               sockets[fd].local_port, sockets[fd].seq_num,
+                               sockets[fd].ack_num, TCP_PSH | TCP_ACK,
+                               data, len);
+
+    if (ret >= 0) {
+        sockets[fd].seq_num += len;  /* Advance sequence number */
+    }
+
+    return ret;
 }
 
 int socket_recv(int fd, void *buffer, size_t len)
