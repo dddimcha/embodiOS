@@ -166,7 +166,12 @@ void kernel_main(void)
     /* Initialize task scheduler */
     console_printf("Initializing task scheduler...\n");
     scheduler_init();
-    
+
+    /* Run scheduler tests */
+    #ifdef SCHEDULER_RUN_TESTS
+    scheduler_test_init();
+    #endif
+
     /* Initialize AI runtime */
     console_printf("Initializing AI runtime...\n");
     model_runtime_init();
