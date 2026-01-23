@@ -319,6 +319,16 @@ endif
 embodios.bin: embodios.elf
 	$(OBJCOPY) -O binary $< $@
 
+# Sign kernel for UEFI Secure Boot
+sign: embodios.elf
+	@echo "Signing kernel for Secure Boot..."
+	./scripts/sign_kernel.sh embodios.elf
+
+# Verify kernel signature
+sign-check: embodios.elf.signed
+	@echo "Verifying kernel signature..."
+	sbverify --cert secure-boot/DB.crt embodios.elf.signed
+
 # Pattern rules
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -331,7 +341,7 @@ embodios.bin: embodios.elf
 
 # Clean
 clean:
-	rm -f $(ALL_OBJS) embodios.elf embodios.bin embodios.iso
+	rm -f $(ALL_OBJS) embodios.elf embodios.bin embodios.iso embodios.elf.signed
 	rm -f ai/tinystories_model_flag.o ai/tokenizer_flag.o ai/gguf_model_flag.o ai/gguf_model.o
 
 # Embed TinyStories model as binary object
@@ -429,4 +439,4 @@ iso-quick: embodios.elf
 	grub-mkrescue -o embodios.iso grub_iso 2>/dev/null || echo "grub-mkrescue not available"
 endif
 
-.PHONY: all clean iso iso-prod iso-full iso-quick
+.PHONY: all clean iso iso-prod iso-full iso-quick sign sign-check

@@ -55,12 +55,14 @@ As a bare-metal operating system running AI models in kernel space, EMBODIOS has
 
 - **No memory protection**: Currently runs in flat memory model
 - **No privilege separation**: All code runs in kernel mode
-- **No secure boot**: Boot chain is not cryptographically verified
+
+### Implemented Security Features
+
+- Secure boot support with cryptographic verification of boot chain
 
 ### Planned Security Features
 
 - Memory protection via MPU/MMU
-- Secure boot support
 - Model integrity verification
 - Hardware security module (HSM) integration
 

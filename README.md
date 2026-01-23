@@ -9,6 +9,7 @@
 
 ## What's New (January 2026)
 
+- **Secure Boot:** UEFI Secure Boot support with signed kernel validation
 - **NVMe Driver:** Direct SSD access for model loading
 - **Streaming Inference:** Memory-efficient inference engine
 - **Network Stack:** VirtIO-net, e1000e, TCP/IP foundations
@@ -72,6 +73,7 @@ EMBODIOS> lspci          # List PCI devices
 | **Integer-Only Math** | No FPU required - runs on any x86_64 |
 | **SIMD Acceleration** | SSE2/AVX2 for matrix operations |
 | **Zero-Copy DMA** | Identity-mapped memory for direct hardware access |
+| **UEFI Secure Boot** | Signed kernel validation for trusted boot chain |
 | **<1s Boot Time** | From power-on to AI inference ready |
 
 ## Architecture
