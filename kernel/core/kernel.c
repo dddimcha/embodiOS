@@ -3,6 +3,7 @@
 #include <embodios/console.h>
 #include <embodios/mm.h>
 #include <embodios/cpu.h>
+#include <embodios/percpu.h>
 #include <embodios/model.h>
 #include <embodios/interrupt.h>
 #include <embodios/task.h>
@@ -121,6 +122,14 @@ void kernel_main(void)
     /* Initialize heap for AI workloads */
     console_printf("Initializing heap allocator...\n");
     heap_init();
+
+    /* Initialize per-CPU data structures */
+    console_printf("Initializing per-CPU data structures...\n");
+    percpu_init();
+
+    /* Initialize SMP (Symmetric Multi-Processing) */
+    console_printf("Initializing SMP...\n");
+    arch_smp_init();
 
     /* Initialize DMA subsystem */
     console_printf("Initializing DMA subsystem...\n");

@@ -143,6 +143,30 @@ int inference_get_position(void);
  */
 void inference_cleanup(void);
 
+/**
+ * Run batch inference on multiple token sequences
+ *
+ * @param token_ids   Array of input token ID arrays [n_batch][seq_len]
+ * @param seq_lens    Length of each input sequence [n_batch]
+ * @param n_batch     Number of sequences in batch
+ * @param logits_out  Output logits buffer [n_batch][n_vocab]
+ *
+ * @return INFERENCE_OK on success, error code on failure
+ */
+int inference_forward_batch(int** token_ids, int* seq_lens, int n_batch, fixed_t** logits_out);
+
+/**
+ * Run batch inference on multiple text inputs
+ *
+ * @param inputs       Array of input text strings
+ * @param n_inputs     Number of inputs in batch
+ * @param outputs      Array of output buffers
+ * @param output_sizes Array of output buffer sizes
+ *
+ * @return 0 on success (all inputs processed), -1 on failure
+ */
+int inference_run_batch(const char** inputs, int n_inputs, char** outputs, size_t* output_sizes);
+
 /* ============================================================================
  * Core Operations (can be used independently)
  * ============================================================================ */

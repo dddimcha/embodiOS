@@ -80,6 +80,10 @@ typedef struct task {
     struct task *next;          /* Next task in list */
     struct task *next_deadline; /* Next task in deadline-ordered list */
 
+    /* SMP support */
+    uint32_t cpu_id;            /* CPU this task is currently running on */
+    uint32_t cpu_affinity;      /* CPU affinity mask (bit per CPU) */
+
     /* Priority inheritance support */
     uint8_t original_priority;  /* Original priority before inheritance */
     void *blocked_on;           /* Resource task is waiting for (NULL if not blocked) */
@@ -246,6 +250,10 @@ task_t* task_create(const char *name, void (*entry)(void), uint8_t priority)
     task->priority = priority;
     task->deadline = 0;         /* No deadline by default */
     task->next_deadline = NULL;
+
+    /* Initialize SMP fields - allow running on any CPU by default */
+    task->cpu_id = 0;
+    task->cpu_affinity = 0xFFFFFFFF;  /* All CPUs allowed */
 
     /* Initialize priority inheritance fields */
     task->original_priority = priority;  /* Save original priority */
@@ -841,6 +849,39 @@ void task_exit(void)
 
         schedule();
     }
+}
+
+/* ============================================================================
+ * Public API - CPU Affinity (SMP)
+ * ============================================================================ */
+
+/* Set CPU affinity for a task */
+void task_set_affinity(task_t *task, uint32_t cpu_mask)
+{
+    if (task) {
+        task->cpu_affinity = cpu_mask;
+    }
+}
+
+/* Get CPU affinity for a task */
+uint32_t task_get_affinity(task_t *task)
+{
+    return task ? task->cpu_affinity : 0;
+}
+
+/* Pin task to specific CPU */
+void task_pin_to_cpu(task_t *task, uint32_t cpu_id)
+{
+    if (task && cpu_id < 32) {
+        task->cpu_affinity = (1U << cpu_id);
+        task->cpu_id = cpu_id;
+    }
+}
+
+/* Get current CPU ID for a task */
+uint32_t task_get_cpu(task_t *task)
+{
+    return task ? task->cpu_id : 0;
 }
 
 /* ============================================================================

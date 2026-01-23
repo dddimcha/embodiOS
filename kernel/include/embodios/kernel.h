@@ -21,6 +21,7 @@ void kernel_panic(const char* msg, ...) __attribute__((noreturn));
 void arch_early_init(void);
 void arch_cpu_init(void);
 void arch_interrupt_init(void);
+void arch_smp_init(void);
 void arch_enable_interrupts(void);
 void arch_disable_interrupts(void);
 void arch_halt(void);

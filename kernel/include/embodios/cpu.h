@@ -38,6 +38,10 @@ bool cpu_has_feature(uint32_t feature);
 uint32_t cpu_get_id(void);
 uint64_t cpu_get_timestamp(void);
 
+/* SMP support */
+uint32_t smp_num_cpus(void);
+uint32_t cpu_count(void);
+
 /* Cache control */
 void cpu_flush_cache(void);
 void cpu_invalidate_cache(void);

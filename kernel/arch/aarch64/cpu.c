@@ -153,6 +153,18 @@ static const char* cpu_get_neon_status(void)
     return "None";
 }
 
+/* Get number of CPUs for SMP */
+uint32_t smp_num_cpus(void)
+{
+    return arm64_cpu_info.cores;
+}
+
+/* Get CPU count (alias for smp_num_cpus) */
+uint32_t cpu_count(void)
+{
+    return arm64_cpu_info.cores;
+}
+
 void arch_enable_interrupts(void)
 {
     /* Enable interrupts */

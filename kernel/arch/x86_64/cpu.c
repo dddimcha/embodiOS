@@ -210,6 +210,18 @@ bool cpu_has_feature(uint32_t feature)
     return (cpu_info.features & feature) != 0;
 }
 
+/* Get number of CPUs for SMP */
+uint32_t smp_num_cpus(void)
+{
+    return cpu_info.cores;
+}
+
+/* Get CPU count (alias for smp_num_cpus) */
+uint32_t cpu_count(void)
+{
+    return cpu_info.cores;
+}
+
 /* Flush CPU cache */
 void cpu_flush_cache(void)
 {

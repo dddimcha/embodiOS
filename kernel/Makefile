@@ -132,6 +132,7 @@ KERNEL_C_SOURCES = \
     core/stubs.c \
     core/interrupt.c \
     core/task.c \
+    core/percpu.c \
     core/gdb_stub.c \
     core/dma.c \
     core/dma_test.c \
@@ -235,7 +236,8 @@ ifeq ($(ARCH),x86_64)
         $(ARCH_DIR)/idt.c \
         $(ARCH_DIR)/paging.c \
         $(ARCH_DIR)/keyboard.c \
-        $(ARCH_DIR)/serial.c
+        $(ARCH_DIR)/serial.c \
+        $(ARCH_DIR)/smp.c
 endif
 
 ifeq ($(ARCH),aarch64)
