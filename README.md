@@ -9,6 +9,7 @@
 
 ## What's New (January 2026)
 
+- **Stability Testing Suite:** Automated long-running tests (1h-72h) for detecting memory leaks and performance degradation
 - **Secure Boot:** UEFI Secure Boot support with signed kernel validation
 - **NVMe Driver:** Direct SSD access for model loading
 - **Streaming Inference:** Memory-efficient inference engine
@@ -121,6 +122,7 @@ Full documentation available on the [EMBODIOS Wiki](https://github.com/dddimcha/
 - [Quantized Integer Inference](https://github.com/dddimcha/embodiOS/wiki/Quantized-Integer-Inference) - How integer-only AI works
 - [Performance Benchmarks](https://github.com/dddimcha/embodiOS/wiki/Performance-Benchmarks) - Benchmark results
 - [Bare Metal Deployment](https://github.com/dddimcha/embodiOS/wiki/Bare-Metal-Deployment) - Real hardware deployment
+- [Stability Testing](docs/stability_testing.md) - Long-running stability test suite
 
 ## Performance Targets
 
