@@ -399,5 +399,7 @@ kernel_stack_top:
 /* Data section */
 .section .data
 .align 8
+.global multiboot_magic
+.global multiboot_info
 multiboot_magic:    .long 0
 multiboot_info:     .long 0
