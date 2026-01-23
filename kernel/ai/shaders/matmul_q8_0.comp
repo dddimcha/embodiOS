@@ -1,0 +1,140 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+/* EMBODIOS Q8_0 Matrix-Vector Multiply Compute Shader
+ * Performs: y = A * x where A is Q8_0 quantized
+ * Reference: kernel/ai/quantized_ops.c
+ *
+ * Block format: d (int16), qs[32] (int8)
+ * 32 values per block
+ * Formula: value = (d * q) >> 7
+ */
+
+/* ============================================================================
+ * Constants
+ * ============================================================================ */
+
+#define QK8_0 32
+#define FIXED_SHIFT 16
+#define FIXED8_SHIFT 8
+
+/* ============================================================================
+ * Buffer Bindings
+ * ============================================================================ */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+/* Q8_0 quantized matrix A (m x n) stored as blocks */
+layout(std430, binding = 0) readonly buffer MatrixA {
+    uint8_t data[];
+} matrix_a;
+
+/* Input vector x (n elements) in Q16.16 fixed-point */
+layout(std430, binding = 1) readonly buffer VectorX {
+    int x[];
+} vector_x;
+
+/* Output vector y (m elements) in Q16.16 fixed-point */
+layout(std430, binding = 2) writeonly buffer VectorY {
+    int y[];
+} vector_y;
+
+/* Dimensions: m (rows), n (cols), n_blocks_per_row */
+layout(push_constant) uniform Params {
+    uint m;
+    uint n;
+    uint n_blocks_per_row;
+} params;
+
+/* ============================================================================
+ * Q8_0 Block Structure (34 bytes total)
+ * Layout: d(2) + qs(32) = 34 bytes
+ * ============================================================================ */
+
+struct BlockQ8_0 {
+    int16_t d;
+    int8_t qs[QK8_0];
+};
+
+/* ============================================================================
+ * Helper Functions
+ * ============================================================================ */
+
+/* Load int16 from byte array at offset */
+int16_t load_int16(uint offset) {
+    uint8_t lo = matrix_a.data[offset];
+    uint8_t hi = matrix_a.data[offset + 1];
+    return int16_t(uint16_t(lo) | (uint16_t(hi) << 8));
+}
+
+/* Load int8 from byte array at offset */
+int8_t load_int8(uint offset) {
+    return int8_t(matrix_a.data[offset]);
+}
+
+/* Convert Q8.8 fixed-point to Q16.16 */
+int fixed8_to_fixed16(int16_t x) {
+    return int(x) << (FIXED_SHIFT - FIXED8_SHIFT);
+}
+
+/* ============================================================================
+ * Q8_0 Block Dequantization and Dot Product
+ * ============================================================================ */
+
+int dequant_and_dot_q8_0(uint block_offset, uint x_offset) {
+    /* Load block header: d (scale) */
+    int16_t d = load_int16(block_offset);
+
+    /* Convert scale to fixed-point */
+    int d_fixed = fixed8_to_fixed16(d);
+
+    /* Compute dot product over 32 values */
+    int sum = 0;
+    uint qs_offset = block_offset + 2;
+
+    /* Process 32 values */
+    for (int i = 0; i < QK8_0; i++) {
+        /* Load quantized value (signed 8-bit) */
+        int8_t q = load_int8(qs_offset + i);
+
+        /* Dequantize: value = (d * q) >> 7 */
+        int dequant_val = (d_fixed * int(q)) >> 7;
+
+        /* Accumulate dot product */
+        sum += dequant_val * vector_x.x[x_offset + i];
+    }
+
+    return sum;
+}
+
+/* ============================================================================
+ * Main Compute Shader
+ * ============================================================================ */
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+
+    /* Bounds check */
+    if (row >= params.m) {
+        return;
+    }
+
+    /* Compute dot product for this row */
+    int sum = 0;
+
+    /* Process blocks across the row */
+    for (uint block_idx = 0; block_idx < params.n_blocks_per_row; block_idx++) {
+        /* Calculate block offset in matrix A */
+        uint block_offset = (row * params.n_blocks_per_row + block_idx) * 34;
+
+        /* Calculate x vector offset */
+        uint x_offset = block_idx * QK8_0;
+
+        /* Dequantize block and accumulate dot product */
+        sum += dequant_and_dot_q8_0(block_offset, x_offset);
+    }
+
+    /* Write result (shift down to account for fixed-point multiplication) */
+    vector_y.y[row] = sum >> FIXED_SHIFT;
+}

@@ -2,11 +2,14 @@
  * Dequantize Q4_K, Q5_K, Q6_K, and Q8_0 blocks to fixed-point values
  * NO FLOATING-POINT - Uses Q16.16 fixed-point arithmetic
  *
+ * Supports runtime backend switching: GPU (Vulkan) or CPU fallback
+ *
  * Reference: llama.cpp/ggml-quants.c
  */
 
 #include <embodios/types.h>
 #include <embodios/quantized_ops.h>
+#include <embodios/gpu_backend.h>
 
 /* ============================================================================
  * Block Size Information
@@ -499,7 +502,25 @@ const char* get_type_name(quant_type_t type)
 
 /* ============================================================================
  * Quantized Matrix-Vector Multiplication
+ *
+ * RUNTIME BACKEND SWITCHING:
+ * Each matmul function checks if GPU backend is available and dispatches to
+ * the appropriate implementation:
+ * - GPU backend: Uses Vulkan compute shaders for acceleration
+ * - CPU backend: Uses integer-only fixed-point arithmetic
  * ============================================================================ */
+
+/* Forward declarations for GPU backend matmul operations */
+#ifdef GGML_USE_VULKAN
+extern int ggml_backend_vk_matmul_q4_k(const void* A_quantized, size_t A_quant_size,
+                                        const fixed_t* x, fixed_t* y, size_t m, size_t n);
+extern int ggml_backend_vk_matmul_q5_k(const void* A_quantized, size_t A_quant_size,
+                                        const fixed_t* x, fixed_t* y, size_t m, size_t n);
+extern int ggml_backend_vk_matmul_q6_k(const void* A_quantized, size_t A_quant_size,
+                                        const fixed_t* x, fixed_t* y, size_t m, size_t n);
+extern int ggml_backend_vk_matmul_q8_0(const void* A_quantized, size_t A_quant_size,
+                                        const fixed_t* x, fixed_t* y, size_t m, size_t n);
+#endif
 
 /**
  * matmul_q4_k - Matrix-vector multiply with Q4_K quantized matrix
@@ -511,12 +532,22 @@ const char* get_type_name(quant_type_t type)
  * @n: Number of columns in matrix
  *
  * Computes y = A * x where A is Q4_K quantized.
+ * Runtime backend switching: GPU (Vulkan) if available, else CPU fallback.
  * Returns: 0 on success
  */
 int matmul_q4_k(const void* A_quantized, size_t A_quant_size,
                 const fixed_t* x, fixed_t* y,
                 size_t m, size_t n)
 {
+    /* Runtime backend selection: Try GPU first, fallback to CPU */
+#ifdef GGML_USE_VULKAN
+    if (gpu_backend_is_available()) {
+        /* GPU backend available - use Vulkan compute shaders */
+        return ggml_backend_vk_matmul_q4_k(A_quantized, A_quant_size, x, y, m, n);
+    }
+#endif
+
+    /* CPU backend - integer-only fixed-point implementation */
     const struct block_q4_k* A_blocks = (const struct block_q4_k*)A_quantized;
     size_t blocks_per_row = (n + QK_K - 1) / QK_K;
 
@@ -557,12 +588,22 @@ int matmul_q4_k(const void* A_quantized, size_t A_quant_size,
  * @n: Number of columns in matrix
  *
  * Computes y = A * x where A is Q5_K quantized.
+ * Runtime backend switching: GPU (Vulkan) if available, else CPU fallback.
  * Returns: 0 on success
  */
 int matmul_q5_k(const void* A_quantized, size_t A_quant_size,
                 const fixed_t* x, fixed_t* y,
                 size_t m, size_t n)
 {
+    /* Runtime backend selection: Try GPU first, fallback to CPU */
+#ifdef GGML_USE_VULKAN
+    if (gpu_backend_is_available()) {
+        /* GPU backend available - use Vulkan compute shaders */
+        return ggml_backend_vk_matmul_q5_k(A_quantized, A_quant_size, x, y, m, n);
+    }
+#endif
+
+    /* CPU backend - integer-only fixed-point implementation */
     const struct block_q5_k* A_blocks = (const struct block_q5_k*)A_quantized;
     size_t blocks_per_row = (n + QK_K - 1) / QK_K;
 
@@ -603,12 +644,22 @@ int matmul_q5_k(const void* A_quantized, size_t A_quant_size,
  * @n: Number of columns in matrix
  *
  * Computes y = A * x where A is Q6_K quantized.
+ * Runtime backend switching: GPU (Vulkan) if available, else CPU fallback.
  * Returns: 0 on success
  */
 int matmul_q6_k(const void* A_quantized, size_t A_quant_size,
                 const fixed_t* x, fixed_t* y,
                 size_t m, size_t n)
 {
+    /* Runtime backend selection: Try GPU first, fallback to CPU */
+#ifdef GGML_USE_VULKAN
+    if (gpu_backend_is_available()) {
+        /* GPU backend available - use Vulkan compute shaders */
+        return ggml_backend_vk_matmul_q6_k(A_quantized, A_quant_size, x, y, m, n);
+    }
+#endif
+
+    /* CPU backend - integer-only fixed-point implementation */
     const struct block_q6_k* A_blocks = (const struct block_q6_k*)A_quantized;
     size_t blocks_per_row = (n + QK_K - 1) / QK_K;
 
@@ -649,12 +700,22 @@ int matmul_q6_k(const void* A_quantized, size_t A_quant_size,
  * @n: Number of columns in matrix
  *
  * Computes y = A * x where A is Q8_0 quantized.
+ * Runtime backend switching: GPU (Vulkan) if available, else CPU fallback.
  * Returns: 0 on success
  */
 int matmul_q8_0(const void* A_quantized, size_t A_quant_size,
                 const fixed_t* x, fixed_t* y,
                 size_t m, size_t n)
 {
+    /* Runtime backend selection: Try GPU first, fallback to CPU */
+#ifdef GGML_USE_VULKAN
+    if (gpu_backend_is_available()) {
+        /* GPU backend available - use Vulkan compute shaders */
+        return ggml_backend_vk_matmul_q8_0(A_quantized, A_quant_size, x, y, m, n);
+    }
+#endif
+
+    /* CPU backend - integer-only fixed-point implementation */
     const struct block_q8_0* A_blocks = (const struct block_q8_0*)A_quantized;
     size_t blocks_per_row = (n + QK8_0 - 1) / QK8_0;
 
@@ -696,11 +757,14 @@ int matmul_q8_0(const void* A_quantized, size_t A_quant_size,
  * @n: Number of columns in matrix
  *
  * Computes y = A * x where A is quantized in the specified format.
+ * Runtime backend switching: Each type-specific function automatically selects
+ * GPU backend (Vulkan) if available, otherwise falls back to CPU implementation.
  * Returns: 0 on success, -2 on unsupported type
  */
 int matmul_quantized(quant_type_t type, const void* A_quantized, size_t A_quant_size,
                      const fixed_t* x, fixed_t* y, size_t m, size_t n)
 {
+    /* Dispatch to type-specific matmul (each handles GPU/CPU backend selection) */
     switch (type) {
         case QUANT_TYPE_Q4_K:
             return matmul_q4_k(A_quantized, A_quant_size, x, y, m, n);
