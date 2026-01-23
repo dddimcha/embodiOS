@@ -8,6 +8,8 @@
 *.dylib
 *.exe
 *.dll
+*.elf
+!kernel/arch/**/*.elf
 
 # EMBODIOS specific
 *.aios
@@ -120,7 +122,8 @@ secrets/
 # External dependencies (use submodules instead)
 llama.c/
 
-# Auto Claude data directory
+# Auto Claude data directory (anywhere in repo)
+**/.auto-claude/
 .auto-claude/
 
 # Auto Claude generated files
@@ -131,3 +134,15 @@ llama.c/
 .security-key
 logs/security/
 checkpoints/
+
+# Verification/test result files (generated, not source)
+*_RESULTS.md
+*_VERIFICATION*.md
+*_COMPLETE.md
+SUBTASK-*.md
+memory_analysis.txt
+
+# Temporary test scripts at root
+/test_*.py
+/benchmark_metrics.py
+/e2e_*.py
