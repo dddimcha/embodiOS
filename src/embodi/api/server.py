@@ -9,7 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 
 from ..core.inference import EMBODIOSInferenceEngine
-from .routes import router, set_inference_engine
+from .routes import router, metrics_router, set_inference_engine
+from .middleware.metrics_middleware import MetricsMiddleware
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +46,9 @@ def create_app(model_path: Optional[str] = None, debug: bool = False) -> FastAPI
         allow_headers=["*"],
     )
 
+    # Add metrics middleware for request tracking
+    app.add_middleware(MetricsMiddleware)
+
     # Initialize inference engine
     engine = EMBODIOSInferenceEngine()
 
@@ -68,6 +72,7 @@ def create_app(model_path: Optional[str] = None, debug: bool = False) -> FastAPI
 
     # Include API routes
     app.include_router(router)
+    app.include_router(metrics_router)
 
     # Health check endpoint
     @app.get("/health")
@@ -76,7 +81,8 @@ def create_app(model_path: Optional[str] = None, debug: bool = False) -> FastAPI
         return {
             "status": "healthy",
             "model_loaded": engine.model_loaded,
-            "version": "0.1.0"
+            "version": "0.1.0",
+            "metrics_enabled": True
         }
 
     # Root endpoint

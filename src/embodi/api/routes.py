@@ -4,10 +4,11 @@ API Routes - FastAPI endpoints for EMBODIOS inference
 
 from typing import AsyncGenerator, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 import json
 import time
 import uuid
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from .models import (
     CompletionRequest,
@@ -17,11 +18,13 @@ from .models import (
     CompletionStreamChunk,
 )
 from ..core.inference import EMBODIOSInferenceEngine
+from .metrics import get_metrics_collector
 
 # Global inference engine instance (will be set by server)
 _inference_engine: Optional[EMBODIOSInferenceEngine] = None
 
 router = APIRouter(prefix="/v1", tags=["completions"])
+metrics_router = APIRouter(tags=["metrics"])
 
 
 def set_inference_engine(engine: EMBODIOSInferenceEngine):
@@ -193,3 +196,21 @@ async def create_completion(
     )
 
     return response
+
+
+@metrics_router.get("/metrics")
+async def metrics():
+    """
+    Prometheus metrics endpoint
+
+    Returns metrics in Prometheus text exposition format for scraping.
+    Includes inference request counts, latency histograms, memory usage, and uptime.
+    """
+    # Update system metrics before generating output
+    collector = get_metrics_collector()
+    collector.update_system_metrics()
+
+    # Generate Prometheus text format
+    metrics_output = generate_latest()
+
+    return Response(content=metrics_output, media_type=CONTENT_TYPE_LATEST)
