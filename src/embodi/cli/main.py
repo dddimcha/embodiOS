@@ -13,6 +13,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from embodi import __version__
 from embodi.builder import EmbodiBuilder
 from embodi.runtime import EmbodiRuntime
+from embodi.cli.benchmark import benchmark
 # Commands are implemented directly in this file
 
 console = Console()
@@ -88,117 +89,6 @@ def pull(ctx, model, output, format, quantize):
         else:
             console.print(f"[red]✗ Failed to download model[/red]")
             sys.exit(1)
-
-@cli.command()
-@click.argument('model', required=True)
-@click.option('--target', '-t', required=True, help='Target device or host (IP:port or device name)')
-@click.option('--verify', is_flag=True, help='Verify update after push')
-@click.option('--force', is_flag=True, help='Force update even if same version')
-@click.option('--rollback', is_flag=True, help='Enable automatic rollback on failure')
-@click.pass_context
-def push(ctx, model, target, verify, force, rollback):
-    """Push model update over-the-air (OTA) to device
-
-    Examples:
-        embodi push models/my-model.aios --target 192.168.1.100:8000
-        embodi push my-model:latest --target device-name
-        embodi push models/updated.aios --target 10.0.0.50 --verify
-    """
-    from embodi.ota.pusher import OTAPusher
-
-    console.print(f"[bold blue]Pushing OTA update: {model}[/bold blue]")
-    console.print(f"[blue]Target: {target}[/blue]")
-
-    pusher = OTAPusher(debug=ctx.obj['debug'])
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Pushing update...", total=None)
-
-        success = pusher.push_update(
-            model=model,
-            target=target,
-            verify=verify,
-            force=force,
-            rollback=rollback,
-            progress_callback=lambda msg: progress.update(task, description=msg)
-        )
-
-    if success:
-        console.print("[bold green]✓ OTA update pushed successfully![/bold green]")
-        if verify:
-            console.print("[green]✓ Update verified on target device[/green]")
-    else:
-        console.print("[bold red]✗ Failed to push OTA update[/bold red]")
-        sys.exit(1)
-
-@cli.group()
-@click.pass_context
-def models(ctx):
-    """Manage models on remote devices"""
-    pass
-
-@models.command('list')
-@click.option('--target', '-t', help='Target device or host (IP:port or device name)')
-@click.option('--all', '-a', is_flag=True, help='Show all models including inactive')
-@click.pass_context
-def models_list(ctx, target, all):
-    """List models on remote device(s)
-
-    Shows current model status on remote EMBODIOS devices.
-
-    Examples:
-        embodi models list --target 192.168.1.100:8000
-        embodi models list --target device-name --all
-    """
-    from embodi.ota.client import OTAClient
-
-    console.print("[bold blue]Fetching remote model status...[/bold blue]")
-
-    if target:
-        console.print(f"[blue]Target: {target}[/blue]")
-
-    client = OTAClient(debug=ctx.obj['debug'])
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Querying devices...", total=None)
-
-        models_list = client.list_remote_models(
-            target=target,
-            show_all=all
-        )
-
-    if not models_list:
-        console.print("[yellow]No models found on remote device(s)[/yellow]")
-        return
-
-    table = Table(title="Remote Models")
-    table.add_column("Device", style="cyan")
-    table.add_column("Model Name", style="green")
-    table.add_column("Version", style="yellow")
-    table.add_column("Status", style="blue")
-    table.add_column("Size", style="magenta")
-    table.add_column("Updated", style="white")
-
-    for model in models_list:
-        status_color = "green" if model.get('status') == 'active' else "yellow"
-        table.add_row(
-            model.get('device', 'unknown'),
-            model.get('name', 'unknown'),
-            model.get('version', 'unknown'),
-            f"[{status_color}]{model.get('status', 'unknown')}[/{status_color}]",
-            model.get('size', 'unknown'),
-            model.get('updated', 'unknown')
-        )
-
-    console.print(table)
 
 @cli.command()
 @click.option('-f', '--file', required=True, help='Modelfile path')
@@ -530,6 +420,9 @@ def serve(ctx, host, port, model, reload):
         if ctx.obj['debug']:
             raise
         sys.exit(1)
+
+# Register benchmark command
+cli.add_command(benchmark)
 
 def main():
     """Main entry point"""
