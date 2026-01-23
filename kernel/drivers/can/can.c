@@ -14,6 +14,9 @@
 /* Debug output (uncomment to enable) */
 /* #define CAN_DEBUG 1 */
 
+/* Forward declarations */
+static pci_driver_t can_driver;
+
 /* ============================================================================
  * Module State
  * ============================================================================ */
@@ -133,6 +136,8 @@ static bool can_passes_filters(const can_frame_t *frame)
  */
 int can_init(const can_config_t *config)
 {
+    int ret;
+
     console_printf("[CAN] Initializing CAN bus driver...\n");
 
     /* Initialize device structure */
@@ -163,14 +168,27 @@ int can_init(const can_config_t *config)
 
     /* Set initial state */
     g_can.state = CAN_STATE_STOPPED;
+
+    /* Check if PCI is initialized */
+    if (!pci_is_initialized()) {
+        console_printf("[CAN] ERROR: PCI subsystem not initialized\n");
+        return CAN_ERR_NO_DEVICE;
+    }
+
+    /* Register PCI driver */
+    console_printf("[CAN] Registering PCI driver...\n");
+    ret = pci_register_driver(&can_driver);
+    if (ret != PCI_OK) {
+        console_printf("[CAN] ERROR: Failed to register PCI driver (code: %d)\n", ret);
+        return CAN_ERR_NO_DEVICE;
+    }
+
     g_can.initialized = true;
 
     console_printf("[CAN] Driver initialized (baud: %d bps)\n", g_can.config.baud_rate);
     console_printf("[CAN] RX queue: %d frames, TX queue: %d frames\n",
                    CAN_RX_QUEUE_SIZE, CAN_TX_QUEUE_SIZE);
-
-    /* Note: Hardware detection via PCI will be added in phase 2 */
-    console_printf("[CAN] Waiting for PCI device registration...\n");
+    console_printf("[CAN] PCI driver registered successfully\n");
 
     return CAN_OK;
 }
@@ -305,6 +323,7 @@ int can_stop(void)
  */
 int can_send(const can_frame_t *frame, uint32_t timeout_ms)
 {
+    (void)timeout_ms;  /* Unused in polling mode */
     int ret;
 
     if (!g_can.initialized) {
@@ -362,6 +381,8 @@ int can_send_async(const can_frame_t *frame)
  */
 int can_receive(can_frame_t *frame, uint32_t timeout_ms)
 {
+    (void)timeout_ms;  /* Unused in polling mode */
+
     if (!g_can.initialized) {
         return CAN_ERR_NOT_INIT;
     }
@@ -374,20 +395,37 @@ int can_receive(can_frame_t *frame, uint32_t timeout_ms)
         return CAN_ERR_INVALID;
     }
 
-    /* Check if RX queue has data */
-    if (g_can.rx_head == g_can.rx_tail) {
-        return CAN_ERR_EMPTY;  /* No frames available */
-    }
+    /* Poll for frames that pass filters */
+    while (true) {
+        /* Check if RX queue has data */
+        if (g_can.rx_head == g_can.rx_tail) {
+            return CAN_ERR_EMPTY;  /* No frames available */
+        }
 
-    /* Retrieve frame from queue */
-    *frame = g_can.rx_queue[g_can.rx_tail];
-    g_can.rx_tail = (g_can.rx_tail + 1) % CAN_RX_QUEUE_SIZE;
+        /* Retrieve candidate frame from queue */
+        can_frame_t candidate = g_can.rx_queue[g_can.rx_tail];
+        g_can.rx_tail = (g_can.rx_tail + 1) % CAN_RX_QUEUE_SIZE;
+
+        /* Check if frame passes filters */
+        if (can_passes_filters(&candidate)) {
+            /* Frame accepted */
+            *frame = candidate;
 
 #ifdef CAN_DEBUG
-    console_printf("[CAN] RX: ID=0x%x DLC=%d\n", frame->id, frame->dlc);
+            console_printf("[CAN] RX: ID=0x%x DLC=%d (accepted)\n", frame->id, frame->dlc);
 #endif
+            return CAN_OK;
+        }
 
-    return CAN_OK;
+        /* Frame filtered out, try next frame */
+#ifdef CAN_DEBUG
+        console_printf("[CAN] RX: ID=0x%x (filtered)\n", candidate.id);
+#endif
+        /* Loop continues to check next frame */
+    }
+
+    /* Unreachable, but keeps compiler happy */
+    return CAN_ERR_EMPTY;
 }
 
 /**
