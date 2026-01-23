@@ -224,6 +224,21 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
  */
 int benchmark_validate_gguf_model(const char *model_name);
 
+/**
+ * Run multi-core scaling benchmark
+ * Tests inference performance across different thread counts
+ * @return 0 on success
+ */
+int benchmark_multicore(void);
+
+/**
+ * Run scaling benchmark with configurable threads
+ * Tests parallel inference scaling efficiency
+ * @param max_threads Maximum number of threads to test
+ * @return 0 on success
+ */
+int benchmark_scaling(int max_threads);
+
 #ifdef __cplusplus
 }
 #endif

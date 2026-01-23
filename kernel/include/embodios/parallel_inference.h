@@ -11,6 +11,15 @@
 /* Maximum threads supported */
 #define PARALLEL_MAX_THREADS 8
 
+/* Per-core timing statistics */
+typedef struct {
+    uint64_t total_cycles;      /* Total cycles spent working */
+    uint64_t work_items;        /* Total work items processed */
+    uint64_t idle_cycles;       /* Cycles spent idle */
+    uint32_t core_id;           /* Physical core ID */
+    uint32_t invocations;       /* Number of work invocations */
+} core_timing_stats_t;
+
 /* Initialize parallel inference with N threads */
 int parallel_init(int num_threads);
 
@@ -20,6 +29,31 @@ void parallel_shutdown(void);
 /* Get/set number of threads */
 int parallel_get_num_threads(void);
 void parallel_set_num_threads(int n);
+
+/* Core affinity configuration
+ * parallel_set_core_affinity: Pin a specific thread to a CPU core
+ * parallel_pin_cores: Enable/disable automatic core pinning (1 = enable, 0 = disable)
+ */
+int parallel_set_core_affinity(int thread_id, int core_id);
+void parallel_pin_cores(int enable);
+
+/* Deterministic mode for timing guarantees
+ * parallel_set_deterministic: Enable/disable deterministic work distribution (1 = enable, 0 = disable)
+ *
+ * When enabled, uses fixed work assignment instead of work-stealing to ensure
+ * consistent timing across multiple runs. This reduces timing variance but may
+ * sacrifice some load balancing efficiency. Core pinning is automatically enabled.
+ */
+void parallel_set_deterministic(int enable);
+
+/* Per-core timing statistics
+ * parallel_get_core_stats: Get timing statistics for a specific thread
+ * parallel_reset_core_stats: Reset all per-core statistics
+ * parallel_print_core_stats: Print all core statistics to console
+ */
+int parallel_get_core_stats(int thread_id, core_timing_stats_t* stats);
+void parallel_reset_core_stats(void);
+void parallel_print_core_stats(void);
 
 /* Work function type for parallel_for */
 typedef void (*work_func_t)(void* arg, int thread_id, int start, int end);

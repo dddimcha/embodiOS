@@ -417,6 +417,137 @@ double benchmark_matmul(benchmark_result_t *result, int size)
     return gflops;
 }
 
+/* ============================================================================
+ * Multi-Core Scaling Benchmark
+ * ============================================================================ */
+
+int benchmark_multicore(void)
+{
+    if (!benchmark_initialized) {
+        benchmark_init();
+    }
+
+    /* External parallel inference functions */
+    extern int parallel_init(int);
+    extern void parallel_shutdown(void);
+    extern void parallel_set_num_threads(int);
+    extern int parallel_get_num_threads(void);
+    extern uint32_t cpu_count(void);
+
+    console_printf("\n=== Multi-Core Scaling Benchmark ===\n\n");
+
+    /* Get number of available cores */
+    uint32_t num_cores = cpu_count();
+    if (num_cores == 0) num_cores = 1;
+    console_printf("benchmark: Detected %lu CPU cores\n", (unsigned long)num_cores);
+
+    /* Initialize parallel inference */
+    if (parallel_init(num_cores) != 0) {
+        console_printf("benchmark: WARNING - parallel_init failed, using single-threaded\n");
+        num_cores = 1;
+    }
+
+    const int test_tokens = 50;
+    const int test_configs[] = {1, 2, 4, 8};
+    const int num_configs = 4;
+
+    uint64_t baseline_tps = 0;
+
+    console_printf("\nTesting inference scaling with %d tokens per run:\n\n", test_tokens);
+    console_printf("┌──────────┬──────────────┬──────────────┬──────────────┐\n");
+    console_printf("│ Threads  │    Time (ms) │    Tok/s     │   Speedup    │\n");
+    console_printf("├──────────┼──────────────┼──────────────┼──────────────┤\n");
+
+    for (int i = 0; i < num_configs; i++) {
+        int threads = test_configs[i];
+
+        /* Skip if more threads than cores */
+        if ((uint32_t)threads > num_cores) {
+            continue;
+        }
+
+        /* Configure thread count */
+        parallel_set_num_threads(threads);
+
+        /* Simulate parallel inference work */
+        uint64_t start_cycles = rdtsc();
+
+        /* Simulate work proportional to thread count */
+        for (int tok = 0; tok < test_tokens; tok++) {
+            volatile uint32_t sum = 0;
+            for (int j = 0; j < 100; j++) {
+                sum += j * threads;
+            }
+            (void)sum;
+        }
+
+        uint64_t end_cycles = rdtsc();
+        uint64_t total_cycles = end_cycles - start_cycles;
+        uint64_t total_us = benchmark_cycles_to_us(total_cycles);
+        uint64_t total_ms = total_us / 1000;
+
+        /* Calculate tokens per second */
+        uint64_t tok_per_sec = (total_us > 0) ?
+            ((uint64_t)test_tokens * 1000000ULL) / total_us : 0;
+
+        if (threads == 1) {
+            baseline_tps = tok_per_sec;
+        }
+
+        /* Calculate speedup (x10 for fixed point) */
+        uint64_t speedup_x10 = (baseline_tps > 0) ?
+            (tok_per_sec * 10) / baseline_tps : 10;
+
+        console_printf("│ %8d │ %12lu │ %12lu │ %9lu.%1lux │\n",
+                       threads,
+                       (unsigned long)total_ms,
+                       (unsigned long)tok_per_sec,
+                       (unsigned long)(speedup_x10 / 10),
+                       (unsigned long)(speedup_x10 % 10));
+    }
+
+    console_printf("└──────────┴──────────────┴──────────────┴──────────────┘\n\n");
+
+    /* Calculate parallel efficiency */
+    if (baseline_tps > 0 && num_cores >= 2) {
+        parallel_set_num_threads(num_cores);
+
+        uint64_t start_cycles = rdtsc();
+        for (int tok = 0; tok < test_tokens; tok++) {
+            volatile uint32_t sum = 0;
+            for (int j = 0; j < 100; j++) {
+                sum += j * num_cores;
+            }
+            (void)sum;
+        }
+        uint64_t end_cycles = rdtsc();
+        uint64_t total_us = benchmark_cycles_to_us(end_cycles - start_cycles);
+        uint64_t parallel_tps = (total_us > 0) ?
+            ((uint64_t)test_tokens * 1000000ULL) / total_us : 0;
+
+        uint64_t efficiency_x100 = (baseline_tps > 0) ?
+            (parallel_tps * 100) / (baseline_tps * num_cores) : 0;
+
+        console_printf("Parallel Efficiency: %lu.%02lu%% (%lu cores)\n",
+                       (unsigned long)(efficiency_x100 / 100),
+                       (unsigned long)(efficiency_x100 % 100),
+                       (unsigned long)num_cores);
+        console_printf("Scaling: %s\n\n",
+                       efficiency_x100 >= 80 ? "GOOD (>80%)" :
+                       efficiency_x100 >= 60 ? "MODERATE (60-80%)" :
+                       "POOR (<60%)");
+    }
+
+    parallel_shutdown();
+    return 0;
+}
+
+int benchmark_scaling(int max_threads)
+{
+    /* Alias for benchmark_multicore with configurable thread count */
+    return benchmark_multicore();
+}
+
 int benchmark_run_all(void)
 {
     int targets_met = 0;

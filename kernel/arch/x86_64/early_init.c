@@ -357,3 +357,23 @@ void arch_halt(void)
     __asm__ volatile("hlt");
 #endif
 }
+
+/* ============================================================================
+ * SMP Initialization
+ * ============================================================================ */
+
+/* Forward declaration for SMP initialization (defined in smp.c) */
+extern void smp_init(void);
+
+/**
+ * Initialize SMP (Symmetric Multi-Processing)
+ *
+ * This should be called after basic architecture initialization is complete.
+ * It will detect and boot secondary CPU cores.
+ */
+void arch_smp_init(void)
+{
+#ifdef __x86_64__
+    smp_init();
+#endif
+}

@@ -31,6 +31,9 @@
  * Task Types
  * ============================================================================ */
 
+/* CPU affinity constants */
+#define CPU_AFFINITY_ANY    0xFFFFFFFF  /* Task can run on any CPU */
+
 /**
  * struct task - Task control block (opaque)
  *
@@ -104,6 +107,15 @@ void task_yield(void);
  * allocated but can be reused for future tasks.
  */
 void task_exit(void);
+
+/* ============================================================================
+ * CPU Affinity Management (SMP)
+ * ============================================================================ */
+
+void task_set_affinity(task_t *task, uint32_t cpu_mask);
+uint32_t task_get_affinity(task_t *task);
+void task_pin_to_cpu(task_t *task, uint32_t cpu_id);
+uint32_t task_get_cpu(task_t *task);
 
 /* ============================================================================
  * Core Scheduler Operations
