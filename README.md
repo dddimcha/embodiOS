@@ -4,6 +4,7 @@
 [![AI Runtime](https://img.shields.io/badge/AI%20Runtime-90%25-brightgreen)](https://github.com/dddimcha/embodiOS/wiki/Pillar-1:-Ollama-GGUF-Integration)
 [![Drivers](https://img.shields.io/badge/Drivers-60%25-yellow)](https://github.com/dddimcha/embodiOS/wiki/Pillar-2:-Linux-Driver-Compatibility)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
+[![Model Compatibility](https://img.shields.io/badge/Model%20Compatibility-CI-brightgreen)](https://github.com/dddimcha/embodiOS/actions/workflows/model-compatibility-ci.yml)
 
 > **The world's first bare-metal AI operating system** - where the AI model runs directly on hardware as the OS kernel itself. No userspace. No OS overhead. Just transformers and hardware.
 
