@@ -149,6 +149,7 @@ KERNEL_C_SOURCES = \
     timer.c \
     core/hal_cpu.c \
     core/hal_timer.c \
+    core/profiler.c \
     drivers/pci/pci.c \
     drivers/block/virtio_blk.c \
     drivers/block/virtio_mmio.c \
@@ -201,6 +202,7 @@ KERNEL_C_SOURCES = \
     test/test_framework.c \
     test/example_test.c \
     test/test_pmm.c \
+    test/test_profiler.c \
     lib/string.c \
     lib/stdlib.c \
     lib/math.c \
