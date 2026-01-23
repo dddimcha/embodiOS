@@ -73,6 +73,7 @@ void process_command(const char *command)
         console_printf("AI:\n");
         console_printf("  chat <message>  - Chat with the AI model\n");
         console_printf("  benchmark       - Run inference benchmark\n");
+        console_printf("  deterministic   - Control deterministic timing mode\n");
         console_printf("\n");
         console_printf("System:\n");
         console_printf("  help            - Show this help\n");
@@ -112,7 +113,7 @@ void process_command(const char *command)
         console_printf("  tvmload, tvmrun, tvmbench\n");
     } else if (strncmp(command, "chat ", 5) == 0) {
         /* Simple unified chat command - auto-initializes everything */
-        extern int streaming_inference_init(void);
+        extern int streaming_inference_init(bool preallocate);
         extern bool streaming_inference_is_ready(void);
         extern int streaming_inference_generate(const int *, int, int *, int);
         extern const char *streaming_inference_get_token(int);
@@ -156,7 +157,7 @@ void process_command(const char *command)
 
         /* Auto-initialize: Inference engine */
         if (!streaming_inference_is_ready()) {
-            if (streaming_inference_init() != 0) {
+            if (streaming_inference_init(false) != 0) {
                 console_printf("Error: Inference init failed\n");
                 return;
             }
@@ -673,14 +674,14 @@ void process_command(const char *command)
         }
     } else if (strcmp(command, "streaminit") == 0) {
         /* Initialize streaming inference engine (memory-efficient) */
-        extern int streaming_inference_init(void);
+        extern int streaming_inference_init(bool preallocate);
         extern bool streaming_inference_is_ready(void);
 
         if (streaming_inference_is_ready()) {
             console_printf("Streaming inference engine already initialized\n");
         } else {
             console_printf("Initializing streaming inference (on-the-fly dequant)...\n");
-            int result = streaming_inference_init();
+            int result = streaming_inference_init(false);
             if (result == 0) {
                 console_printf("Streaming inference engine initialized successfully\n");
             } else {
@@ -689,7 +690,7 @@ void process_command(const char *command)
         }
     } else if (strncmp(command, "stream ", 7) == 0) {
         /* Streaming inference (memory-efficient) */
-        extern int streaming_inference_init(void);
+        extern int streaming_inference_init(bool preallocate);
         extern bool streaming_inference_is_ready(void);
         extern int streaming_inference_generate(const int *, int, int *, int);
         extern const char *streaming_inference_get_token(int);
@@ -698,7 +699,7 @@ void process_command(const char *command)
 
         if (!streaming_inference_is_ready()) {
             console_printf("Initializing streaming inference engine...\n");
-            if (streaming_inference_init() != 0) {
+            if (streaming_inference_init(false) != 0) {
                 console_printf("ERROR: Failed to initialize streaming inference\n");
                 return;
             }
@@ -795,7 +796,7 @@ void process_command(const char *command)
         /* Step 3: Initialize streaming inference engine */
         console_printf("[BENCH] Calling streaming_inference_init...\n");
         console_flush();
-        int init_result = streaming_inference_init();
+        int init_result = streaming_inference_init(false);
         console_printf("[BENCH] streaming_inference_init returned %d\n", init_result);
         console_flush();
         if (init_result != 0) {
@@ -872,11 +873,6 @@ void process_command(const char *command)
             virtio_net_run_tests();
         }
         tcpip_run_tests();
-    } else if (strcmp(command, "tcpserver") == 0 || strcmp(command, "server") == 0) {
-        /* Start TCP echo server */
-        extern int tcpip_start_server(uint16_t port);
-        console_printf("Starting TCP echo server on port 80...\n");
-        tcpip_start_server(80);
     } else if (strncmp(command, "ping ", 5) == 0) {
         /* Ping command */
         extern int tcpip_ping(uint32_t dst_ip, uint16_t id, uint16_t seq);
@@ -923,6 +919,78 @@ void process_command(const char *command)
             console_printf("Done (use 'net' to see ICMP statistics)\n");
         }
         #undef NET_ERR_UNREACHABLE
+    } else if (strncmp(command, "deterministic ", 14) == 0 || strcmp(command, "deterministic") == 0) {
+        /* Deterministic inference timing mode control */
+        extern int streaming_inference_set_deterministic(const void* config);
+        extern int streaming_inference_get_deterministic(void* config);
+
+        /* deterministic_config_t structure defined in streaming_inference.h */
+        struct {
+            bool interrupt_disable;
+            bool preallocate_buffers;
+            uint64_t max_latency_us;
+        } config;
+
+        const char *subcmd = command + 13; /* Skip "deterministic" */
+        while (*subcmd == ' ') subcmd++; /* Skip whitespace */
+
+        if (*subcmd == '\0' || strcmp(subcmd, "status") == 0) {
+            /* Show current deterministic mode status */
+            int ret = streaming_inference_get_deterministic(&config);
+            if (ret == 0) {
+                console_printf("\nDeterministic Mode Status:\n");
+                console_printf("==========================\n");
+                console_printf("Interrupt Disable:    %s\n",
+                              config.interrupt_disable ? "ENABLED" : "DISABLED");
+                console_printf("Preallocate Buffers:  %s\n",
+                              config.preallocate_buffers ? "ENABLED" : "DISABLED");
+                console_printf("Max Latency Target:   %llu us\n",
+                              (unsigned long long)config.max_latency_us);
+                console_printf("\nMode: %s\n",
+                              (config.interrupt_disable || config.preallocate_buffers)
+                              ? "ACTIVE" : "INACTIVE");
+            } else {
+                console_printf("Error: Failed to get deterministic mode status\n");
+            }
+        } else if (strcmp(subcmd, "on") == 0) {
+            /* Enable deterministic mode with safe defaults */
+            config.interrupt_disable = true;
+            config.preallocate_buffers = true;
+            config.max_latency_us = 500; /* 0.5ms target per spec */
+
+            int ret = streaming_inference_set_deterministic(&config);
+            if (ret == 0) {
+                console_printf("Deterministic mode ENABLED\n");
+                console_printf("  - Interrupts will be disabled during inference\n");
+                console_printf("  - Buffers pre-allocated for fixed-time execution\n");
+                console_printf("  - Target max latency: 500 us (0.5 ms)\n");
+            } else {
+                console_printf("Error: Failed to enable deterministic mode\n");
+            }
+        } else if (strcmp(subcmd, "off") == 0) {
+            /* Disable deterministic mode */
+            config.interrupt_disable = false;
+            config.preallocate_buffers = false;
+            config.max_latency_us = 0;
+
+            int ret = streaming_inference_set_deterministic(&config);
+            if (ret == 0) {
+                console_printf("Deterministic mode DISABLED\n");
+                console_printf("  - Interrupts enabled (normal operation)\n");
+            } else {
+                console_printf("Error: Failed to disable deterministic mode\n");
+            }
+        } else {
+            console_printf("Usage: deterministic <on|off|status>\n");
+            console_printf("\n");
+            console_printf("Controls hard real-time deterministic inference mode:\n");
+            console_printf("  on     - Enable deterministic mode (interrupts disabled)\n");
+            console_printf("  off    - Disable deterministic mode (normal operation)\n");
+            console_printf("  status - Show current configuration and timing stats\n");
+            console_printf("\n");
+            console_printf("When enabled, provides worst-case latency guarantees\n");
+            console_printf("for industrial/robotics applications.\n");
+        }
     } else if (strcmp(command, "modbustest") == 0) {
         /* Modbus TCP integration test over TCP/IP stack */
         extern modbus_ctx_t* modbus_new_tcp(uint32_t ip, uint16_t port, uint8_t unit_id);
