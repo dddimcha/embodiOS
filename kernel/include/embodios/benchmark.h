@@ -225,6 +225,16 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
 int benchmark_validate_gguf_model(const char *model_name);
 
 /**
+ * Run deterministic mode benchmark
+ * Tests deterministic inference with jitter measurement
+ * Validates that jitter < 500us (0.5ms requirement)
+ * @param result Output benchmark results
+ * @param num_tokens Number of tokens to generate per iteration
+ * @return 0 on success, -1 on error
+ */
+int benchmark_deterministic_inference(inference_benchmark_t *result, int num_tokens);
+
+/**
  * Run multi-core scaling benchmark
  * Tests inference performance across different thread counts
  * @return 0 on success

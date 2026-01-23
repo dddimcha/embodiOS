@@ -18,6 +18,7 @@
 #include <embodios/types.h>
 #include <embodios/streaming_inference.h>
 #include <embodios/parallel_inference.h>
+#include <embodios/kernel.h>
 
 /* Enable parallel inference (set to 0 to disable) */
 #ifndef PARALLEL_INFERENCE_ENABLED
@@ -244,6 +245,13 @@ static StreamingConfig g_cfg = {0};
 static StreamingState g_state = {0};
 static bool g_initialized = false;
 
+/* Deterministic mode configuration */
+static deterministic_config_t g_deterministic_config = {
+    .interrupt_disable = false,
+    .preallocate_buffers = false,
+    .max_latency_us = 0
+};
+
 /* Quantized weight pointers (raw GGUF data - not dequantized) */
 typedef struct {
     const void* token_embd;
@@ -280,6 +288,24 @@ typedef struct {
 
 static GlobalWeights g_weights = {0};
 static LayerWeights* g_layer_weights = NULL;
+
+/* ============================================================================
+ * Deterministic Mode Critical Section Helpers
+ * ============================================================================ */
+
+/* Enter critical section - disable interrupts if deterministic mode enabled */
+static inline void critical_section_enter(void) {
+    if (g_deterministic_config.interrupt_disable) {
+        arch_disable_interrupts();
+    }
+}
+
+/* Exit critical section - re-enable interrupts if deterministic mode enabled */
+static inline void critical_section_exit(void) {
+    if (g_deterministic_config.interrupt_disable) {
+        arch_enable_interrupts();
+    }
+}
 
 /* ============================================================================
  * Dequantization Functions (On-the-fly)
@@ -579,11 +605,12 @@ static void matmul_q8_0_fused(float* out, const void* w_q8_0, const float* x,
     const int nb_cols = cols / QK8_0;
     const block_q8_0* weights = (const block_q8_0*)w_q8_0;
 
-    /* Ensure we have buffer for quantized input */
-    if (g_input_q8_size < nb_cols) {
-        if (g_input_q8) heap_free(g_input_q8);
-        g_input_q8 = (block_q8_1*)heap_alloc(nb_cols * sizeof(block_q8_1));
-        g_input_q8_size = nb_cols;
+    /* Buffer is pre-allocated in streaming_inference_init() to worst-case size.
+     * No dynamic allocation in inference path for deterministic timing. */
+    if (nb_cols > g_input_q8_size) {
+        console_printf("Error: matmul_q8_0_fused buffer overflow (need %d, have %d)\n",
+                      nb_cols, g_input_q8_size);
+        return;  /* Fail gracefully - buffer too small */
     }
 
     /* Quantize input vector once */
@@ -1625,8 +1652,10 @@ size_t streaming_calc_memory(int dim, int hidden_dim, int n_layers,
     return runtime;
 }
 
-/* Initialize streaming inference from GGUF */
-int streaming_inference_init(void) {
+/* Initialize streaming inference from GGUF
+ * preallocate: if true, allocate all buffers at init time (for deterministic mode)
+ */
+int streaming_inference_init(bool preallocate) {
     if (g_initialized) {
         return 0;
     }
@@ -1681,32 +1710,40 @@ int streaming_inference_init(void) {
         g_cfg.arch_name[i] = arch->general_architecture[i];
     }
 
-    /* Allocate runtime buffers */
-    g_state.x = (float*)heap_alloc(g_cfg.dim * sizeof(float));
-    g_state.xb = (float*)heap_alloc(g_cfg.dim * sizeof(float));
-    g_state.xb2 = (float*)heap_alloc(g_cfg.dim * sizeof(float));
-    g_state.q = (float*)heap_alloc(g_cfg.dim * sizeof(float));
-    g_state.k = (float*)heap_alloc(g_cfg.kv_dim * sizeof(float));
-    g_state.v = (float*)heap_alloc(g_cfg.kv_dim * sizeof(float));
-    g_state.att = (float*)heap_alloc(g_cfg.n_heads * g_cfg.seq_len * sizeof(float));
-    g_state.hb = (float*)heap_alloc(g_cfg.hidden_dim * sizeof(float));
-    g_state.hb2 = (float*)heap_alloc(g_cfg.hidden_dim * sizeof(float));
-    g_state.logits = (float*)heap_alloc(g_cfg.vocab_size * sizeof(float));
+    /* Allocate runtime buffers at init time (deterministic mode)
+     * TODO: Use preallocate flag to control allocation timing (for now, always allocate)
+     */
+    (void)preallocate;  /* Parameter reserved for future use */
+    g_state.x = (float*)heap_alloc(g_cfg.dim * sizeof(float));  /* init */
+    g_state.xb = (float*)heap_alloc(g_cfg.dim * sizeof(float));  /* init */
+    g_state.xb2 = (float*)heap_alloc(g_cfg.dim * sizeof(float));  /* init */
+    g_state.q = (float*)heap_alloc(g_cfg.dim * sizeof(float));  /* init */
+    g_state.k = (float*)heap_alloc(g_cfg.kv_dim * sizeof(float));  /* init */
+    g_state.v = (float*)heap_alloc(g_cfg.kv_dim * sizeof(float));  /* init */
+    g_state.att = (float*)heap_alloc(g_cfg.n_heads * g_cfg.seq_len * sizeof(float));  /* init */
+    g_state.hb = (float*)heap_alloc(g_cfg.hidden_dim * sizeof(float));  /* init */
+    g_state.hb2 = (float*)heap_alloc(g_cfg.hidden_dim * sizeof(float));  /* init */
+    g_state.logits = (float*)heap_alloc(g_cfg.vocab_size * sizeof(float));  /* init */
 
-    /* KV cache */
+    /* KV cache - init time allocation */
     size_t kv_size = (size_t)g_cfg.n_layers * g_cfg.seq_len * g_cfg.kv_dim * sizeof(float);
-    g_state.key_cache = (float*)heap_alloc(kv_size);
-    g_state.value_cache = (float*)heap_alloc(kv_size);
+    g_state.key_cache = (float*)heap_alloc(kv_size);  /* init */
+    g_state.value_cache = (float*)heap_alloc(kv_size);  /* init */
 
-    /* Layer dequantization buffer - reused for each layer */
+    /* Layer dequantization buffer - reused for each layer - init time */
     g_state.layer_buf_size = g_cfg.hidden_dim * sizeof(float);
-    g_state.layer_weights = (float*)heap_alloc(g_state.layer_buf_size);
+    g_state.layer_weights = (float*)heap_alloc(g_state.layer_buf_size);  /* init */
+
+    /* Pre-allocate quantized input buffer for matmul_q8_0_fused() at init time
+     * Worst-case size is hidden_dim (largest dimension used in matmuls) */
+    g_input_q8_size = g_cfg.hidden_dim / QK8_0;
+    g_input_q8 = (block_q8_1*)heap_alloc(g_input_q8_size * sizeof(block_q8_1));  /* init */
 
     /* Check allocations */
     if (!g_state.x || !g_state.xb || !g_state.xb2 || !g_state.q ||
         !g_state.k || !g_state.v || !g_state.att || !g_state.hb ||
         !g_state.hb2 || !g_state.logits || !g_state.key_cache ||
-        !g_state.value_cache || !g_state.layer_weights) {
+        !g_state.value_cache || !g_state.layer_weights || !g_input_q8) {
         console_printf("Error: Failed to allocate memory\n");
         return -1;
     }
@@ -1725,8 +1762,8 @@ int streaming_inference_init(void) {
         }
     }
 
-    /* Allocate layer weight pointers */
-    g_layer_weights = (LayerWeights*)heap_alloc(g_cfg.n_layers * sizeof(LayerWeights));
+    /* Allocate layer weight pointers at init time */
+    g_layer_weights = (LayerWeights*)heap_alloc(g_cfg.n_layers * sizeof(LayerWeights));  /* init */
     if (!g_layer_weights) {
         console_printf("Error: Memory allocation failed\n");
         return -1;
@@ -1877,6 +1914,9 @@ int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
     int generated = 0;
 
     while (pos < g_cfg.seq_len && generated < max_output) {
+        /* Enter critical section - disable interrupts for deterministic timing */
+        critical_section_enter();
+
         /* Forward pass through all layers */
         for (int l = 0; l < g_cfg.n_layers; l++) {
             /* Prefetch next layer's weights (1 layer ahead) */
@@ -1932,6 +1972,9 @@ int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
 
         token = next_token;
         pos++;
+
+        /* Exit critical section - re-enable interrupts */
+        critical_section_exit();
     }
 
     return generated;
@@ -2015,6 +2058,9 @@ int streaming_inference_generate_timed(const int* prompt_tokens, int prompt_len,
 
     while (pos < g_cfg.seq_len && generated < max_output) {
         uint64_t token_start = get_cycles();
+
+        /* Enter critical section - disable interrupts for deterministic timing */
+        critical_section_enter();
 
         /* Forward pass through all layers */
         for (int l = 0; l < g_cfg.n_layers; l++) {
@@ -2108,6 +2154,9 @@ int streaming_inference_generate_timed(const int* prompt_tokens, int prompt_len,
 
         token = next_token;
         pos++;
+
+        /* Exit critical section - re-enable interrupts */
+        critical_section_exit();
     }
 
     uint64_t generation_end = get_cycles();
@@ -2130,8 +2179,49 @@ int streaming_inference_generate_timed(const int* prompt_tokens, int prompt_len,
                 if (lat > timing->decode_max_us) timing->decode_max_us = lat;
             }
             timing->decode_avg_us = sum / timing->num_decode_samples;
+            timing->decode_jitter_us = timing->decode_max_us - timing->decode_min_us;
+            timing->deterministic_mode_enabled = g_deterministic_config.interrupt_disable;
+            timing->interrupt_disabled_count = pos;
         }
     }
 
     return generated;
+}
+
+/* ============================================================================
+ * Deterministic Mode Configuration API
+ * ============================================================================ */
+
+/* Configure deterministic execution mode
+ * @param config Deterministic mode configuration
+ * @return 0 on success, -1 on error
+ */
+int streaming_inference_set_deterministic(const deterministic_config_t* config) {
+    if (!config) {
+        return -1;
+    }
+
+    /* Update global configuration */
+    g_deterministic_config.interrupt_disable = config->interrupt_disable;
+    g_deterministic_config.preallocate_buffers = config->preallocate_buffers;
+    g_deterministic_config.max_latency_us = config->max_latency_us;
+
+    return 0;
+}
+
+/* Get current deterministic mode configuration
+ * @param config Output buffer for configuration
+ * @return 0 on success, -1 on error
+ */
+int streaming_inference_get_deterministic(deterministic_config_t* config) {
+    if (!config) {
+        return -1;
+    }
+
+    /* Copy current configuration */
+    config->interrupt_disable = g_deterministic_config.interrupt_disable;
+    config->preallocate_buffers = g_deterministic_config.preallocate_buffers;
+    config->max_latency_us = g_deterministic_config.max_latency_us;
+
+    return 0;
 }
