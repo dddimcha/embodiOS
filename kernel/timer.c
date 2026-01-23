@@ -1,5 +1,5 @@
 /* EMBODIOS Timer Subsystem
- * 
+ *
  * Provides timing and scheduling functionality.
  * Handles timer interrupts and system tick management.
  */
@@ -12,28 +12,6 @@
 
 /* Timer frequency (100 Hz = 10ms tick) */
 #define TIMER_FREQUENCY 100
-#define PIT_FREQUENCY 1193182
-
-/* PIT (Programmable Interval Timer) ports */
-#define PIT_CHANNEL0_DATA 0x40
-#define PIT_CHANNEL1_DATA 0x41
-#define PIT_CHANNEL2_DATA 0x42
-#define PIT_COMMAND 0x43
-
-/* PIT command bits */
-#define PIT_CMD_BINARY 0x00
-#define PIT_CMD_BCD 0x01
-#define PIT_CMD_MODE0 0x00
-#define PIT_CMD_MODE2 0x04
-#define PIT_CMD_MODE3 0x06
-#define PIT_CMD_READBACK 0xC0
-#define PIT_CMD_COUNTER0 0x00
-#define PIT_CMD_COUNTER1 0x40
-#define PIT_CMD_COUNTER2 0x80
-#define PIT_CMD_LATCHCOUNT 0x00
-#define PIT_CMD_LOBYTE 0x10
-#define PIT_CMD_HIBYTE 0x20
-#define PIT_CMD_LOHIBYTE 0x30
 
 /* Timer state */
 static struct {
@@ -48,30 +26,6 @@ static struct {
     .tick_handler = NULL
 };
 
-/* Initialize PIT */
-static void pit_init(uint32_t frequency)
-{
-#ifdef __x86_64__
-    /* Calculate divisor */
-    uint32_t divisor = PIT_FREQUENCY / frequency;
-    
-    /* Send command byte */
-    __asm__ volatile("outb %0, %1" :: "a"((uint8_t)(PIT_CMD_COUNTER0 | 
-                                                    PIT_CMD_LOHIBYTE | 
-                                                    PIT_CMD_MODE3 | 
-                                                    PIT_CMD_BINARY)), 
-                                      "Nd"((uint16_t)PIT_COMMAND));
-    
-    /* Send divisor */
-    __asm__ volatile("outb %0, %1" :: "a"((uint8_t)(divisor & 0xFF)), 
-                                      "Nd"((uint16_t)PIT_CHANNEL0_DATA));
-    __asm__ volatile("outb %0, %1" :: "a"((uint8_t)((divisor >> 8) & 0xFF)), 
-                                      "Nd"((uint16_t)PIT_CHANNEL0_DATA));
-#else
-    /* ARM64 uses different timer mechanism */
-    (void)frequency;
-#endif
-}
 
 /* Timer interrupt handler (called from IRQ0) */
 void timer_interrupt_handler(void)
@@ -92,15 +46,16 @@ void timer_interrupt_handler(void)
 /* Initialize timer subsystem */
 void timer_init(void)
 {
-    console_printf("Timer: Initializing with %d Hz frequency\n", TIMER_FREQUENCY);
-    
-    /* Initialize PIT */
-    pit_init(TIMER_FREQUENCY);
-    
-    /* Timer state already initialized statically */
-    timer_state.frequency = TIMER_FREQUENCY;
-    
-    console_printf("Timer: PIT initialized\n");
+    console_printf("Timer: Initializing timer subsystem\n");
+
+    /* Initialize HAL timer */
+    hal_timer_init();
+
+    /* Get actual frequency from HAL */
+    timer_state.frequency = (uint32_t)hal_timer_get_frequency();
+
+    console_printf("Timer: HAL timer initialized (frequency: %u Hz)\n",
+                   timer_state.frequency);
 }
 
 /* Get system ticks */
