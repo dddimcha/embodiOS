@@ -64,16 +64,6 @@ _start:
     mov $0x0B, %al
     outb %al, %dx          /* RTS/DSR set */
 
-    /* Output 'B' for Boot started */
-    mov $0x3F8+5, %dx
-.wait_serial1:
-    inb %dx, %al
-    test $0x20, %al
-    jz .wait_serial1
-    mov $0x3F8, %dx
-    mov $'B', %al
-    outb %al, %dx
-
     /* Save multiboot info */
     mov %eax, multiboot_magic
     mov %ebx, multiboot_info
@@ -88,29 +78,9 @@ _start:
     call check_cpuid
     call check_long_mode
 
-    /* Output '1' for checks done */
-    mov $0x3F8+5, %dx
-.wait_serial2:
-    inb %dx, %al
-    test $0x20, %al
-    jz .wait_serial2
-    mov $0x3F8, %dx
-    mov $'1', %al
-    outb %al, %dx
-
     /* Set up paging for 64-bit mode */
     call setup_page_tables
     call enable_paging
-
-    /* Output '2' for paging done */
-    mov $0x3F8+5, %dx
-.wait_serial3:
-    inb %dx, %al
-    test $0x20, %al
-    jz .wait_serial3
-    mov $0x3F8, %dx
-    mov $'2', %al
-    outb %al, %dx
 
     /* Load GDT */
     lgdt gdt64_descriptor
@@ -121,21 +91,6 @@ _start:
 .code64
 .global start64
 start64:
-    /* Output '3' on serial immediately - we reached 64-bit! */
-    mov $0x3F8+5, %dx
-.wait_serial64_1:
-    inb %dx, %al
-    test $0x20, %al
-    jz .wait_serial64_1
-    mov $0x3F8, %dx
-    mov $'3', %al
-    outb %al, %dx
-
-    /* Print '64' to show we reached 64-bit mode */
-    mov $0xb8000, %rdi
-    movw $0x0f36, (%rdi)      /* '6' */
-    movw $0x0f34, 2(%rdi)     /* '4' */
-
     /* Reload segment registers */
     mov $0x10, %ax
     mov %ax, %ds
@@ -144,60 +99,17 @@ start64:
     mov %ax, %gs
     mov %ax, %ss
 
-    /* Print 'S' for segments loaded */
-    movw $0x0f53, 4(%rdi)
-
     /* Set up kernel stack */
     mov $kernel_stack_top, %rsp
-
-    /* Output '4' - stack setup */
-    mov $0x3F8+5, %dx
-.wait_serial64_2:
-    inb %dx, %al
-    test $0x20, %al
-    jz .wait_serial64_2
-    mov $0x3F8, %dx
-    mov $'4', %al
-    outb %al, %dx
 
     /* Clear frame pointer */
     xor %rbp, %rbp
 
-    /* Output '5' - before CPU features */
-    mov $0x3F8+5, %dx
-.wait_serial64_3:
-    inb %dx, %al
-    test $0x20, %al
-    jz .wait_serial64_3
-    mov $0x3F8, %dx
-    mov $'5', %al
-    outb %al, %dx
-
     /* Enable CPU features for AI workloads */
     call enable_cpu_features
 
-    /* Output '6' - before kernel_main */
-    mov $0x3F8+5, %dx
-.wait_serial64_4:
-    inb %dx, %al
-    test $0x20, %al
-    jz .wait_serial64_4
-    mov $0x3F8, %dx
-    mov $'6', %al
-    outb %al, %dx
-
     /* Call kernel main (we're identity-mapped, no higher half needed) */
     call kernel_main
-
-    /* Output 'X' - kernel_main returned (shouldn't happen) */
-    mov $0x3F8+5, %dx
-.wait_serial64_5:
-    inb %dx, %al
-    test $0x20, %al
-    jz .wait_serial64_5
-    mov $0x3F8, %dx
-    mov $'X', %al
-    outb %al, %dx
 
     /* Should not return */
     cli
