@@ -146,6 +146,8 @@ KERNEL_C_SOURCES = \
     drivers/net/e1000e.c \
     drivers/can/can.c \
     net/tcpip.c \
+    net/modbus.c \
+    net/ethercat.c \
     mm/pmm.c \
     mm/vmm.c \
     mm/slab.c \
@@ -440,4 +442,29 @@ iso-quick: embodios.elf
 	grub-mkrescue -o embodios.iso grub_iso 2>/dev/null || echo "grub-mkrescue not available"
 endif
 
-.PHONY: all clean iso iso-prod iso-full iso-quick sign sign-check
+# Unit tests (compiled with host compiler for testing)
+test-modbus: test/test_modbus.c
+	@echo "Building and running Modbus unit tests..."
+	gcc -o test/test_modbus test/test_modbus.c -I include -Wall -Wextra
+	./test/test_modbus
+	@rm -f test/test_modbus
+
+test-pmm: test/test_pmm.c
+	@echo "Building and running PMM unit tests..."
+	gcc -o test/test_pmm test/test_pmm.c -I include -Wall -Wextra
+	./test/test_pmm
+	@rm -f test/test_pmm
+
+test-slab: test/test_slab.c
+	@echo "Building and running Slab unit tests..."
+	gcc -o test/test_slab test/test_slab.c -I include -Wall -Wextra
+	./test/test_slab
+	@rm -f test/test_slab
+
+test-ethercat: test/test_ethercat.c
+	@echo "Building and running EtherCAT unit tests..."
+	gcc -o test/test_ethercat test/test_ethercat.c -I include -Wall -Wextra
+	./test/test_ethercat
+	@rm -f test/test_ethercat
+
+.PHONY: all clean iso iso-prod iso-full iso-quick sign sign-check test-modbus test-pmm test-slab test-ethercat
