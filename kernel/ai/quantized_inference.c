@@ -11,6 +11,7 @@
 #include <embodios/types.h>
 #include <embodios/console.h>
 #include <embodios/mm.h>
+#include <embodios/gpu_backend.h>
 
 /* ============================================================================
  * Q16.16 Fixed-Point Math Utilities
@@ -297,12 +298,79 @@ static int sample_token_fixed(fixed_t* logits, fixed_t temperature) {
 }
 
 /* ============================================================================
+ * Backend State Management
+ * ============================================================================ */
+
+/* Track which backend is active for this inference session */
+static gpu_backend_type_t g_active_backend = GPU_BACKEND_NONE;
+static int g_backend_initialized = 0;
+
+/* Initialize inference backend (GPU with automatic CPU fallback)
+ * Returns: 0 on success (GPU or CPU), negative on critical failure
+ */
+static int init_inference_backend(void) {
+    if (g_backend_initialized) {
+        return 0;  /* Already initialized */
+    }
+
+    /* Try to initialize GPU backend for acceleration */
+    console_printf("[Quantized AI] Attempting GPU backend initialization...\n");
+    int gpu_init_result = gpu_backend_init(GPU_BACKEND_AUTO);
+
+    if (gpu_init_result == 0 && gpu_backend_is_available()) {
+        /* GPU backend successfully initialized */
+        g_active_backend = gpu_backend_get_type();
+        g_backend_initialized = 1;
+
+        gpu_device_info_t gpu_info;
+        if (gpu_backend_get_device_info(&gpu_info) == 0) {
+            console_printf("[Quantized AI] GPU acceleration enabled: %s (vendor: 0x%x)\n",
+                           gpu_info.device_name, gpu_info.vendor_id);
+        } else {
+            console_printf("[Quantized AI] GPU backend initialized\n");
+        }
+
+        return 0;
+    }
+
+    /* GPU initialization failed - automatic CPU fallback */
+    console_printf("[Quantized AI] GPU initialization failed (code %d)\n", gpu_init_result);
+    console_printf("[Quantized AI] Falling back to CPU backend (integer-only operations)\n");
+
+    g_active_backend = GPU_BACKEND_NONE;
+    g_backend_initialized = 1;
+
+    return 0;  /* CPU fallback is always available */
+}
+
+/* Check if GPU acceleration is active */
+static inline int is_gpu_available(void) {
+    return g_backend_initialized && (g_active_backend != GPU_BACKEND_NONE);
+}
+
+/* ============================================================================
  * Main Inference Function
  * ============================================================================ */
 
 int quantized_neural_inference(const char* prompt, char* response, size_t max_response) {
     if (!prompt || !response || max_response < 10) {
         return -1;
+    }
+
+    /* ========================================================================
+     * Backend Initialization with Automatic CPU Fallback
+     * ======================================================================== */
+
+    int backend_result = init_inference_backend();
+    if (backend_result != 0) {
+        console_printf("[Quantized AI] Critical error: Failed to initialize any backend\n");
+        return -1;
+    }
+
+    if (is_gpu_available()) {
+        console_printf("[Quantized AI] Using GPU-accelerated inference\n");
+    } else {
+        console_printf("[Quantized AI] Using CPU-only inference (integer math)\n");
     }
 
     console_printf("[Quantized AI] Starting integer-only neural network inference\n");

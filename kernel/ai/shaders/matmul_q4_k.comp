@@ -1,0 +1,214 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+/* EMBODIOS Q4_K Matrix-Vector Multiply Compute Shader
+ * Performs: y = A * x where A is Q4_K quantized
+ * Reference: kernel/ai/quantized_ops.c
+ *
+ * Block format: d (int16), dmin (int16), scales[12], qs[128]
+ * 256 values per block, 16 groups of 16 values each
+ * Formula: value = scale * q - min
+ */
+
+/* ============================================================================
+ * Constants
+ * ============================================================================ */
+
+#define QK_K 256
+#define K_SCALE_SIZE 12
+#define FIXED_SHIFT 16
+#define FIXED8_SHIFT 8
+
+/* ============================================================================
+ * Buffer Bindings
+ * ============================================================================ */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+/* Q4_K quantized matrix A (m x n) stored as blocks */
+layout(std430, binding = 0) readonly buffer MatrixA {
+    uint8_t data[];
+} matrix_a;
+
+/* Input vector x (n elements) in Q16.16 fixed-point */
+layout(std430, binding = 1) readonly buffer VectorX {
+    int x[];
+} vector_x;
+
+/* Output vector y (m elements) in Q16.16 fixed-point */
+layout(std430, binding = 2) writeonly buffer VectorY {
+    int y[];
+} vector_y;
+
+/* Dimensions: m (rows), n (cols), block_stride */
+layout(push_constant) uniform Params {
+    uint m;
+    uint n;
+    uint n_blocks_per_row;
+} params;
+
+/* ============================================================================
+ * Q4_K Block Structure (144 bytes total)
+ * Layout: d(2) + dmin(2) + scales(12) + qs(128) = 144 bytes
+ * ============================================================================ */
+
+struct BlockQ4K {
+    int16_t d;
+    int16_t dmin;
+    uint8_t scales[K_SCALE_SIZE];
+    uint8_t qs[QK_K / 2];
+};
+
+/* ============================================================================
+ * Helper Functions
+ * ============================================================================ */
+
+/* Load int16 from byte array at offset */
+int16_t load_int16(uint offset) {
+    uint8_t lo = matrix_a.data[offset];
+    uint8_t hi = matrix_a.data[offset + 1];
+    return int16_t(uint16_t(lo) | (uint16_t(hi) << 8));
+}
+
+/* Load uint8 from byte array at offset */
+uint8_t load_uint8(uint offset) {
+    return matrix_a.data[offset];
+}
+
+/* Convert Q8.8 fixed-point to Q16.16 */
+int fixed8_to_fixed16(int16_t x) {
+    return int(x) << (FIXED_SHIFT - FIXED8_SHIFT);
+}
+
+/* ============================================================================
+ * Scale Extraction for K-quants
+ *
+ * K-quants store 6-bit scales and mins in a packed 12-byte format.
+ * Layout: 8 scales + 4 mins in first 6 bytes, then 8 more scales + 4 mins
+ * ============================================================================ */
+
+void decode_k_scales(uint8_t scales_raw[K_SCALE_SIZE],
+                     out int16_t scales[16], out int16_t mins[16])
+{
+    /* Extract scales (groups 0-7) */
+    for (int i = 0; i < 8; i++) {
+        int byte_idx = i / 2;
+        int nibble = ((i % 2) == 0) ? int(scales_raw[byte_idx] & uint8_t(0x0F))
+                                    : int(scales_raw[byte_idx] >> 4);
+
+        /* Combine with upper bits from bytes 4-5 */
+        int upper_bits = 0;
+        if (i < 4) {
+            upper_bits = int(scales_raw[4 + i/4] >> ((i % 4) * 2)) & 0x03;
+        } else {
+            upper_bits = int(scales_raw[5 + (i-4)/4] >> (((i-4) % 4) * 2)) & 0x03;
+        }
+        scales[i] = int16_t(nibble | (upper_bits << 4));
+    }
+
+    /* Extract scales (groups 8-15) */
+    for (int i = 0; i < 8; i++) {
+        int byte_idx = 6 + i / 2;
+        int nibble = ((i % 2) == 0) ? int(scales_raw[byte_idx] & uint8_t(0x0F))
+                                    : int(scales_raw[byte_idx] >> 4);
+        int upper_bits = int(scales_raw[10 + i/4] >> ((i % 4) * 2)) & 0x03;
+        scales[8 + i] = int16_t(nibble | (upper_bits << 4));
+    }
+
+    /* Extract mins (same packed format in remaining bytes) */
+    for (int i = 0; i < 8; i++) {
+        int byte_idx = i / 2;
+        mins[i] = ((i % 2) == 0) ? int16_t(scales_raw[byte_idx] & uint8_t(0x0F))
+                                 : int16_t(scales_raw[byte_idx] >> 4);
+    }
+    for (int i = 0; i < 8; i++) {
+        mins[8 + i] = ((i % 2) == 0) ? int16_t(scales_raw[6 + i/2] & uint8_t(0x0F))
+                                     : int16_t(scales_raw[6 + i/2] >> 4);
+    }
+}
+
+/* ============================================================================
+ * Q4_K Block Dequantization and Dot Product
+ * ============================================================================ */
+
+int dequant_and_dot_q4_k(uint block_offset, uint x_offset) {
+    /* Load block header */
+    int16_t d = load_int16(block_offset);
+    int16_t dmin = load_int16(block_offset + 2);
+
+    /* Load scales array */
+    uint8_t scales_raw[K_SCALE_SIZE];
+    for (int i = 0; i < K_SCALE_SIZE; i++) {
+        scales_raw[i] = load_uint8(block_offset + 4 + i);
+    }
+
+    /* Decode scales and mins */
+    int16_t scales[16];
+    int16_t mins[16];
+    decode_k_scales(scales_raw, scales, mins);
+
+    /* Convert global scales to fixed-point */
+    int d_fixed = fixed8_to_fixed16(d);
+    int dmin_fixed = fixed8_to_fixed16(dmin);
+
+    /* Compute dot product over 256 values */
+    int sum = 0;
+    uint qs_offset = block_offset + 4 + K_SCALE_SIZE;
+
+    /* Process 16 groups of 16 values each */
+    for (int group = 0; group < 16; group++) {
+        /* Scale and min for this group */
+        int sc = (d_fixed * int(scales[group])) >> 6;
+        int mn = (dmin_fixed * int(mins[group])) >> 6;
+
+        /* Dequantize and multiply 16 values */
+        for (int j = 0; j < 16; j++) {
+            int idx = group * 16 + j;
+            int byte_idx = idx / 2;
+            int nibble_shift = (idx % 2) * 4;
+
+            /* Extract 4-bit value (0-15) */
+            uint8_t q_byte = load_uint8(qs_offset + byte_idx);
+            int q = int(q_byte >> nibble_shift) & 0x0F;
+
+            /* Dequantize: value = sc * q - mn */
+            int dequant_val = ((sc * q) >> 4) - mn;
+
+            /* Accumulate dot product */
+            sum += dequant_val * vector_x.x[x_offset + idx];
+        }
+    }
+
+    return sum;
+}
+
+/* ============================================================================
+ * Main Compute Shader
+ * ============================================================================ */
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+
+    /* Bounds check */
+    if (row >= params.m) {
+        return;
+    }
+
+    /* Compute dot product for this row */
+    int sum = 0;
+
+    /* Each row consists of n_blocks_per_row blocks */
+    uint row_block_offset = row * params.n_blocks_per_row * 144; /* 144 bytes per block */
+
+    for (uint block_idx = 0; block_idx < params.n_blocks_per_row; block_idx++) {
+        uint block_offset = row_block_offset + block_idx * 144;
+        uint x_offset = block_idx * QK_K;
+
+        /* Dequantize block and compute partial dot product */
+        sum += dequant_and_dot_q4_k(block_offset, x_offset);
+    }
+
+    /* Write result (already in Q16.16 fixed-point) */
+    vector_y.y[row] = sum;
+}
