@@ -19,6 +19,7 @@
 #include <embodios/streaming_inference.h>
 #include <embodios/parallel_inference.h>
 #include <embodios/kernel.h>
+#include <embodios/profiler.h>
 
 /* Enable parallel inference (set to 0 to disable) */
 #ifndef PARALLEL_INFERENCE_ENABLED
@@ -1479,6 +1480,8 @@ static void rope(float* q, float* k, int pos, int dim, int head_dim,
  * ============================================================================ */
 
 static void transformer_forward_stream(int token, int pos, int layer) {
+    PROFILER_START("transformer_forward_stream");
+
     LayerWeights* lw = &g_layer_weights[layer];
     int dim = g_cfg.dim;
     int hidden_dim = g_cfg.hidden_dim;
@@ -1629,6 +1632,8 @@ static void transformer_forward_stream(int token, int pos, int layer) {
     for (int i = 0; i < dim; i++) {
         g_state.x[i] += g_state.xb[i];
     }
+
+    PROFILER_STOP();
 }
 
 /* ============================================================================
@@ -1656,7 +1661,10 @@ size_t streaming_calc_memory(int dim, int hidden_dim, int n_layers,
  * preallocate: if true, allocate all buffers at init time (for deterministic mode)
  */
 int streaming_inference_init(bool preallocate) {
+    PROFILER_START("streaming_inference_init");
+
     if (g_initialized) {
+        PROFILER_STOP();
         return 0;
     }
 
@@ -1664,6 +1672,7 @@ int streaming_inference_init(bool preallocate) {
     const struct gguf_model_arch* arch = gguf_parser_get_arch();
     if (!arch) {
         console_printf("Error: No model loaded\n");
+        PROFILER_STOP();
         return -1;
     }
 
@@ -1745,6 +1754,7 @@ int streaming_inference_init(bool preallocate) {
         !g_state.hb2 || !g_state.logits || !g_state.key_cache ||
         !g_state.value_cache || !g_state.layer_weights || !g_input_q8) {
         console_printf("Error: Failed to allocate memory\n");
+        PROFILER_STOP();
         return -1;
     }
 
@@ -1766,6 +1776,7 @@ int streaming_inference_init(bool preallocate) {
     g_layer_weights = (LayerWeights*)heap_alloc(g_cfg.n_layers * sizeof(LayerWeights));  /* init */
     if (!g_layer_weights) {
         console_printf("Error: Memory allocation failed\n");
+        PROFILER_STOP();
         return -1;
     }
 
@@ -1830,6 +1841,7 @@ int streaming_inference_init(bool preallocate) {
         }
     } else {
         console_printf("Error: token_embd.weight not found\n");
+        PROFILER_STOP();
         return -1;
     }
 
@@ -1894,14 +1906,18 @@ int streaming_inference_init(bool preallocate) {
 #endif
 
     g_initialized = true;
+    PROFILER_STOP();
     return 0;
 }
 
 /* Generate tokens */
 int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
                                   int* output_tokens, int max_output) {
+    PROFILER_START("streaming_inference_generate");
+
     if (!g_initialized) {
         console_printf("Error: Inference not initialized\n");
+        PROFILER_STOP();
         return -1;
     }
 
@@ -1977,6 +1993,7 @@ int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
         critical_section_exit();
     }
 
+    PROFILER_STOP();
     return generated;
 }
 
@@ -2037,8 +2054,11 @@ static inline uint64_t cycles_to_us(uint64_t cycles) {
 int streaming_inference_generate_timed(const int* prompt_tokens, int prompt_len,
                                         int* output_tokens, int max_output,
                                         inference_timing_t* timing) {
+    PROFILER_START("streaming_inference_generate_timed");
+
     if (!g_initialized) {
         console_printf("Error: Inference not initialized\n");
+        PROFILER_STOP();
         return -1;
     }
 
@@ -2185,6 +2205,7 @@ int streaming_inference_generate_timed(const int* prompt_tokens, int prompt_len,
         }
     }
 
+    PROFILER_STOP();
     return generated;
 }
 
