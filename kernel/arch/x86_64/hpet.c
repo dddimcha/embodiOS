@@ -59,6 +59,13 @@ static uint64_t hpet_start_counter = 0;
  */
 static volatile void *hpet_detect_fixed_address(void)
 {
+    /* Skip HPET in QEMU without proper memory mapping
+     * HPET base (0xFED00000) not mapped in early boot
+     * Fall back to TSC-based timing instead */
+    return NULL;
+
+    /* Original code for systems with HPET mapped: */
+#if 0
     volatile void *base = (volatile void *)(uintptr_t)HPET_DEFAULT_BASE_ADDR;
 
     /* Try to read capabilities register
@@ -84,6 +91,7 @@ static volatile void *hpet_detect_fixed_address(void)
     }
 
     return base;
+#endif
 }
 
 /* ============================================================================
