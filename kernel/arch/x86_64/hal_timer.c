@@ -1,11 +1,15 @@
 /* EMBODIOS x86_64 HAL Timer Implementation
  *
  * Provides x86_64-specific timer implementation using the PIT
- * (Programmable Interval Timer).
+ * (Programmable Interval Timer) for low-frequency ticks, TSC
+ * (Time Stamp Counter) for high-resolution timing, and HPET
+ * (High Precision Event Timer) as an alternative high-resolution source.
  */
 
 #include "embodios/types.h"
 #include "embodios/hal_timer.h"
+#include "embodios/tsc.h"
+#include "embodios/hpet.h"
 
 /* Timer frequency (100 Hz = 10ms tick) */
 #define TIMER_FREQUENCY 100
@@ -34,13 +38,17 @@
 
 /* Timer state */
 static struct {
-    uint64_t ticks;           /* Timer ticks since boot */
-    uint64_t frequency;       /* Timer frequency in Hz */
+    uint64_t ticks;           /* Timer ticks since boot (PIT-based) */
+    uint64_t frequency;       /* Timer frequency in Hz (PIT) */
     bool enabled;             /* Timer enabled flag */
+    uint64_t tsc_boot;        /* TSC value at boot for high-res timing */
+    uint64_t hpet_boot;       /* HPET value at boot for high-res timing */
 } timer_state = {
     .ticks = 0,
     .frequency = TIMER_FREQUENCY,
-    .enabled = false
+    .enabled = false,
+    .tsc_boot = 0,
+    .hpet_boot = 0
 };
 
 /* Initialize PIT hardware */
@@ -66,7 +74,21 @@ static void pit_init(uint32_t frequency)
 /* HAL timer initialization */
 static void x86_64_timer_init(void)
 {
-    /* Initialize PIT with default frequency */
+    /* Initialize TSC for high-resolution timing */
+    tsc_init();
+
+    /* Record boot TSC value */
+    timer_state.tsc_boot = rdtsc();
+
+    /* Initialize HPET as alternative high-resolution timer source */
+    hpet_init();
+
+    /* Record boot HPET value if available */
+    if (hpet_is_available()) {
+        timer_state.hpet_boot = hpet_read_counter();
+    }
+
+    /* Initialize PIT with default frequency for tick-based timing */
     pit_init(TIMER_FREQUENCY);
     timer_state.frequency = TIMER_FREQUENCY;
     timer_state.ticks = 0;
@@ -119,18 +141,70 @@ static uint64_t x86_64_timer_get_frequency(void)
 /* HAL timer get microseconds */
 static uint64_t x86_64_timer_get_microseconds(void)
 {
+    /* Use TSC for high-resolution timing if available */
+    uint64_t tsc_freq = tsc_get_frequency();
+    if (tsc_freq > 0) {
+        uint64_t tsc_now = rdtsc();
+        uint64_t tsc_elapsed = tsc_now - timer_state.tsc_boot;
+        return tsc_to_microseconds(tsc_elapsed);
+    }
+
+    /* Try HPET if TSC is unavailable or unreliable */
+    if (hpet_is_available()) {
+        uint64_t hpet_now = hpet_read_counter();
+        uint64_t hpet_elapsed = hpet_now - timer_state.hpet_boot;
+        return hpet_ticks_to_microseconds(hpet_elapsed);
+    }
+
+    /* Fall back to PIT-based timing */
     return (timer_state.ticks * 1000000ULL) / timer_state.frequency;
 }
 
 /* HAL timer get milliseconds */
 static uint64_t x86_64_timer_get_milliseconds(void)
 {
+    /* Use TSC for high-resolution timing if available */
+    uint64_t tsc_freq = tsc_get_frequency();
+    if (tsc_freq > 0) {
+        uint64_t tsc_now = rdtsc();
+        uint64_t tsc_elapsed = tsc_now - timer_state.tsc_boot;
+        return tsc_to_microseconds(tsc_elapsed) / 1000ULL;
+    }
+
+    /* Try HPET if TSC is unavailable or unreliable */
+    if (hpet_is_available()) {
+        uint64_t hpet_now = hpet_read_counter();
+        uint64_t hpet_elapsed = hpet_now - timer_state.hpet_boot;
+        return hpet_ticks_to_microseconds(hpet_elapsed) / 1000ULL;
+    }
+
+    /* Fall back to PIT-based timing */
     return (timer_state.ticks * 1000ULL) / timer_state.frequency;
 }
 
 /* HAL timer delay microseconds */
 static void x86_64_timer_delay_us(uint64_t microseconds)
 {
+    /* Use TSC for high-resolution timing if available */
+    uint64_t tsc_freq = tsc_get_frequency();
+    if (tsc_freq > 0) {
+        uint64_t tsc_start = rdtsc();
+        uint64_t tsc_target = tsc_start + (microseconds * tsc_freq) / 1000000ULL;
+
+        while (rdtsc() < tsc_target) {
+            /* Busy wait with pause instruction */
+            __asm__ volatile("pause");
+        }
+        return;
+    }
+
+    /* Try HPET if TSC is unavailable or unreliable */
+    if (hpet_is_available()) {
+        hpet_delay_us(microseconds);
+        return;
+    }
+
+    /* Fall back to PIT-based timing */
     uint64_t start_ticks = timer_state.ticks;
     uint64_t ticks_to_wait = (microseconds * timer_state.frequency) / 1000000ULL;
 

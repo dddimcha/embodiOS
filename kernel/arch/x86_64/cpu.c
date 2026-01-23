@@ -162,6 +162,9 @@ static const struct hal_cpu_ops x86_64_cpu_ops = {
     .get_sse_status = cpu_get_sse_status,
 };
 
+/* Architecture-specific timer initialization */
+extern void arch_timer_init(void);
+
 /* Architecture-specific initialization */
 void arch_cpu_init(void)
 {
@@ -171,6 +174,9 @@ void arch_cpu_init(void)
 
     /* Register HAL operations */
     hal_cpu_register(&x86_64_cpu_ops);
+
+    /* Initialize high-resolution timer HAL */
+    arch_timer_init();
 
     console_printf("CPU: %s\n", cpu_info.vendor);
     console_printf("Model: %s\n", cpu_info.model);

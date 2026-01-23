@@ -8,6 +8,7 @@
 #include "embodios/kernel.h"
 #include "embodios/console.h"
 #include "embodios/interrupt.h"
+#include "embodios/hal_timer.h"
 
 /* Timer frequency (100 Hz = 10ms tick) */
 #define TIMER_FREQUENCY 100
@@ -120,21 +121,23 @@ uint64_t timer_get_seconds(void)
     return timer_state.seconds;
 }
 
+/* Get high-resolution microseconds since boot */
+uint64_t timer_get_microseconds(void)
+{
+    return hal_timer_get_microseconds();
+}
+
+/* Get high-resolution milliseconds since boot */
+uint64_t timer_get_milliseconds(void)
+{
+    return hal_timer_get_milliseconds();
+}
+
 /* Sleep for specified milliseconds (busy wait) */
 void timer_sleep(uint32_t ms)
 {
-    uint64_t start_ticks = timer_state.ticks;
-    uint64_t ticks_to_wait = (ms * timer_state.frequency) / 1000;
-    
-    while ((timer_state.ticks - start_ticks) < ticks_to_wait) {
-        /* Busy wait */
-#ifdef __x86_64__
-        __asm__ volatile("pause");
-#else
-        /* ARM64: yield instruction */
-        __asm__ volatile("yield");
-#endif
-    }
+    /* Use HAL high-resolution timer for accurate delays */
+    hal_timer_delay_ms(ms);
 }
 
 /* Compatibility alias for timer_delay */
