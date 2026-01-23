@@ -142,6 +142,7 @@ KERNEL_C_SOURCES = \
     drivers/nvme/nvme.c \
     drivers/net/virtio_net.c \
     drivers/net/e1000e.c \
+    drivers/can/can.c \
     net/tcpip.c \
     mm/pmm.c \
     mm/vmm.c \
