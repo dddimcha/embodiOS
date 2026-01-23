@@ -25,6 +25,9 @@ typedef struct {
     int num_outputs;
 } TVMFunction;
 
+/* Forward declaration for graph executor */
+typedef struct tvm_graph_executor tvm_graph_executor_t;
+
 /* Module containing compiled functions */
 typedef struct TVMModule {
     const char* name;
@@ -32,6 +35,7 @@ typedef struct TVMModule {
     int num_functions;
     void* module_data;
     size_t module_size;
+    tvm_graph_executor_t* executor;
 } TVMModule;
 
 /* TVM data types */
@@ -64,6 +68,7 @@ typedef struct TVMRuntime {
 void tvm_runtime_stats(void);
 void* tvm_as_model_backend(void);
 TVMRuntime* tvm_get_runtime(void);
+TVMModule* tvm_get_loaded_module(void);
 
 /* Graph node structure */
 typedef struct TVMGraphNode {
@@ -88,7 +93,7 @@ typedef struct TVMGraphExecutor {
 } TVMGraphExecutor;
 
 /* Graph executor API */
-typedef struct tvm_graph_executor {
+struct tvm_graph_executor {
     void* nodes;
     int num_nodes;
     TVMTensor** tensors;
@@ -97,7 +102,7 @@ typedef struct tvm_graph_executor {
     int num_inputs;
     int* output_indices;
     int num_outputs;
-} tvm_graph_executor_t;
+};
 
 /* Graph node operation types */
 typedef enum {
@@ -124,9 +129,16 @@ int tvm_graph_execute(tvm_graph_executor_t* executor);
 /* Helper to create test graphs */
 tvm_graph_executor_t* tvm_create_mlp_graph(int input_dim, int hidden_dim, int output_dim);
 
+/* Module executor access */
+void tvm_module_set_executor(TVMModule* module, tvm_graph_executor_t* executor);
+tvm_graph_executor_t* tvm_module_get_executor(TVMModule* module);
+
 /* Model loader functions */
 TVMModule* tvm_module_load_from_memory(const void* data, size_t size);
 void* tvm_create_test_module(size_t* out_size);
 int embodios_model_to_tvm(struct embodios_model* model, tvm_graph_executor_t** out_executor);
+
+/* Benchmark functions */
+void tvm_run_benchmark(void);
 
 #endif /* _EMBODIOS_TVM_H */

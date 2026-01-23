@@ -98,6 +98,9 @@ void process_command(const char *command)
         console_printf("\n");
         console_printf("Testing:\n");
         console_printf("  locktest, quanttest, quantbench, benchgguf, validate\n");
+        console_printf("\n");
+        console_printf("TVM Runtime:\n");
+        console_printf("  tvmload, tvmrun, tvmbench\n");
     } else if (strncmp(command, "chat ", 5) == 0) {
         /* Simple unified chat command - auto-initializes everything */
         extern int streaming_inference_init(void);
@@ -296,6 +299,113 @@ void process_command(const char *command)
         tinystories_test();
     } else if (strcmp(command, "tvm") == 0) {
         tvm_runtime_stats();
+    } else if (strcmp(command, "tvmbench") == 0) {
+        /* Run TVM runtime performance benchmark */
+        extern void tvm_run_benchmark(void);
+        tvm_run_benchmark();
+    } else if (strcmp(command, "tvmload") == 0) {
+        /* Load test TVM module */
+        extern void* tvm_create_test_module(size_t* out_size);
+        extern TVMModule* tvm_module_load(const void* module_data, size_t size);
+        extern TVMRuntime* tvm_get_runtime(void);
+
+        console_printf("Creating test TVM module...\n");
+        size_t module_size = 0;
+        void* test_module = tvm_create_test_module(&module_size);
+
+        if (!test_module) {
+            console_printf("ERROR: Failed to create test module\n");
+            return;
+        }
+
+        console_printf("Loading TVM module (%zu bytes)...\n", module_size);
+        TVMModule* module = tvm_module_load(test_module, module_size);
+
+        if (!module) {
+            console_printf("ERROR: Failed to load TVM module\n");
+            kfree(test_module);
+            return;
+        }
+
+        console_printf("SUCCESS: TVM module loaded\n");
+        console_printf("  Name: %s\n", module->name ? module->name : "(unnamed)");
+        console_printf("  Functions: %d\n", module->num_functions);
+        console_printf("  Module size: %zu bytes\n", module_size);
+
+        /* Store in runtime (module is already stored by tvm_module_load) */
+        kfree(test_module);
+
+        console_printf("Use 'tvmrun' to execute inference\n");
+    } else if (strcmp(command, "tvmrun") == 0) {
+        /* Run inference with loaded TVM module */
+        extern TVMRuntime* tvm_get_runtime(void);
+        extern int tvm_module_run(TVMModule* module, TVMTensor* input, TVMTensor* output);
+        extern TVMTensor* tvm_tensor_create(int64_t* shape, int ndim, int dtype);
+        extern void tvm_tensor_free(TVMTensor* tensor);
+
+        TVMRuntime* runtime = tvm_get_runtime();
+        if (!runtime || !runtime->initialized) {
+            console_printf("ERROR: TVM runtime not initialized\n");
+            return;
+        }
+
+        /* Get loaded module from runtime */
+        extern TVMModule* tvm_get_loaded_module(void);
+        TVMModule* module = tvm_get_loaded_module();
+
+        if (!module) {
+            console_printf("ERROR: No TVM module loaded. Use 'tvmload' first.\n");
+            return;
+        }
+
+        console_printf("Running inference with TVM module...\n");
+
+        /* Create test input tensor (1x512) */
+        int64_t input_shape[] = {1, 512};
+        TVMTensor* input = tvm_tensor_create(input_shape, 2, TVM_DTYPE_FLOAT32);
+
+        if (!input) {
+            console_printf("ERROR: Failed to create input tensor\n");
+            return;
+        }
+
+        /* Initialize input with test data */
+        float* input_data = (float*)input->data;
+        for (int i = 0; i < 512; i++) {
+            input_data[i] = (float)i / 512.0f;
+        }
+
+        /* Create output tensor (1x512) */
+        int64_t output_shape[] = {1, 512};
+        TVMTensor* output = tvm_tensor_create(output_shape, 2, TVM_DTYPE_FLOAT32);
+
+        if (!output) {
+            console_printf("ERROR: Failed to create output tensor\n");
+            tvm_tensor_free(input);
+            return;
+        }
+
+        /* Run inference */
+        console_printf("Executing graph...\n");
+        int result = tvm_module_run(module, input, output);
+
+        if (result != 0) {
+            console_printf("ERROR: Inference failed with code %d\n", result);
+        } else {
+            console_printf("SUCCESS: Inference completed\n");
+
+            /* Print sample output values */
+            float* output_data = (float*)output->data;
+            console_printf("Output (first 10 values): ");
+            for (int i = 0; i < 10 && i < 512; i++) {
+                console_printf("%.3f ", output_data[i]);
+            }
+            console_printf("\n");
+        }
+
+        /* Clean up */
+        tvm_tensor_free(input);
+        tvm_tensor_free(output);
     } else if (strcmp(command, "dmatest") == 0) {
         dma_run_tests();
     } else if (strcmp(command, "dmastats") == 0) {

@@ -149,6 +149,8 @@ KERNEL_C_SOURCES = \
     mm/heap.c \
     ai/model_runtime.c \
     ai/tvm_runtime.c \
+    ai/tvm_graph_executor.c \
+    ai/tvm_model_loader.c \
     ai/tokenizer.c \
     ai/gguf_integer_loader.c \
     ai/gguf_parser.c \
@@ -178,6 +180,7 @@ KERNEL_C_SOURCES = \
     ai/parallel_inference.c \
     ai/fixed_point.c \
     ai/benchmark.c \
+    ai/tvm_benchmark.c \
     ai/tinyllama_gguf_inference.c \
     lib/string.c \
     lib/stdlib.c \
