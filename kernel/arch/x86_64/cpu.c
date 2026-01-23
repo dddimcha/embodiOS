@@ -1,5 +1,6 @@
 /* EMBODIOS x86_64 CPU Detection and Management */
 #include <embodios/cpu.h>
+#include <embodios/hal_cpu.h>
 #include <embodios/types.h>
 #include <embodios/console.h>
 #include "vga_io.h"
@@ -30,6 +31,10 @@ static inline void cpu_debug_char(char c) {
 #define CPUID_FEAT7_EBX_AVX512F (1 << 16)
 
 static struct cpu_info cpu_info;
+
+/* Forward declarations for HAL interface */
+static bool cpu_sse2_available(void);
+static const char* cpu_get_sse_status(void);
 
 /* Execute CPUID instruction */
 static inline void cpuid(uint32_t func, uint32_t* eax, uint32_t* ebx, 
@@ -143,12 +148,29 @@ void cpu_init(void)
     cpu_debug_char('7');
 }
 
+/* HAL CPU operations */
+static const struct hal_cpu_ops x86_64_cpu_ops = {
+    .init = cpu_init,
+    .get_info = cpu_get_info,
+    .get_features = cpu_get_features,
+    .has_feature = cpu_has_feature,
+    .get_id = cpu_get_id,
+    .get_timestamp = cpu_get_timestamp,
+    .flush_cache = cpu_flush_cache,
+    .invalidate_cache = cpu_invalidate_cache,
+    .sse2_available = cpu_sse2_available,
+    .get_sse_status = cpu_get_sse_status,
+};
+
 /* Architecture-specific initialization */
 void arch_cpu_init(void)
 {
     cpu_debug_char('C');
     cpu_init();
     cpu_debug_char('D');
+
+    /* Register HAL operations */
+    hal_cpu_register(&x86_64_cpu_ops);
 
     console_printf("CPU: %s\n", cpu_info.vendor);
     console_printf("Model: %s\n", cpu_info.model);
@@ -198,6 +220,36 @@ void cpu_flush_cache(void)
 void cpu_invalidate_cache(void)
 {
     __asm__ volatile("invd" ::: "memory");
+}
+
+/* Check if SSE2 is available */
+static bool cpu_sse2_available(void)
+{
+    return cpu_has_feature(CPU_FEATURE_SSE2);
+}
+
+/* Get SSE status string */
+static const char* cpu_get_sse_status(void)
+{
+    if (cpu_info.features & CPU_FEATURE_AVX512)
+        return "AVX-512";
+    if (cpu_info.features & CPU_FEATURE_AVX2)
+        return "AVX2";
+    if (cpu_info.features & CPU_FEATURE_AVX)
+        return "AVX";
+    if (cpu_info.features & CPU_FEATURE_SSE42)
+        return "SSE4.2";
+    if (cpu_info.features & CPU_FEATURE_SSE41)
+        return "SSE4.1";
+    if (cpu_info.features & CPU_FEATURE_SSSE3)
+        return "SSSE3";
+    if (cpu_info.features & CPU_FEATURE_SSE3)
+        return "SSE3";
+    if (cpu_info.features & CPU_FEATURE_SSE2)
+        return "SSE2";
+    if (cpu_info.features & CPU_FEATURE_SSE)
+        return "SSE";
+    return "None";
 }
 
 /* Reboot the system */
