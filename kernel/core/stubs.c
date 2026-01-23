@@ -79,6 +79,7 @@ void process_command(const char *command)
         console_printf("  help            - Show this help\n");
         console_printf("  mem             - Show memory info\n");
         console_printf("  heap            - Show heap stats\n");
+        console_printf("  memtest         - Run memory stress test\n");
         console_printf("  lspci           - List PCI devices\n");
         console_printf("  reboot          - Reboot system\n");
         console_printf("\n");
@@ -227,6 +228,91 @@ void process_command(const char *command)
         heap_stats();
     } else if (strcmp(command, "heap") == 0) {
         heap_stats();
+    } else if (strcmp(command, "memtest") == 0) {
+        /* Memory stress test */
+        console_printf("\n=== Memory Stress Test ===\n\n");
+
+        /* Test 1: Small allocations */
+        console_printf("[Test 1] Small allocations (64 bytes x 1000)...\n");
+        void *small_ptrs[1000];
+        int small_ok = 0;
+        for (int i = 0; i < 1000; i++) {
+            small_ptrs[i] = kmalloc(64);
+            if (small_ptrs[i]) small_ok++;
+        }
+        console_printf("  Allocated: %d/1000\n", small_ok);
+        for (int i = 0; i < 1000; i++) {
+            if (small_ptrs[i]) kfree(small_ptrs[i]);
+        }
+        console_printf("  Freed all. ");
+        heap_stats();
+
+        /* Test 2: Medium allocations */
+        console_printf("\n[Test 2] Medium allocations (4KB x 100)...\n");
+        void *med_ptrs[100];
+        int med_ok = 0;
+        for (int i = 0; i < 100; i++) {
+            med_ptrs[i] = kmalloc(4096);
+            if (med_ptrs[i]) med_ok++;
+        }
+        console_printf("  Allocated: %d/100 (total %d KB)\n", med_ok, med_ok * 4);
+        for (int i = 0; i < 100; i++) {
+            if (med_ptrs[i]) kfree(med_ptrs[i]);
+        }
+        console_printf("  Freed all. ");
+        heap_stats();
+
+        /* Test 3: Large allocation */
+        console_printf("\n[Test 3] Large allocation (64 MB)...\n");
+        void *large = kmalloc(64 * 1024 * 1024);
+        if (large) {
+            console_printf("  SUCCESS: Allocated 64 MB at %p\n", large);
+            /* Write pattern to verify memory is usable */
+            uint32_t *p = (uint32_t *)large;
+            for (int i = 0; i < 1000; i++) {
+                p[i * 1024] = 0xDEADBEEF;
+            }
+            /* Verify pattern */
+            int verify_ok = 1;
+            for (int i = 0; i < 1000; i++) {
+                if (p[i * 1024] != 0xDEADBEEF) {
+                    verify_ok = 0;
+                    break;
+                }
+            }
+            console_printf("  Memory write/read: %s\n", verify_ok ? "PASS" : "FAIL");
+            kfree(large);
+            console_printf("  Freed. ");
+            heap_stats();
+        } else {
+            console_printf("  FAILED: Could not allocate 64 MB\n");
+        }
+
+        /* Test 4: Very large allocation (256 MB) */
+        console_printf("\n[Test 4] Very large allocation (256 MB)...\n");
+        void *vlarge = kmalloc(256 * 1024 * 1024);
+        if (vlarge) {
+            console_printf("  SUCCESS: Allocated 256 MB at %p\n", vlarge);
+            kfree(vlarge);
+            console_printf("  Freed.\n");
+        } else {
+            console_printf("  FAILED: Could not allocate 256 MB (expected if heap < 256 MB free)\n");
+        }
+
+        /* Test 5: Allocation/free cycles */
+        console_printf("\n[Test 5] Allocation/free cycles (1000 iterations)...\n");
+        int cycle_ok = 0;
+        for (int i = 0; i < 1000; i++) {
+            void *p = kmalloc(1024 + (i % 4096));
+            if (p) {
+                kfree(p);
+                cycle_ok++;
+            }
+        }
+        console_printf("  Cycles completed: %d/1000\n", cycle_ok);
+        heap_stats();
+
+        console_printf("\n=== Memory Test Complete ===\n");
     } else if (strcmp(command, "tasks") == 0) {
         console_printf("Task scheduler not fully implemented\n");
     } else if (strcmp(command, "models") == 0) {
