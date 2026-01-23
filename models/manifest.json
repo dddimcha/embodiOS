@@ -15,7 +15,10 @@
       "source": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
       "quantization": "Q4_K_M",
       "license": "Apache-2.0",
-      "last_updated": "2024-01-15"
+      "last_updated": "2024-01-15",
+      "last_update_time": null,
+      "update_source": "initial",
+      "previous_version": null
     },
     "phi-2": {
       "name": "Phi-2",
@@ -31,7 +34,10 @@
       "source": "TheBloke/phi-2-GGUF",
       "quantization": "Q4_K_M",
       "license": "MIT",
-      "last_updated": "2024-12-15"
+      "last_updated": "2024-12-15",
+      "last_update_time": null,
+      "update_source": "initial",
+      "previous_version": null
     }
   },
   "schema_version": "1.0"
