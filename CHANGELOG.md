@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ARM64 and x86-64 boot code generation
 - Makefile and CMake build system generation
 - Works without external dependencies (no NumPy/TVM/Cython required)
+- TVM Runtime integration for optimized model inference on bare metal
 
 ### Changed
 - Updated README with compiler information
