@@ -9,6 +9,7 @@
 #include <embodios/console.h>
 #include <embodios/mm.h>
 #include <embodios/kernel.h>
+#include <embodios/hal_timer.h>
 
 /* Stack state */
 static bool tcpip_initialized = false;
@@ -137,6 +138,35 @@ static uint16_t checksum(const void *data, size_t len)
     }
 
     return (uint16_t)~sum;
+}
+
+/* ============================================================================
+ * Random Number Generation
+ * ============================================================================ */
+
+/* Random number generator state */
+static uint32_t rng_state = 0;
+
+/* Generate random 32-bit number using timer entropy */
+static uint32_t random_u32(void)
+{
+    /* Mix timer ticks and microseconds for entropy */
+    uint64_t ticks = hal_timer_get_ticks();
+    uint64_t us = hal_timer_get_microseconds();
+
+    /* Combine with previous state using simple mixing function */
+    rng_state ^= (uint32_t)(ticks & 0xFFFFFFFF);
+    rng_state ^= (uint32_t)(ticks >> 32);
+    rng_state ^= (uint32_t)(us & 0xFFFFFFFF);
+    rng_state = (rng_state * 1664525U) + 1013904223U;  /* LCG constants */
+
+    return rng_state;
+}
+
+/* Generate TCP Initial Sequence Number using random entropy */
+static uint32_t tcp_generate_isn(void)
+{
+    return random_u32();
 }
 
 /* ============================================================================
@@ -342,14 +372,18 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
             uint32_t ack = ntohl(tcp->ack_num);
             (void)ack;  /* Used for ACK validation in full implementation */
 
+            /* Update activity timestamp */
+            sockets[i].last_activity_ms = hal_timer_get_milliseconds();
+
             /* Handle TCP state machine */
             switch (sockets[i].state) {
             case TCP_LISTEN:
+                /* In LISTEN state, ignore RST */
                 if (flags & TCP_SYN) {
                     sockets[i].remote_ip = ntohl(ip->src_ip);
                     sockets[i].remote_port = ntohs(tcp->src_port);
                     sockets[i].ack_num = seq + 1;
-                    sockets[i].seq_num = 12345;  /* TODO: Random ISN */
+                    sockets[i].seq_num = tcp_generate_isn();
                     sockets[i].state = TCP_SYN_RECEIVED;
                     /* Send SYN+ACK */
                     tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
@@ -360,6 +394,12 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                 break;
 
             case TCP_SYN_SENT:
+                /* Check for RST: connection refused or reset */
+                if (flags & TCP_RST) {
+                    sockets[i].state = TCP_CLOSED;
+                    socket_close(i);
+                    break;
+                }
                 if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
                     sockets[i].ack_num = seq + 1;
                     sockets[i].state = TCP_ESTABLISHED;
@@ -371,7 +411,23 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                 }
                 break;
 
+            case TCP_SYN_RECEIVED:
+                /* Check for RST: return to LISTEN */
+                if (flags & TCP_RST) {
+                    sockets[i].state = TCP_LISTEN;
+                    sockets[i].remote_ip = 0;
+                    sockets[i].remote_port = 0;
+                    break;
+                }
+                break;
+
             case TCP_ESTABLISHED:
+                /* Check for RST: immediately close connection */
+                if (flags & TCP_RST) {
+                    sockets[i].state = TCP_CLOSED;
+                    socket_close(i);
+                    break;
+                }
                 if (flags & TCP_FIN) {
                     sockets[i].state = TCP_CLOSE_WAIT;
                     /* Send ACK */
@@ -390,6 +446,100 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                         sockets[i].ack_num = seq + data_len;
                     }
                 }
+                break;
+
+            case TCP_FIN_WAIT_1:
+                /* Check for RST: immediately close connection */
+                if (flags & TCP_RST) {
+                    sockets[i].state = TCP_CLOSED;
+                    socket_close(i);
+                    break;
+                }
+                if ((flags & (TCP_FIN | TCP_ACK)) == (TCP_FIN | TCP_ACK)) {
+                    /* Received FIN+ACK: simultaneous close, go to TIME_WAIT */
+                    sockets[i].ack_num = seq + 1;
+                    sockets[i].state = TCP_TIME_WAIT;
+                    /* Send ACK */
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num,
+                                    sockets[i].ack_num, TCP_ACK,
+                                    NULL, 0);
+                } else if (flags & TCP_ACK) {
+                    /* Received ACK of our FIN: go to FIN_WAIT_2 */
+                    sockets[i].state = TCP_FIN_WAIT_2;
+                }
+                break;
+
+            case TCP_FIN_WAIT_2:
+                /* Check for RST: immediately close connection */
+                if (flags & TCP_RST) {
+                    sockets[i].state = TCP_CLOSED;
+                    socket_close(i);
+                    break;
+                }
+                if (flags & TCP_FIN) {
+                    /* Received FIN: go to TIME_WAIT */
+                    sockets[i].ack_num = seq + 1;
+                    sockets[i].state = TCP_TIME_WAIT;
+                    /* Send ACK */
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num,
+                                    sockets[i].ack_num, TCP_ACK,
+                                    NULL, 0);
+                }
+                break;
+
+            case TCP_CLOSE_WAIT:
+                /* Check for RST: immediately close connection */
+                if (flags & TCP_RST) {
+                    sockets[i].state = TCP_CLOSED;
+                    socket_close(i);
+                    break;
+                }
+                break;
+
+            case TCP_CLOSING:
+                /* Check for RST: immediately close connection */
+                if (flags & TCP_RST) {
+                    sockets[i].state = TCP_CLOSED;
+                    socket_close(i);
+                    break;
+                }
+                break;
+
+            case TCP_LAST_ACK:
+                /* Check for RST: immediately close connection */
+                if (flags & TCP_RST) {
+                    sockets[i].state = TCP_CLOSED;
+                    socket_close(i);
+                    break;
+                }
+                if (flags & TCP_ACK) {
+                    /* Received ACK of our FIN: close connection */
+                    sockets[i].state = TCP_CLOSED;
+                    socket_close(i);
+                }
+                break;
+
+            case TCP_TIME_WAIT:
+                /* Check for RST: immediately close connection */
+                if (flags & TCP_RST) {
+                    sockets[i].state = TCP_CLOSED;
+                    socket_close(i);
+                    break;
+                }
+                /* Set 2*MSL timeout (60 seconds for embedded systems) */
+                if (sockets[i].timeout_ms == 0) {
+                    sockets[i].timeout_ms = 60000;  /* 60 seconds */
+                }
+                /* Handle retransmitted FIN by re-sending ACK */
+                if (flags & TCP_FIN) {
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num,
+                                    sockets[i].ack_num, TCP_ACK,
+                                    NULL, 0);
+                }
+                /* Socket will be closed by timeout mechanism via tcpip_check_timeouts() */
                 break;
 
             default:
@@ -534,7 +684,29 @@ int tcpip_poll(void)
         packets++;
     }
 
+    /* Check for connection timeouts */
+    tcpip_check_timeouts();
+
     return packets;
+}
+
+void tcpip_check_timeouts(void)
+{
+    uint64_t current_time = hal_timer_get_milliseconds();
+
+    for (int i = 0; i < MAX_SOCKETS; i++) {
+        /* Skip inactive sockets or sockets without timeout */
+        if (!sockets[i].active || sockets[i].timeout_ms == 0) {
+            continue;
+        }
+
+        /* Check if socket has timed out */
+        uint64_t elapsed = current_time - sockets[i].last_activity_ms;
+        if (elapsed > sockets[i].timeout_ms) {
+            /* Close timed-out socket */
+            socket_close(i);
+        }
+    }
 }
 
 int tcpip_send_udp(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port,
@@ -724,6 +896,13 @@ int socket_create(int type, int protocol)
             sockets[i].protocol = (type == SOCK_STREAM) ? IP_PROTO_TCP : IP_PROTO_UDP;
             sockets[i].state = TCP_CLOSED;
             sockets[i].active = true;
+
+            /* Track TCP socket creation for leak detection */
+            if (type == SOCK_STREAM) {
+                net_stats.tcp_sockets_created++;
+                net_stats.tcp_sockets_leaked = net_stats.tcp_sockets_created - net_stats.tcp_sockets_closed;
+            }
+
             return i;
         }
     }
@@ -773,7 +952,7 @@ int socket_connect(int fd, uint32_t ip, uint16_t port)
     }
 
     /* TCP: Send SYN */
-    sockets[fd].seq_num = 12345;  /* TODO: Random ISN */
+    sockets[fd].seq_num = tcp_generate_isn();
     sockets[fd].state = TCP_SYN_SENT;
     tcp_send_packet(sockets[fd].remote_ip, sockets[fd].remote_port,
                     sockets[fd].local_port, sockets[fd].seq_num,
@@ -821,6 +1000,7 @@ int socket_send(int fd, const void *data, size_t len)
 
     if (ret >= 0) {
         sockets[fd].seq_num += len;  /* Advance sequence number */
+        sockets[fd].last_activity_ms = hal_timer_get_milliseconds();
     }
 
     return ret;
@@ -842,6 +1022,9 @@ int socket_recv(int fd, void *buffer, size_t len)
         memmove(sockets[fd].rx_buffer, sockets[fd].rx_buffer + to_copy, sockets[fd].rx_len);
     }
 
+    /* Update activity timestamp */
+    sockets[fd].last_activity_ms = hal_timer_get_milliseconds();
+
     return to_copy;
 }
 
@@ -850,7 +1033,52 @@ int socket_close(int fd)
     if (fd < 0 || fd >= MAX_SOCKETS)
         return NET_ERR_INVALID;
 
+    /* For TCP sockets in ESTABLISHED or CLOSE_WAIT state, perform proper close */
+    if (sockets[fd].type == SOCK_STREAM && sockets[fd].active) {
+        if (sockets[fd].state == TCP_ESTABLISHED) {
+            /* Active close: send FIN and transition to FIN_WAIT_1 */
+            tcp_send_packet(sockets[fd].remote_ip, sockets[fd].remote_port,
+                           sockets[fd].local_port, sockets[fd].seq_num,
+                           sockets[fd].ack_num, TCP_FIN | TCP_ACK,
+                           NULL, 0);
+            sockets[fd].seq_num++;  /* FIN consumes sequence number */
+            sockets[fd].state = TCP_FIN_WAIT_1;
+            /* Socket will be cleaned up when FIN handshake completes */
+            return NET_OK;
+        } else if (sockets[fd].state == TCP_CLOSE_WAIT) {
+            /* Passive close: send FIN and transition to LAST_ACK */
+            tcp_send_packet(sockets[fd].remote_ip, sockets[fd].remote_port,
+                           sockets[fd].local_port, sockets[fd].seq_num,
+                           sockets[fd].ack_num, TCP_FIN | TCP_ACK,
+                           NULL, 0);
+            sockets[fd].seq_num++;  /* FIN consumes sequence number */
+            sockets[fd].state = TCP_LAST_ACK;
+            /* Socket will be cleaned up when final ACK is received */
+            return NET_OK;
+        }
+    }
+
+    /* For all other states and socket types, perform thorough cleanup */
+    /* Explicitly clear critical fields to prevent memory leaks and data leakage */
+    bool was_tcp = (sockets[fd].type == SOCK_STREAM);
+    sockets[fd].active = false;
+    sockets[fd].state = TCP_CLOSED;
+    sockets[fd].rx_len = 0;
+    sockets[fd].seq_num = 0;
+    sockets[fd].ack_num = 0;
+
+    /* Zero out receive buffer to prevent data leakage */
+    memset(sockets[fd].rx_buffer, 0, SOCKET_BUFFER_SIZE);
+
+    /* Zero entire socket structure for comprehensive cleanup */
     memset(&sockets[fd], 0, sizeof(socket_t));
+
+    /* Track TCP socket closure for leak detection */
+    if (was_tcp) {
+        net_stats.tcp_sockets_closed++;
+        net_stats.tcp_sockets_leaked = net_stats.tcp_sockets_created - net_stats.tcp_sockets_closed;
+    }
+
     return NET_OK;
 }
 
@@ -1059,4 +1287,16 @@ int tcpip_start_server(uint16_t port)
 
     socket_close(server_fd);
     return NET_OK;
+}
+
+/* Test helper function to access socket internals for testing purposes
+ * This function is only used by the test framework to verify socket state
+ * and manipulate timeouts for testing timeout handling
+ */
+socket_t* tcpip_get_socket_for_testing(int fd)
+{
+    if (fd < 0 || fd >= MAX_SOCKETS) {
+        return NULL;
+    }
+    return &sockets[fd];
 }
