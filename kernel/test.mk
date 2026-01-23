@@ -16,10 +16,11 @@ test:
 
 # Legacy userspace test targets (deprecated - to be removed after migration)
 # These are kept temporarily for pre-commit hooks until migration is complete
-legacy-test: test_pmm test_slab
+legacy-test: test_pmm test_slab test_vmm
 	@echo "Running legacy userspace tests..."
 	@./test/test_pmm_precommit
 	@./test/test_slab_precommit
+	@./test/test_vmm_precommit
 	@echo "All legacy tests passed!"
 
 test_pmm:
@@ -27,6 +28,9 @@ test_pmm:
 
 test_slab:
 	@$(CC) $(CFLAGS) -o test/test_slab_precommit test/test_slab.c
+
+test_vmm:
+	@$(CC) $(CFLAGS) -o test/test_vmm_precommit test/test_vmm.c
 
 clean:
 	@rm -f test/test_*_precommit

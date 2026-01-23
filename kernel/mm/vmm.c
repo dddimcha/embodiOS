@@ -105,13 +105,21 @@ static void unmap_page(struct page_table* pml4, uintptr_t vaddr)
     /* Get page table hierarchy */
     struct page_table* pdpt = get_page_table(pml4, PML4_INDEX(vaddr), false);
     if (!pdpt) return;
-    
+
     struct page_table* pd = get_page_table(pdpt, PDPT_INDEX(vaddr), false);
     if (!pd) return;
-    
+
     struct page_table* pt = get_page_table(pd, PD_INDEX(vaddr), false);
     if (!pt) return;
-    
+
+    /* Zero out page content before unmapping */
+    pte_t pte = pt->entries[PT_INDEX(vaddr)];
+    if (pte & PTE_PRESENT) {
+        uintptr_t phys_addr = pte & ~0xFFF;
+        void* virt_addr = (void*)(phys_addr + KERNEL_BASE);
+        memset(virt_addr, 0, PAGE_SIZE);
+    }
+
     /* Clear page table entry */
     pt->entries[PT_INDEX(vaddr)] = 0;
     
@@ -231,6 +239,11 @@ void vmm_free(void* addr, size_t size)
         pte_t pte = pt->entries[PT_INDEX((uintptr_t)addr + i * PAGE_SIZE)];
         if (pte & PTE_PRESENT) {
             uintptr_t paddr = pte & ~0xFFF;
+
+            /* Zero out page content before freeing */
+            void* virt_addr = (void*)(paddr + KERNEL_BASE);
+            memset(virt_addr, 0, PAGE_SIZE);
+
             pmm_free_page((void*)(paddr + KERNEL_BASE));
         }
         
