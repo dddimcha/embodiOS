@@ -824,3 +824,102 @@ int gdb_stub_run_tests(void)
     console_printf("=== All GDB stub tests passed ===\n");
     return 0;
 }
+
+/* ============================================================================
+ * Kernel Data Structure Inspection
+ * ============================================================================ */
+
+void gdb_dump_memory_info(void)
+{
+    console_printf("\n=== Memory Information ===\n");
+
+    /* Dump physical memory manager statistics */
+    size_t total_mem = pmm_total_memory();
+    size_t avail_mem = pmm_available_memory();
+    size_t total_pages = pmm_total_pages();
+    size_t avail_pages = pmm_available_pages();
+    size_t used_mem = total_mem - avail_mem;
+
+    console_printf("Total Memory:     %lu KB (%lu MB)\n",
+                   total_mem / 1024, total_mem / (1024 * 1024));
+    console_printf("Available Memory: %lu KB (%lu MB)\n",
+                   avail_mem / 1024, avail_mem / (1024 * 1024));
+    console_printf("Used Memory:      %lu KB (%lu MB)\n",
+                   used_mem / 1024, used_mem / (1024 * 1024));
+    console_printf("Total Pages:      %lu\n", total_pages);
+    console_printf("Available Pages:  %lu\n", avail_pages);
+    console_printf("Used Pages:       %lu\n", total_pages - avail_pages);
+}
+
+void gdb_dump_kernel_state(void)
+{
+    console_printf("\n=== Kernel State ===\n");
+
+    /* Kernel name */
+    console_printf("Kernel: EmbodIOS\n");
+
+    /* Architecture */
+#if defined(__x86_64__)
+    console_printf("Architecture: x86_64\n");
+#elif defined(__i386__)
+    console_printf("Architecture: i386\n");
+#elif defined(__aarch64__)
+    console_printf("Architecture: ARM64\n");
+#else
+    console_printf("Architecture: Unknown\n");
+#endif
+
+    /* CPU state (from saved registers) */
+    console_printf("\nCPU State:\n");
+    console_printf("RIP: 0x%016lx\n", g_gdb.regs.rip);
+    console_printf("RSP: 0x%016lx\n", g_gdb.regs.rsp);
+    console_printf("RBP: 0x%016lx\n", g_gdb.regs.rbp);
+    console_printf("RFLAGS: 0x%016lx", g_gdb.regs.rflags);
+
+    /* Decode RFLAGS */
+    console_printf(" [");
+    if (g_gdb.regs.rflags & 0x001) console_printf("CF ");
+    if (g_gdb.regs.rflags & 0x004) console_printf("PF ");
+    if (g_gdb.regs.rflags & 0x010) console_printf("AF ");
+    if (g_gdb.regs.rflags & 0x040) console_printf("ZF ");
+    if (g_gdb.regs.rflags & 0x080) console_printf("SF ");
+    if (g_gdb.regs.rflags & 0x100) console_printf("TF ");
+    if (g_gdb.regs.rflags & 0x200) console_printf("IF ");
+    if (g_gdb.regs.rflags & 0x400) console_printf("DF ");
+    if (g_gdb.regs.rflags & 0x800) console_printf("OF ");
+    console_printf("]\n");
+}
+
+void gdb_dump_stub_state(void)
+{
+    console_printf("\n=== GDB Stub State ===\n");
+    console_printf("Initialized: %s\n", gdb_initialized ? "Yes" : "No");
+    console_printf("Connected: %s\n", g_gdb.connected ? "Yes" : "No");
+    console_printf("Single Stepping: %s\n", g_gdb.single_stepping ? "Yes" : "No");
+
+    console_printf("\nStatistics:\n");
+    console_printf("Packets Received: %lu\n", g_gdb.packets_rx);
+    console_printf("Packets Transmitted: %lu\n", g_gdb.packets_tx);
+
+    console_printf("\nBreakpoints: %d/%d active\n", g_gdb.num_breakpoints, GDB_MAX_BREAKPOINTS);
+    if (g_gdb.num_breakpoints > 0) {
+        console_printf("Active Breakpoints:\n");
+        for (int i = 0; i < GDB_MAX_BREAKPOINTS; i++) {
+            if (g_gdb.breakpoints[i].active) {
+                console_printf("  [%d] 0x%016lx (saved: 0x%02x)\n",
+                    i, g_gdb.breakpoints[i].addr, g_gdb.breakpoints[i].saved_byte);
+            }
+        }
+    }
+
+    console_printf("\nRegisters:\n");
+    console_printf("RAX: 0x%016lx  RBX: 0x%016lx\n", g_gdb.regs.rax, g_gdb.regs.rbx);
+    console_printf("RCX: 0x%016lx  RDX: 0x%016lx\n", g_gdb.regs.rcx, g_gdb.regs.rdx);
+    console_printf("RSI: 0x%016lx  RDI: 0x%016lx\n", g_gdb.regs.rsi, g_gdb.regs.rdi);
+    console_printf("RBP: 0x%016lx  RSP: 0x%016lx\n", g_gdb.regs.rbp, g_gdb.regs.rsp);
+    console_printf("R8:  0x%016lx  R9:  0x%016lx\n", g_gdb.regs.r8, g_gdb.regs.r9);
+    console_printf("R10: 0x%016lx  R11: 0x%016lx\n", g_gdb.regs.r10, g_gdb.regs.r11);
+    console_printf("R12: 0x%016lx  R13: 0x%016lx\n", g_gdb.regs.r12, g_gdb.regs.r13);
+    console_printf("R14: 0x%016lx  R15: 0x%016lx\n", g_gdb.regs.r14, g_gdb.regs.r15);
+    console_printf("RIP: 0x%016lx  RFLAGS: 0x%016lx\n", g_gdb.regs.rip, g_gdb.regs.rflags);
+}

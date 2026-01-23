@@ -211,6 +211,28 @@ void gdb_stub_print_info(void);
  */
 int gdb_stub_run_tests(void);
 
+/* ============================================================================
+ * Kernel Data Structure Inspection
+ * ============================================================================ */
+
+/**
+ * Dump memory allocator state
+ * Prints current memory usage, allocation statistics, and heap state
+ */
+void gdb_dump_memory_info(void);
+
+/**
+ * Dump kernel state information
+ * Prints kernel version, uptime, CPU state, and other system information
+ */
+void gdb_dump_kernel_state(void);
+
+/**
+ * Dump GDB stub internal state
+ * Prints connection status, breakpoints, and statistics
+ */
+void gdb_dump_stub_state(void);
+
 #ifdef __cplusplus
 }
 #endif
