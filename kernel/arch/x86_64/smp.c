@@ -351,15 +351,19 @@ void smp_init(void)
         smp_state.num_cpus = MAX_CPUS;
     }
 
-    /* Initialize BSP's Local APIC */
-    apic_init_current_cpu();
-
-    /* If only 1 CPU, we're done */
+    /* If only 1 CPU, skip APIC init (avoids unmapped memory access) */
     if (smp_state.num_cpus <= 1) {
-        console_printf("SMP: Single processor system\n");
+        console_printf("SMP: Single processor system (skipping APIC init)\n");
+        smp_state.num_online = 1;
+        smp_state.cpus[0].cpu_id = 0;
+        smp_state.cpus[0].online = true;
+        smp_state.cpus[0].bsp = true;
         smp_state.initialized = true;
         return;
     }
+
+    /* Initialize BSP's Local APIC (only for multi-CPU systems) */
+    apic_init_current_cpu();
 
     /* Allocate stacks for secondary CPUs */
     if (!allocate_cpu_stacks()) {

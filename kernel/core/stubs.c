@@ -754,7 +754,7 @@ void process_command(const char *command)
         /* Run REAL GGUF inference benchmark (not simulation) */
         extern int benchmark_init(void);
         extern int benchmark_gguf_inference(inference_benchmark_t *result, const char *, int);
-        extern int streaming_inference_init(void);
+        extern int streaming_inference_init(bool preallocate);
         extern const uint8_t *get_embedded_gguf_model(size_t *out_size);
         extern int gguf_load_model(void *data, size_t size);
         extern int gguf_model_embedded(void);

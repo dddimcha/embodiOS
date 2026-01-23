@@ -295,7 +295,7 @@ int parallel_init(int num_threads) {
         char worker_name[32];
         snprintf(worker_name, sizeof(worker_name), "worker_%d", i);
 
-        g_worker_tasks[i] = task_create(worker_name, worker_thread_entry);
+        g_worker_tasks[i] = task_create(worker_name, worker_thread_entry, 128);
         if (!g_worker_tasks[i]) {
             console_printf("[PARALLEL] Failed to create worker %d\n", i);
             /* Clean up already created workers */

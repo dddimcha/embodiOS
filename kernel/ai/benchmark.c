@@ -889,7 +889,7 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
     memset(result, 0, sizeof(*result));
 
     /* External streaming inference functions */
-    extern int streaming_inference_init(void);
+    extern int streaming_inference_init(bool preallocate);
     extern bool streaming_inference_is_ready(void);
     extern int streaming_inference_generate_timed(const int *, int, int *, int, inference_timing_t *);
     extern const char *streaming_inference_get_token(int);
@@ -905,7 +905,7 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
     if (!streaming_inference_is_ready()) {
         console_printf("Initializing streaming inference engine...\n");
         uint64_t init_start = hal_timer_get_ticks();
-        if (streaming_inference_init() != 0) {
+        if (streaming_inference_init(false) != 0) {
             console_printf("ERROR: Failed to initialize streaming inference\n");
             return -1;
         }

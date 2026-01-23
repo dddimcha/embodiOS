@@ -343,6 +343,11 @@ void kernel_main(void)
     console_printf("[DEBUG] Calling constructors from %p to %p\n",
                    __init_array_start, __init_array_end);
     for (void (**ctor)(void) = __init_array_start; ctor < __init_array_end; ctor++) {
+        /* Skip obviously invalid pointers (NULL or > 16MB kernel space) */
+        if (*ctor == NULL || (uintptr_t)*ctor > 0x2000000 || (uintptr_t)*ctor < 0x100000) {
+            console_printf("[DEBUG] Skipping invalid constructor at %p\n", *ctor);
+            continue;
+        }
         console_printf("[DEBUG] Calling constructor at %p\n", *ctor);
         (*ctor)();
     }
@@ -353,8 +358,9 @@ void kernel_main(void)
 
     /* TEMPORARY: Manually run PMM test to verify framework works */
     /* TODO: Fix multiboot2 cmdline parsing for QEMU -kernel boot */
-    console_printf("[DEBUG] Manually running PMM test...\n");
-    test_run_single("pmm");
+    /* Disabled - test framework calls shutdown on completion */
+    /* console_printf("[DEBUG] Manually running PMM test...\n");
+    test_run_single("pmm"); */
 
     /* Check for test mode command-line parameter */
     #if defined(__x86_64__)
