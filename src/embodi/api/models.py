@@ -161,3 +161,120 @@ class CompletionStreamChunk(BaseModel):
     choices: List[CompletionChoice] = Field(
         description="List of completion choices with partial text"
     )
+
+
+class ModelUpdateRequest(BaseModel):
+    """Request format for OTA model update endpoint"""
+
+    model_config = {"protected_namespaces": ()}
+
+    model_url: Optional[str] = Field(
+        default=None,
+        description="URL to download model file from"
+    )
+    model_data: Optional[str] = Field(
+        default=None,
+        description="Base64-encoded model file data for direct upload"
+    )
+    checksum: str = Field(
+        description="SHA256 checksum of the model file for verification"
+    )
+    model_name: Optional[str] = Field(
+        default=None,
+        description="Optional name for the model"
+    )
+
+
+class ModelUpdateResponse(BaseModel):
+    """Response format for OTA model update endpoint"""
+
+    model_config = {"protected_namespaces": ()}
+
+    status: str = Field(
+        description="Update status: 'success', 'failed', or 'in_progress'"
+    )
+    model_id: Optional[str] = Field(
+        default=None,
+        description="Model ID assigned to the updated model (on success)"
+    )
+    message: str = Field(
+        description="Human-readable message about the update operation"
+    )
+    timestamp: int = Field(
+        default_factory=lambda: int(time.time()),
+        description="Unix timestamp of the update operation"
+    )
+
+
+class ModelInfo(BaseModel):
+    """Information about a loaded model"""
+
+    model_config = {"protected_namespaces": ()}
+
+    model_id: str = Field(
+        description="Unique identifier for the model"
+    )
+    model_name: str = Field(
+        description="Human-readable model name"
+    )
+    size_bytes: Optional[int] = Field(
+        default=None,
+        description="Model file size in bytes"
+    )
+    loaded: bool = Field(
+        description="Whether the model is currently loaded in memory"
+    )
+    last_update: Optional[int] = Field(
+        default=None,
+        description="Unix timestamp of last update (for OTA models)"
+    )
+
+
+class ModelStatusResponse(BaseModel):
+    """Response format for model status endpoint"""
+
+    loaded_models: List[ModelInfo] = Field(
+        description="List of models loaded in the registry"
+    )
+    active_model: Optional[str] = Field(
+        default=None,
+        description="ID of the currently active model"
+    )
+    memory_usage_mb: Optional[float] = Field(
+        default=None,
+        description="Total memory usage by models in megabytes"
+    )
+    registry_stats: Optional[Dict] = Field(
+        default=None,
+        description="Additional registry statistics"
+    )
+
+
+class ModelSwitchRequest(BaseModel):
+    """Request format for model switch endpoint"""
+
+    model_config = {"protected_namespaces": ()}
+
+    model_id: Union[int, str] = Field(
+        description="Model ID (integer index or string identifier) to switch to"
+    )
+
+
+class ModelSwitchResponse(BaseModel):
+    """Response format for model switch endpoint"""
+
+    model_config = {"protected_namespaces": ()}
+
+    status: str = Field(
+        description="Switch status: 'success' or 'failed'"
+    )
+    active_model: str = Field(
+        description="ID of the currently active model after switch"
+    )
+    message: str = Field(
+        description="Human-readable message about the switch operation"
+    )
+    timestamp: int = Field(
+        default_factory=lambda: int(time.time()),
+        description="Unix timestamp of the switch operation"
+    )
