@@ -74,6 +74,15 @@ CXXFLAGS += -I include/compat -I include -I include/arch/$(ARCH)
 CXXFLAGS += -fno-exceptions -fno-rtti -std=c++17
 CXXFLAGS += -I llama_cpp/include -I llama_cpp/ggml -I llama_cpp/src
 
+# Coverage instrumentation support (gcov/lcov)
+# Enable with: make COVERAGE=1
+# Note: Uses lib/gcov_stubs.c for bare-metal gcov runtime support
+ifeq ($(COVERAGE),1)
+    $(info Coverage instrumentation enabled)
+    CFLAGS += -fprofile-arcs -ftest-coverage
+    CXXFLAGS += -fprofile-arcs -ftest-coverage
+endif
+
 # Architecture-specific flags
 ifeq ($(ARCH),x86_64)
     CFLAGS += -mno-red-zone -mcmodel=kernel
@@ -188,10 +197,18 @@ KERNEL_C_SOURCES = \
     ai/benchmark.c \
     ai/tvm_benchmark.c \
     ai/tinyllama_gguf_inference.c \
+    test/test_framework.c \
+    test/example_test.c \
+    test/test_pmm.c \
     lib/string.c \
     lib/stdlib.c \
     lib/math.c \
     lib/compat_stubs.c
+
+# Add gcov runtime stubs when coverage is enabled
+ifeq ($(COVERAGE),1)
+    KERNEL_C_SOURCES += lib/gcov_stubs.c
+endif
 
 # Math library enabled (SSE enabled for AI inference)
 # ai/tvm_graph_executor.c \
@@ -352,6 +369,19 @@ clean:
 	rm -f $(ALL_OBJS) embodios.elf embodios.bin embodios.iso embodios.elf.signed
 	rm -f ai/tinystories_model_flag.o ai/tokenizer_flag.o ai/gguf_model_flag.o ai/gguf_model.o
 
+# Test target - run kernel unit tests in QEMU
+# Usage: make test           - runs all tests
+#        make test TESTNAME=foo - runs single test named "foo"
+test: embodios.elf
+	@echo "Running kernel unit tests in QEMU..."
+	@cd .. && bash scripts/run_kernel_tests.sh $(TESTNAME)
+
+# Coverage target - build with coverage, run tests, generate report
+# Usage: make coverage - generates HTML coverage report
+coverage:
+	@echo "Generating kernel coverage report..."
+	@cd .. && bash scripts/coverage_report.sh
+
 # Embed TinyStories model as binary object
 ai/tinystories_model.o: $(TINYSTORIES_MODEL)
 	@echo "Embedding TinyStories-15M model into kernel..."
@@ -472,4 +502,4 @@ test-ethercat: test/test_ethercat.c
 	./test/test_ethercat
 	@rm -f test/test_ethercat
 
-.PHONY: all clean iso iso-prod iso-full iso-quick sign sign-check test-modbus test-pmm test-slab test-ethercat
+.PHONY: all clean iso iso-prod iso-full iso-quick test coverage sign sign-check test-modbus test-pmm test-slab test-ethercat

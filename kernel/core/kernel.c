@@ -17,6 +17,7 @@
 #include <embodios/tcpip.h>
 #include <embodios/can.h>
 #include <embodios/model_registry.h>
+#include <embodios/test.h>
 
 /* Kernel version info */
 const char* kernel_version = "EMBODIOS v0.1.0-native";
@@ -38,6 +39,30 @@ extern char _bss_start[];
 extern char _bss_end[];
 extern char _model_weights_start[];
 extern char _model_weights_end[];
+#endif
+
+/* Multiboot2 info from boot.S */
+#if defined(__x86_64__)
+extern uint32_t multiboot_magic;
+extern uint32_t multiboot_info;
+
+/* Multiboot2 constants */
+#define MULTIBOOT2_MAGIC 0x36d76289
+#define MULTIBOOT2_TAG_CMDLINE 1
+#define MULTIBOOT2_TAG_END 0
+
+/* Multiboot2 tag structure */
+struct multiboot2_tag {
+    uint32_t type;
+    uint32_t size;
+};
+
+/* Multiboot2 command line tag */
+struct multiboot2_tag_cmdline {
+    uint32_t type;
+    uint32_t size;
+    char string[0];
+};
 #endif
 
 /* Architecture-specific initialization */
@@ -75,6 +100,107 @@ static inline void debug_serial_char(char c) {
 }
 #else
 static inline void debug_serial_char(char c) { (void)c; }
+#endif
+
+/* Simple strstr implementation for cmdline parsing */
+static char* kernel_strstr(const char* haystack, const char* needle)
+{
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0) return (char*)haystack;
+
+    while (*haystack) {
+        size_t i;
+        for (i = 0; i < needle_len && haystack[i] == needle[i]; i++);
+        if (i == needle_len) return (char*)haystack;
+        haystack++;
+    }
+    return NULL;
+}
+
+#if defined(__x86_64__)
+/* Global variable to store test name passed via environment */
+extern char __test_name_start[];
+extern char __test_name_end[];
+static char test_mode_name[64] = {0};
+
+/* Parse multiboot2 info and check for test mode cmdline parameter */
+static void check_test_mode_cmdline(void)
+{
+    bool found_cmdline = false;
+
+    /* Check if we have valid multiboot2 info */
+    if (multiboot_magic == MULTIBOOT2_MAGIC) {
+        /* Multiboot2 info starts with total size and reserved field */
+        uint32_t* mbi = (uint32_t*)(uintptr_t)multiboot_info;
+        uint32_t total_size = mbi[0];
+
+        /* Iterate through tags */
+        struct multiboot2_tag* tag = (struct multiboot2_tag*)&mbi[2];
+        uintptr_t end = (uintptr_t)mbi + total_size;
+
+        while ((uintptr_t)tag < end && tag->type != MULTIBOOT2_TAG_END) {
+            if (tag->type == MULTIBOOT2_TAG_CMDLINE) {
+                struct multiboot2_tag_cmdline* cmdline_tag =
+                    (struct multiboot2_tag_cmdline*)tag;
+                const char* cmdline = cmdline_tag->string;
+
+                console_printf("Kernel cmdline: %s\n", cmdline);
+                found_cmdline = true;
+
+                /* Check for "test" parameter - run all tests */
+                if (kernel_strstr(cmdline, "test")) {
+                    /* Check if it's "runtest=<name>" for single test */
+                    char* runtest = kernel_strstr(cmdline, "runtest=");
+                    if (runtest) {
+                        /* Extract test name after "runtest=" */
+                        const char* test_name = runtest + 8;  /* strlen("runtest=") */
+
+                        /* Find end of test name (space or null) */
+                        size_t name_len = 0;
+                        while (test_name[name_len] && test_name[name_len] != ' ') {
+                            name_len++;
+                        }
+
+                        /* Copy test name to temporary buffer */
+                        char name_buf[64];
+                        if (name_len < sizeof(name_buf)) {
+                            size_t i;
+                            for (i = 0; i < name_len; i++) {
+                                name_buf[i] = test_name[i];
+                            }
+                            name_buf[i] = '\0';
+
+                            console_printf("Running single test: %s\n", name_buf);
+                            test_run_single(name_buf);
+                        }
+                    } else {
+                        /* Just "test" - run all tests */
+                        console_printf("Running all tests...\n");
+                        test_run_all();
+                    }
+
+                    return;
+                }
+
+                return;
+            }
+
+            /* Move to next tag (tags are 8-byte aligned) */
+            tag = (struct multiboot2_tag*)((uintptr_t)tag + ((tag->size + 7) & ~7));
+        }
+    }
+
+    /* Fallback: For QEMU -kernel boot without multiboot2 loader,
+     * check if we should run tests automatically.
+     * This is a temporary workaround until we have proper GRUB integration.
+     */
+    #ifdef AUTO_RUN_TESTS
+    if (!found_cmdline) {
+        console_printf("Auto-running tests (no cmdline found)...\n");
+        test_run_all();
+    }
+    #endif
+}
 #endif
 
 void kernel_main(void)
@@ -209,9 +335,32 @@ void kernel_main(void)
     /* Enable interrupts - DISABLED for UEFI */
     /* arch_enable_interrupts(); */
 
+    console_printf("[DEBUG] About to call constructors...\n");
+
+    /* Call C++ global constructors for test registration */
+    extern void (*__init_array_start[])(void);
+    extern void (*__init_array_end[])(void);
+    console_printf("[DEBUG] Calling constructors from %p to %p\n",
+                   __init_array_start, __init_array_end);
+    for (void (**ctor)(void) = __init_array_start; ctor < __init_array_end; ctor++) {
+        console_printf("[DEBUG] Calling constructor at %p\n", *ctor);
+        (*ctor)();
+    }
+    console_printf("[DEBUG] Constructors done\n");
+
     console_printf("\nEMBODIOS Ready (polling mode - no interrupts).\n");
     console_printf("Type 'help' for available commands.\n\n");
-    
+
+    /* TEMPORARY: Manually run PMM test to verify framework works */
+    /* TODO: Fix multiboot2 cmdline parsing for QEMU -kernel boot */
+    console_printf("[DEBUG] Manually running PMM test...\n");
+    test_run_single("pmm");
+
+    /* Check for test mode command-line parameter */
+    #if defined(__x86_64__)
+    /* check_test_mode_cmdline(); */  /* Disabled for now */
+    #endif
+
     /* Auto-run benchmark for testing */
     #ifdef AUTO_BENCHMARK
     console_printf("Auto-running benchmark...\n");
