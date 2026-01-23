@@ -69,7 +69,7 @@ def validate_gguf_format(file_path: Path) -> Tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 
-def test_inference(
+def run_model_inference_test(
     model_path: Path,
     test_input: Optional[List[int]] = None,
     mock_mode: bool = True
