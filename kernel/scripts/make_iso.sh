@@ -24,6 +24,7 @@ echo ""
 INCLUDE_MODELS=false
 VERBOSE=false
 SECURE_BOOT=false
+SHIM=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -43,6 +44,10 @@ while [[ $# -gt 0 ]]; do
             SECURE_BOOT=true
             shift
             ;;
+        --shim)
+            SHIM=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [options]"
             echo ""
@@ -51,6 +56,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --verbose     Verbose output"
             echo "  --output FILE Output ISO filename (default: embodios.iso)"
             echo "  --secure-boot Enable UEFI Secure Boot support"
+            echo "  --shim        Include shim bootloader for Microsoft UEFI CA"
             echo "  --help        Show this help"
             exit 0
             ;;
@@ -116,6 +122,25 @@ if [ "$SECURE_BOOT" = true ]; then
     echo -e "${GREEN}Secure Boot requirements satisfied${NC}"
 fi
 
+# Check for shim bootloader if requested
+if [ "$SHIM" = true ]; then
+    echo "Shim bootloader enabled - checking requirements..."
+
+    # Check for shim files
+    if [ ! -f "$KERNEL_DIR/secure-boot/shim/shimx64.efi" ] || [ ! -f "$KERNEL_DIR/secure-boot/shim/grubx64.efi" ]; then
+        echo -e "${YELLOW}Shim bootloader not found, downloading...${NC}"
+        cd "$SCRIPT_DIR"
+        ./download_shim.sh
+        if [ ! -f "$KERNEL_DIR/secure-boot/shim/shimx64.efi" ] || [ ! -f "$KERNEL_DIR/secure-boot/shim/grubx64.efi" ]; then
+            echo -e "${RED}Error: Failed to download shim bootloader${NC}"
+            echo "Run './scripts/download_shim.sh' manually to troubleshoot"
+            exit 1
+        fi
+    fi
+
+    echo -e "${GREEN}Shim bootloader requirements satisfied${NC}"
+fi
+
 # Clean and create ISO directory structure
 echo "Preparing ISO directory..."
 rm -rf "$ISO_DIR"
@@ -123,6 +148,11 @@ mkdir -p "$ISO_DIR/boot/grub"
 mkdir -p "$ISO_DIR/models"
 mkdir -p "$ISO_DIR/config"
 mkdir -p "$ISO_DIR/docs"
+
+# Create EFI/BOOT directory if shim is enabled
+if [ "$SHIM" = true ]; then
+    mkdir -p "$ISO_DIR/EFI/BOOT"
+fi
 
 # Copy kernel
 echo "Copying kernel..."
@@ -141,6 +171,18 @@ if [ "$SECURE_BOOT" = true ]; then
     if [ "$VERBOSE" = true ]; then
         echo "  Signed kernel: embodios.elf.signed"
         echo "  Certificate: DB.crt"
+    fi
+fi
+
+# Copy shim bootloader files if enabled
+if [ "$SHIM" = true ]; then
+    echo "Copying shim bootloader for Microsoft UEFI CA..."
+    cp "$KERNEL_DIR/secure-boot/shim/shimx64.efi" "$ISO_DIR/EFI/BOOT/BOOTX64.EFI"
+    cp "$KERNEL_DIR/secure-boot/shim/grubx64.efi" "$ISO_DIR/EFI/BOOT/grubx64.efi"
+
+    if [ "$VERBOSE" = true ]; then
+        echo "  BOOTX64.EFI (shimx64.efi): Copied"
+        echo "  grubx64.efi: Copied"
     fi
 fi
 
@@ -198,14 +240,19 @@ cp "$KERNEL_DIR/config/embodios.conf.example" "$ISO_DIR/config/" 2>/dev/null || 
 # Create version file
 echo "Creating version info..."
 if [ "$SECURE_BOOT" = true ]; then
-    cat > "$ISO_DIR/VERSION" << EOF
-EMBODIOS Production ISO (Secure Boot Enabled)
+    VERSION_CONTENT="EMBODIOS Production ISO (Secure Boot Enabled)
 Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
 Kernel: $(md5sum "$ISO_DIR/boot/embodios.elf" | cut -d' ' -f1)
 Signed Kernel: $(md5sum "$ISO_DIR/boot/embodios.elf.signed" | cut -d' ' -f1)
 Secure Boot: Enabled
-Certificate: $(openssl x509 -in "$KERNEL_DIR/secure-boot/DB.crt" -noout -subject 2>/dev/null || echo "N/A")
-EOF
+Certificate: $(openssl x509 -in "$KERNEL_DIR/secure-boot/DB.crt" -noout -subject 2>/dev/null || echo "N/A")"
+
+    if [ "$SHIM" = true ]; then
+        VERSION_CONTENT="$VERSION_CONTENT
+Shim Bootloader: Enabled (Microsoft UEFI CA signed)"
+    fi
+
+    echo "$VERSION_CONTENT" > "$ISO_DIR/VERSION"
 else
     cat > "$ISO_DIR/VERSION" << EOF
 EMBODIOS Production ISO
@@ -228,6 +275,9 @@ if [ -f "$OUTPUT" ]; then
     if [ "$SECURE_BOOT" = true ]; then
         echo "  Secure Boot: Enabled"
         echo "  Signed Kernel: Included"
+    fi
+    if [ "$SHIM" = true ]; then
+        echo "  Shim Bootloader: Included (Microsoft UEFI CA)"
     fi
     echo ""
     if [ "$SECURE_BOOT" = true ]; then
