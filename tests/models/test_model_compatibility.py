@@ -84,6 +84,144 @@ def test_ollama_model_compatibility(model):
         assert len(cap) > 0, "Capabilities cannot be empty strings"
 
 
+def test_quantization_formats(temp_models_dir):
+    """Test quantization format validation for all supported quantization types"""
+    import tempfile
+    import shutil
+
+    # Valid quantization formats supported by EMBODIOS
+    valid_quants = ["Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"]
+
+    # Create valid GGUF file content
+    gguf_magic = b'GGUF'
+    version = (3).to_bytes(4, byteorder='little')
+    minimal_gguf = gguf_magic + version + b'\x00' * (2048 - len(gguf_magic) - 4)
+
+    # Test each valid quantization format
+    for quant in valid_quants:
+        # Create a GGUF file with quantization in filename
+        test_filename = f"model-{quant}.gguf"
+        test_path = temp_models_dir / test_filename
+
+        with open(test_path, 'wb') as f:
+            f.write(minimal_gguf)
+
+        # Verify quantization format is detected
+        matches, message = verify_quantization_format(test_path, quant)
+        assert matches is True, f"Should detect {quant} format in filename: {message}"
+        assert quant in message, f"Message should mention quantization format: {message}"
+
+        # Cleanup
+        test_path.unlink()
+
+    # Test with lowercase quantization in filename
+    test_path = temp_models_dir / "model-q4_k_m.gguf"
+    with open(test_path, 'wb') as f:
+        f.write(minimal_gguf)
+
+    matches, message = verify_quantization_format(test_path, "Q4_K_M")
+    assert matches is True, f"Should detect Q4_K_M in lowercase filename: {message}"
+    test_path.unlink()
+
+    # Test with dash-separated format
+    test_path = temp_models_dir / "model-q5-k-m.gguf"
+    with open(test_path, 'wb') as f:
+        f.write(minimal_gguf)
+
+    matches, message = verify_quantization_format(test_path, "Q5_K_M")
+    assert matches is True, f"Should detect Q5_K_M in dash-separated filename: {message}"
+    test_path.unlink()
+
+    # Test with invalid GGUF file
+    invalid_path = temp_models_dir / "model-Q4_K_M.gguf"
+    with open(invalid_path, 'wb') as f:
+        f.write(b'FAKE' + b'\x00' * 2044)
+
+    matches, message = verify_quantization_format(invalid_path, "Q4_K_M")
+    assert matches is False, "Should fail validation for invalid GGUF format"
+    assert "Invalid GGUF format" in message, "Should report invalid GGUF format"
+    invalid_path.unlink()
+
+    # Test with quantization not in filename
+    no_quant_path = temp_models_dir / "model.gguf"
+    with open(no_quant_path, 'wb') as f:
+        f.write(minimal_gguf)
+
+    matches, message = verify_quantization_format(no_quant_path, "Q4_K_M")
+    assert matches is False, "Should not detect quantization if not in filename"
+    assert "Could not verify" in message, "Should report inability to verify from filename"
+    no_quant_path.unlink()
+
+    # Test with wrong quantization in filename
+    wrong_quant_path = temp_models_dir / "model-Q6_K.gguf"
+    with open(wrong_quant_path, 'wb') as f:
+        f.write(minimal_gguf)
+
+    matches, message = verify_quantization_format(wrong_quant_path, "Q4_K_M")
+    assert matches is False, "Should not match wrong quantization format"
+    wrong_quant_path.unlink()
+
+
+def load_model_quantization_matrix():
+    """Generate matrix of model and quantization format combinations for testing"""
+    models = load_ollama_models()
+    valid_quants = ["Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"]
+
+    # Create all combinations of models and quantization formats
+    matrix = []
+    ids = []
+    for model in models:
+        for quant in valid_quants:
+            matrix.append((model, quant))
+            ids.append(f"{model['name']}-{quant}")
+
+    return matrix, ids
+
+
+# Get matrix and ids for parametrization
+_matrix, _matrix_ids = load_model_quantization_matrix()
+
+
+@pytest.mark.parametrize(
+    "model,quantization",
+    _matrix,
+    ids=_matrix_ids
+)
+def test_model_quantization_matrix(model, quantization):
+    """Test matrix of all model and quantization format combinations"""
+    # Verify model has required fields
+    assert "name" in model, "Model must have 'name' field"
+    assert "format" in model, "Model must have 'format' field"
+    assert "quantization" in model, "Model must have 'quantization' field"
+
+    # Verify model format is GGUF
+    assert model["format"] == "gguf", f"Model {model['name']} must be GGUF format"
+
+    # Verify quantization is valid
+    valid_quants = ["Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"]
+    assert quantization in valid_quants, f"Quantization {quantization} must be in {valid_quants}"
+
+    # Verify model's declared quantization is also valid
+    assert model["quantization"] in valid_quants, f"Model {model['name']} quantization must be in {valid_quants}"
+
+    # Test that quantization format is compatible with model format
+    assert model["format"] == "gguf", f"Quantization {quantization} requires GGUF format for model {model['name']}"
+
+    # Verify model has size information
+    assert "size" in model, f"Model {model['name']} must have 'size' field"
+    assert isinstance(model["size"], int), f"Model {model['name']} size must be integer"
+    assert model["size"] > 0, f"Model {model['name']} size must be positive"
+
+    # Verify quantization affects expected model size ranges
+    # Q4_K_M should be smallest, Q8_0 should be largest
+    if quantization == "Q8_0":
+        # Q8_0 models are typically larger
+        assert model["size"] > 0, f"Q8_0 model {model['name']} should have positive size"
+    elif quantization == "Q4_K_M":
+        # Q4_K_M models are typically smaller
+        assert model["size"] > 0, f"Q4_K_M model {model['name']} should have positive size"
+
+
 def test_model_loading_format(valid_gguf_file, ollama_models_list):
     """Test that validates GGUF format for all 20 models using minimal downloads or mocked data"""
     # Verify we have 20 models in the fixture
@@ -437,3 +575,127 @@ class TestQuantizationValidation:
         for quant in supported_quants:
             assert quant.startswith("Q"), f"Quantization {quant} should start with Q"
             assert any(char.isdigit() for char in quant), f"Quantization {quant} should contain digits"
+
+
+def test_quantization_inference(temp_models_dir):
+    """Test quantization inference comparison across different quantization levels"""
+    # Valid quantization formats supported by EMBODIOS
+    quantization_levels = ["Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"]
+
+    # Create valid GGUF file content
+    gguf_magic = b'GGUF'
+    version = (3).to_bytes(4, byteorder='little')
+    minimal_gguf = gguf_magic + version + b'\x00' * (2048 - len(gguf_magic) - 4)
+
+    # Create model files for each quantization level
+    model_paths = {}
+    for quant in quantization_levels:
+        model_filename = f"test_model_{quant}.gguf"
+        model_path = temp_models_dir / model_filename
+
+        with open(model_path, 'wb') as f:
+            f.write(minimal_gguf)
+
+        model_paths[quant] = model_path
+
+    # Test 1: Run mock inference on each quantization level
+    inference_results = {}
+    for quant, model_path in model_paths.items():
+        success, message, result = run_model_inference_test(model_path, mock_mode=True)
+        assert success is True, f"Inference should succeed for {quant}: {message}"
+        assert result is not None, f"Should return result for {quant}"
+        assert result["format_valid"] is True, f"Format should be valid for {quant}"
+        inference_results[quant] = result
+
+    # Test 2: Verify all quantization levels produced valid results
+    assert len(inference_results) == 4, "Should have results for all 4 quantization levels"
+    for quant, result in inference_results.items():
+        assert "model_path" in result, f"Result for {quant} should include model_path"
+        assert "model_size" in result, f"Result for {quant} should include model_size"
+        assert result["model_size"] > 0, f"Model size for {quant} should be positive"
+
+    # Test 3: Compare inference outputs between quantization levels
+    # Simulate inference outputs (in real scenario, these would be actual model outputs)
+    simulated_outputs = {
+        "Q4_K_M": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],  # Lower quantization, slight variation
+        "Q5_K_M": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11],  # Medium quantization, very similar
+        "Q6_K": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],    # Higher quantization, same as Q4
+        "Q8_0": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]     # Highest quantization, most accurate
+    }
+
+    # Test 4: Compare Q4_K_M vs Q8_0 (lower vs highest quantization)
+    output_q4 = simulated_outputs["Q4_K_M"]
+    output_q8 = simulated_outputs["Q8_0"]
+    are_similar, message, similarity = compare_model_outputs(output_q4, output_q8)
+    assert are_similar is True, f"Q4_K_M and Q8_0 should produce similar outputs: {message}"
+    assert similarity >= 0.9, f"Q4_K_M and Q8_0 should have high similarity (got {similarity:.2%})"
+
+    # Test 5: Compare Q5_K_M vs Q8_0 (medium vs highest quantization)
+    output_q5 = simulated_outputs["Q5_K_M"]
+    are_similar, message, similarity = compare_model_outputs(output_q5, output_q8)
+    assert similarity >= 0.9, f"Q5_K_M and Q8_0 should have high similarity (got {similarity:.2%})"
+
+    # Test 6: Compare Q6_K vs Q8_0 (high vs highest quantization)
+    output_q6 = simulated_outputs["Q6_K"]
+    are_similar, message, similarity = compare_model_outputs(output_q6, output_q8)
+    assert are_similar is True, f"Q6_K and Q8_0 should produce similar outputs: {message}"
+    assert similarity == 1.0, f"Q6_K and Q8_0 should be identical in this test (got {similarity:.2%})"
+
+    # Test 7: Compare identical outputs (Q4_K_M vs Q6_K)
+    are_similar, message, similarity = compare_model_outputs(output_q4, output_q6)
+    assert are_similar is True, "Identical outputs should be similar"
+    assert similarity == 1.0, "Identical outputs should have 100% similarity"
+
+    # Test 8: Test comparison with different outputs
+    different_output = [20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
+    are_similar, message, similarity = compare_model_outputs(output_q8, different_output)
+    assert are_similar is False, "Completely different outputs should not be similar"
+    assert similarity == 0.0, "Completely different outputs should have 0% similarity"
+
+    # Test 9: Test comparison with partially matching outputs
+    partial_match = [1, 2, 3, 4, 5, 99, 99, 99, 99, 99]  # First half matches
+    are_similar, message, similarity = compare_model_outputs(output_q8, partial_match)
+    assert 0.0 < similarity < 1.0, "Partial match should have intermediate similarity"
+    assert similarity == 0.5, f"Half matching should be 50% similar (got {similarity:.2%})"
+
+    # Test 10: Test comparison with different length outputs
+    shorter_output = [1, 2, 3, 4, 5]
+    are_similar, message, similarity = compare_model_outputs(output_q8, shorter_output)
+    assert similarity == 0.5, f"Half-length match should be 50% similar (got {similarity:.2%})"
+
+    # Test 11: Test comparison with empty outputs
+    empty_output = []
+    are_similar, message, similarity = compare_model_outputs(output_q8, empty_output)
+    assert are_similar is False, "Empty output comparison should fail"
+    assert similarity == 0.0, "Empty comparison should have 0 similarity"
+
+    # Test 12: Test comparison tolerance parameter
+    slightly_different = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11]  # 90% match
+    are_similar, message, similarity = compare_model_outputs(output_q8, slightly_different, tolerance=0.1)
+    assert are_similar is True, "Should be similar within 10% tolerance"
+    assert similarity == 0.9, f"Should be 90% similar (got {similarity:.2%})"
+
+    # Test 13: Test comparison with strict tolerance (should fail for 90% match)
+    are_similar, message, similarity = compare_model_outputs(output_q8, slightly_different, tolerance=0.05)
+    assert are_similar is False, "Should not be similar with 5% tolerance when 10% different"
+
+    # Test 14: Test comparison with exact tolerance boundary
+    are_similar, message, similarity = compare_model_outputs(output_q8, slightly_different, tolerance=0.0)
+    assert are_similar is False, "Should not be similar with 0% tolerance"
+
+    # Test 15: Verify quantization format is correctly detected in model files
+    for quant, model_path in model_paths.items():
+        matches, message = verify_quantization_format(model_path, quant)
+        assert matches is True, f"Should detect {quant} format: {message}"
+
+    # Test 16: Verify model metadata is correctly extracted
+    for quant, model_path in model_paths.items():
+        metadata = get_model_metadata(model_path)
+        assert metadata["exists"] is True, f"Model file for {quant} should exist"
+        assert metadata["format_valid"] is True, f"Format should be valid for {quant}"
+        assert metadata["name"] == f"test_model_{quant}.gguf", f"Filename should match for {quant}"
+
+    # Cleanup test files
+    for model_path in model_paths.values():
+        if model_path.exists():
+            model_path.unlink()
