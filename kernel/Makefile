@@ -139,6 +139,7 @@ KERNEL_C_SOURCES = \
     core/lock_test.c \
     timer.c \
     core/hal_cpu.c \
+    core/hal_timer.c \
     drivers/pci/pci.c \
     drivers/block/virtio_blk.c \
     drivers/block/virtio_mmio.c \
@@ -237,6 +238,9 @@ ifeq ($(ARCH),x86_64)
         $(ARCH_DIR)/paging.c \
         $(ARCH_DIR)/keyboard.c \
         $(ARCH_DIR)/serial.c \
+        $(ARCH_DIR)/tsc.c \
+        $(ARCH_DIR)/hpet.c \
+        $(ARCH_DIR)/hal_timer.c \
         $(ARCH_DIR)/smp.c
 endif
 
@@ -249,7 +253,8 @@ ifeq ($(ARCH),aarch64)
     endif
     ARCH_C_SOURCES = \
         $(ARCH_DIR)/cpu.c \
-        $(ARCH_DIR)/early_init.c
+        $(ARCH_DIR)/early_init.c \
+        $(ARCH_DIR)/hal_timer.c
 endif
 
 # Object files

@@ -8,6 +8,7 @@
 #include <embodios/mm.h>
 #include <embodios/kernel.h>
 #include <embodios/streaming_inference.h>
+#include <embodios/hal_timer.h>
 #include <embodios/quantized_ops.h>
 
 /* SIMD intrinsics - prevent mm_malloc.h inclusion which needs wchar_t */
@@ -28,6 +29,8 @@
 
 /* TSC frequency (calibrated at init) */
 static uint64_t tsc_freq_hz = 0;
+
+/* Timer initialization state */
 static bool benchmark_initialized = false;
 
 /* Benchmark results storage */
@@ -36,32 +39,8 @@ static memory_benchmark_t last_memory_result;
 static simd_benchmark_t last_simd_result;
 
 /* ============================================================================
- * TSC Calibration
+ * Timer Initialization
  * ============================================================================ */
-
-/* Simple delay using PIT (for calibration) */
-static void delay_ms(uint32_t ms)
-{
-    /* Simple busy loop - approximately 1ms per iteration at 1GHz */
-    for (uint32_t i = 0; i < ms; i++) {
-        for (volatile uint32_t j = 0; j < 100000; j++) {
-            __asm__ volatile("nop");
-        }
-    }
-}
-
-static uint64_t calibrate_tsc(void)
-{
-    uint64_t start, end;
-
-    /* Measure TSC over ~100ms */
-    start = rdtsc();
-    delay_ms(100);
-    end = rdtsc();
-
-    /* Calculate frequency (cycles per 100ms * 10 = cycles per second) */
-    return (end - start) * 10;
-}
 
 /* ============================================================================
  * Timing Utilities
@@ -69,19 +48,17 @@ static uint64_t calibrate_tsc(void)
 
 uint64_t benchmark_get_tsc_freq(void)
 {
-    return tsc_freq_hz;
+    return hal_timer_get_frequency();
 }
 
 uint64_t benchmark_cycles_to_us(uint64_t cycles)
 {
-    if (tsc_freq_hz == 0) return 0;
-    return (cycles * 1000000ULL) / tsc_freq_hz;
+    return hal_timer_ticks_to_us(cycles);
 }
 
 uint64_t benchmark_cycles_to_ms(uint64_t cycles)
 {
-    if (tsc_freq_hz == 0) return 0;
-    return (cycles * 1000ULL) / tsc_freq_hz;
+    return hal_timer_ticks_to_us(cycles) / 1000;
 }
 
 /* ============================================================================
@@ -94,17 +71,13 @@ int benchmark_init(void)
         return 0;
     }
 
-    console_printf("benchmark: Calibrating TSC...\n");
+    console_printf("benchmark: Initializing HAL timer...\n");
 
-    /* Calibrate TSC frequency */
-    tsc_freq_hz = calibrate_tsc();
+    /* Initialize HAL timer */
+    hal_timer_init();
 
-    /* Assume at least 1 GHz if calibration seems off */
-    if (tsc_freq_hz < 100000000) {
-        tsc_freq_hz = 1000000000;  /* 1 GHz default */
-    }
-
-    console_printf("benchmark: TSC frequency: %lu MHz\n", tsc_freq_hz / 1000000);
+    uint64_t freq = hal_timer_get_frequency();
+    console_printf("benchmark: Timer frequency: %lu MHz\n", freq / 1000000);
 
     benchmark_initialized = true;
     return 0;
@@ -119,7 +92,7 @@ int benchmark_inference(inference_benchmark_t *result, int num_tokens)
     console_printf("benchmark: Running inference test (%d tokens)...\n", num_tokens);
 
     /* Simulate token generation for benchmarking */
-    uint64_t start_cycles = rdtsc();
+    uint64_t start_cycles = hal_timer_get_ticks();
 
     /* Simulate inference work - minimal for fast emulator testing */
     console_printf("benchmark: Starting token loop...\n");
@@ -136,7 +109,7 @@ int benchmark_inference(inference_benchmark_t *result, int num_tokens)
     }
     console_printf("\nbenchmark: Token loop done\n");
 
-    uint64_t end_cycles = rdtsc();
+    uint64_t end_cycles = hal_timer_get_ticks();
     console_printf("benchmark: end_cycles=%lu\n", (unsigned long)end_cycles);
     uint64_t total_cycles = end_cycles - start_cycles;
     console_printf("benchmark: total_cycles=%lu\n", (unsigned long)total_cycles);
@@ -198,11 +171,11 @@ int benchmark_memory(memory_benchmark_t *result)
     console_printf("benchmark: Running memory bandwidth test...\n");
 
     /* Write benchmark */
-    uint64_t start = rdtsc();
+    uint64_t start = hal_timer_get_ticks();
     for (size_t i = 0; i < count; i++) {
         buffer1[i] = i;
     }
-    uint64_t end = rdtsc();
+    uint64_t end = hal_timer_get_ticks();
     uint64_t write_us = benchmark_cycles_to_us(end - start);
     if (write_us > 0) {
         result->write_bandwidth = (test_size * 1000000ULL) / (write_us * 1024 * 1024);
@@ -210,11 +183,11 @@ int benchmark_memory(memory_benchmark_t *result)
 
     /* Read benchmark */
     volatile uint64_t sum = 0;
-    start = rdtsc();
+    start = hal_timer_get_ticks();
     for (size_t i = 0; i < count; i++) {
         sum += buffer1[i];
     }
-    end = rdtsc();
+    end = hal_timer_get_ticks();
     uint64_t read_us = benchmark_cycles_to_us(end - start);
     if (read_us > 0) {
         result->read_bandwidth = (test_size * 1000000ULL) / (read_us * 1024 * 1024);
@@ -222,19 +195,19 @@ int benchmark_memory(memory_benchmark_t *result)
     (void)sum;
 
     /* Copy benchmark */
-    start = rdtsc();
+    start = hal_timer_get_ticks();
     memcpy(buffer2, buffer1, test_size);
-    end = rdtsc();
+    end = hal_timer_get_ticks();
     uint64_t copy_us = benchmark_cycles_to_us(end - start);
     if (copy_us > 0) {
         result->copy_bandwidth = (test_size * 1000000ULL) / (copy_us * 1024 * 1024);
     }
 
     /* Simple latency test */
-    start = rdtsc();
+    start = hal_timer_get_ticks();
     volatile uint64_t val = buffer1[0];
-    end = rdtsc();
-    result->latency_ns = ((end - start) * 1000000000ULL) / tsc_freq_hz;
+    end = hal_timer_get_ticks();
+    result->latency_ns = hal_timer_ticks_to_us(end - start) * 1000;
     (void)val;
 
     console_printf("benchmark: Read: %lu MB/s, Write: %lu MB/s, Copy: %lu MB/s\n",
@@ -277,13 +250,13 @@ int benchmark_simd(simd_benchmark_t *result)
     }
 
     /* Scalar add */
-    uint64_t start = rdtsc();
+    uint64_t start = hal_timer_get_ticks();
     for (int iter = 0; iter < iters; iter++) {
         for (int i = 0; i < n; i++) {
             c[i] = a[i] + b[i];
         }
     }
-    uint64_t end = rdtsc();
+    uint64_t end = hal_timer_get_ticks();
     uint64_t scalar_us = benchmark_cycles_to_us(end - start);
     if (scalar_us > 0) {
         /* n adds * iters = total ops, convert to GFLOPS */
@@ -311,7 +284,7 @@ int benchmark_simd(simd_benchmark_t *result)
     }
 #elif defined(__SSE2__)
     /* SSE add */
-    start = rdtsc();
+    start = hal_timer_get_ticks();
     for (int iter = 0; iter < iters; iter++) {
         for (int i = 0; i < n; i += 4) {
             __m128 va = _mm_loadu_ps(a + i);
@@ -320,7 +293,7 @@ int benchmark_simd(simd_benchmark_t *result)
             _mm_storeu_ps(c + i, vc);
         }
     }
-    end = rdtsc();
+    end = hal_timer_get_ticks();
     uint64_t sse_us = benchmark_cycles_to_us(end - start);
     if (sse_us > 0) {
         result->sse_gflops = ((uint64_t)n * iters * 1000000ULL) / (sse_us * 1000000000ULL);
@@ -335,7 +308,7 @@ int benchmark_simd(simd_benchmark_t *result)
 
 #ifdef __AVX2__
     /* AVX add */
-    start = rdtsc();
+    start = hal_timer_get_ticks();
     for (int iter = 0; iter < iters; iter++) {
         for (int i = 0; i < n; i += 8) {
             __m256 va = _mm256_loadu_ps(a + i);
@@ -344,7 +317,7 @@ int benchmark_simd(simd_benchmark_t *result)
             _mm256_storeu_ps(c + i, vc);
         }
     }
-    end = rdtsc();
+    end = hal_timer_get_ticks();
     uint64_t avx_us = benchmark_cycles_to_us(end - start);
     if (avx_us > 0) {
         result->avx_gflops = ((uint64_t)n * iters * 1000000ULL) / (avx_us * 1000000000ULL);
@@ -411,7 +384,7 @@ double benchmark_matmul(benchmark_result_t *result, int size)
 
     console_printf("benchmark: Running %dx%d matrix multiply...\n", size, size);
 
-    uint64_t start = rdtsc();
+    uint64_t start = hal_timer_get_ticks();
 
     /* Simple matrix multiply - can be optimized with SIMD */
     for (int i = 0; i < size; i++) {
@@ -424,7 +397,7 @@ double benchmark_matmul(benchmark_result_t *result, int size)
         }
     }
 
-    uint64_t end = rdtsc();
+    uint64_t end = hal_timer_get_ticks();
 
     result->cycles = end - start;
     result->iterations = 1;
@@ -888,13 +861,13 @@ int benchmark_quick_check(void)
 
     console_printf("benchmark: Quick performance check...\n");
 
-    /* Quick TSC test */
-    uint64_t start = rdtsc();
+    /* Quick timer test */
+    uint64_t start = hal_timer_get_ticks();
     for (volatile int i = 0; i < 1000000; i++);
-    uint64_t end = rdtsc();
+    uint64_t end = hal_timer_get_ticks();
 
     if (end <= start) {
-        console_printf("benchmark: FAIL - TSC not working\n");
+        console_printf("benchmark: FAIL - Timer not working\n");
         return -1;
     }
 
@@ -931,12 +904,12 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
     uint64_t init_time_us = 0;
     if (!streaming_inference_is_ready()) {
         console_printf("Initializing streaming inference engine...\n");
-        uint64_t init_start = rdtsc();
+        uint64_t init_start = hal_timer_get_ticks();
         if (streaming_inference_init() != 0) {
             console_printf("ERROR: Failed to initialize streaming inference\n");
             return -1;
         }
-        uint64_t init_end = rdtsc();
+        uint64_t init_end = hal_timer_get_ticks();
         init_time_us = benchmark_cycles_to_us(init_end - init_start);
         console_printf("Init time: %lu ms\n", init_time_us / 1000);
     }
@@ -951,7 +924,7 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
     }
 
     /* Tokenize prompt */
-    uint64_t tokenize_start = rdtsc();
+    uint64_t tokenize_start = hal_timer_get_ticks();
     int prompt_tokens[256];
     int prompt_len = 0;
 
@@ -966,7 +939,7 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
         prompt_len = 1;
         console_printf("WARNING: BPE not initialized, using BOS token %u only\n", bos_id);
     }
-    uint64_t tokenize_end = rdtsc();
+    uint64_t tokenize_end = hal_timer_get_ticks();
     uint64_t tokenize_us = benchmark_cycles_to_us(tokenize_end - tokenize_start);
 
     if (prompt_len <= 0) {
@@ -992,11 +965,11 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
     /* Run inference with detailed timing */
     console_printf("\nStarting inference...\n");
 
-    uint64_t start_cycles = rdtsc();
+    uint64_t start_cycles = hal_timer_get_ticks();
     int generated = streaming_inference_generate_timed(prompt_tokens, prompt_len,
                                                         output_tokens, max_tokens,
                                                         timing);
-    uint64_t end_cycles = rdtsc();
+    uint64_t end_cycles = hal_timer_get_ticks();
     uint64_t total_cycles = end_cycles - start_cycles;
 
     /* Store tokenize time in timing struct */

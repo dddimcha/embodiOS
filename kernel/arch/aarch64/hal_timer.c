@@ -5,6 +5,7 @@
 
 #include "embodios/types.h"
 #include "embodios/hal_timer.h"
+#include <embodios/console.h>
 
 /* Timer frequency (100 Hz = 10ms tick) */
 #define TIMER_FREQUENCY 100
@@ -65,6 +66,20 @@ static void aarch64_timer_init(void)
 {
     /* Read hardware counter frequency */
     timer_state.counter_freq = arm_timer_get_counter_freq();
+
+    /* Validate and log counter frequency */
+    if (timer_state.counter_freq == 0) {
+        console_printf("aarch64_timer: WARNING - counter frequency is 0\n");
+    } else if (timer_state.counter_freq < 1000000ULL) {
+        console_printf("aarch64_timer: WARNING - counter frequency %llu Hz is unusually low\n",
+                       timer_state.counter_freq);
+    } else if (timer_state.counter_freq > 1000000000ULL) {
+        console_printf("aarch64_timer: WARNING - counter frequency %llu Hz is unusually high\n",
+                       timer_state.counter_freq);
+    } else {
+        console_printf("aarch64_timer: counter frequency %llu Hz\n",
+                       timer_state.counter_freq);
+    }
 
     /* Set default tick frequency */
     timer_state.frequency = TIMER_FREQUENCY;
@@ -133,7 +148,13 @@ static uint64_t aarch64_timer_get_frequency(void)
 /* HAL timer get microseconds */
 static uint64_t aarch64_timer_get_microseconds(void)
 {
-    return (timer_state.ticks * 1000000ULL) / timer_state.frequency;
+    if (timer_state.counter_freq == 0) {
+        return 0;
+    }
+
+    /* Read hardware counter directly for high-resolution timing */
+    uint64_t counter = arm_timer_get_counter();
+    return (counter * 1000000ULL) / timer_state.counter_freq;
 }
 
 /* HAL timer get milliseconds */

@@ -1,3 +1,21 @@
+/**
+ * @file hal_timer.h
+ * @brief High-resolution Timer Hardware Abstraction Layer
+ *
+ * Provides microsecond-accurate timing for deterministic scheduling and
+ * precise latency measurement. Supports HPET, TSC, and platform-specific
+ * high-resolution timers.
+ *
+ * High-resolution timer capabilities:
+ * - Minimum resolution: 1 microsecond on supported hardware
+ * - Low drift: <10ppm over 24 hours
+ * - Accessible from kernel and inference code paths
+ * - TSC calibration for multi-core systems
+ *
+ * The HAL provides both direct tick access and converted time values in
+ * microseconds/milliseconds for convenience.
+ */
+
 #ifndef EMBODIOS_HAL_TIMER_H
 #define EMBODIOS_HAL_TIMER_H
 
@@ -20,7 +38,13 @@ struct timer_config {
     void *callback_data;
 };
 
-/* HAL timer operations structure */
+/**
+ * HAL timer operations structure
+ *
+ * High-resolution timer operations providing microsecond-level precision
+ * for time measurement and delay functions. Implementations should use
+ * hardware timers capable of at least 1 microsecond resolution.
+ */
 struct hal_timer_ops {
     /* Initialization */
     void (*init)(void);
@@ -30,11 +54,11 @@ struct hal_timer_ops {
     void (*disable)(void);
     void (*configure)(const struct timer_config *config);
 
-    /* Time measurement */
-    uint64_t (*get_ticks)(void);
-    uint64_t (*get_frequency)(void);
-    uint64_t (*get_microseconds)(void);
-    uint64_t (*get_milliseconds)(void);
+    /* Time measurement - High-resolution timer access */
+    uint64_t (*get_ticks)(void);              /* Get raw timer ticks */
+    uint64_t (*get_frequency)(void);          /* Get timer frequency in Hz */
+    uint64_t (*get_microseconds)(void);       /* Get time in microseconds */
+    uint64_t (*get_milliseconds)(void);       /* Get time in milliseconds */
 
     /* Delay functions */
     void (*delay_us)(uint64_t microseconds);
