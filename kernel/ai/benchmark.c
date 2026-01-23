@@ -904,13 +904,13 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
     uint64_t init_time_us = 0;
     if (!streaming_inference_is_ready()) {
         console_printf("Initializing streaming inference engine...\n");
-        uint64_t init_start = hal_timer_get_ticks();
+        uint64_t init_start = hal_timer_get_microseconds();
         if (streaming_inference_init(false) != 0) {
             console_printf("ERROR: Failed to initialize streaming inference\n");
             return -1;
         }
-        uint64_t init_end = hal_timer_get_ticks();
-        init_time_us = benchmark_cycles_to_us(init_end - init_start);
+        uint64_t init_end = hal_timer_get_microseconds();
+        init_time_us = init_end - init_start;
         console_printf("Init time: %lu ms\n", init_time_us / 1000);
     }
 
@@ -924,7 +924,7 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
     }
 
     /* Tokenize prompt */
-    uint64_t tokenize_start = hal_timer_get_ticks();
+    uint64_t tokenize_start = hal_timer_get_microseconds();
     int prompt_tokens[256];
     int prompt_len = 0;
 
@@ -939,8 +939,8 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
         prompt_len = 1;
         console_printf("WARNING: BPE not initialized, using BOS token %u only\n", bos_id);
     }
-    uint64_t tokenize_end = hal_timer_get_ticks();
-    uint64_t tokenize_us = benchmark_cycles_to_us(tokenize_end - tokenize_start);
+    uint64_t tokenize_end = hal_timer_get_microseconds();
+    uint64_t tokenize_us = tokenize_end - tokenize_start;
 
     if (prompt_len <= 0) {
         console_printf("ERROR: Failed to tokenize prompt\n");
@@ -965,19 +965,19 @@ int benchmark_gguf_inference(inference_benchmark_t *result,
     /* Run inference with detailed timing */
     console_printf("\nStarting inference...\n");
 
-    uint64_t start_cycles = hal_timer_get_ticks();
+    uint64_t start_us = hal_timer_get_microseconds();
     int generated = streaming_inference_generate_timed(prompt_tokens, prompt_len,
                                                         output_tokens, max_tokens,
                                                         timing);
-    uint64_t end_cycles = hal_timer_get_ticks();
-    uint64_t total_cycles = end_cycles - start_cycles;
+    uint64_t end_us = hal_timer_get_microseconds();
+    uint64_t total_us = end_us - start_us;
 
     /* Store tokenize time in timing struct */
     timing->tokenize_us = tokenize_us;
 
     /* Calculate overall timing */
-    result->total_cycles = total_cycles;
-    result->total_time_us = benchmark_cycles_to_us(total_cycles);
+    result->total_cycles = total_us;  /* Using microseconds as cycles for compatibility */
+    result->total_time_us = total_us;
     result->total_tokens = (generated > 0) ? generated : 0;
 
     if (result->total_time_us > 0 && result->total_tokens > 0) {
