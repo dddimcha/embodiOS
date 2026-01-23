@@ -8,7 +8,15 @@ import sys
 from pathlib import Path
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    DownloadColumn,
+    TransferSpeedColumn,
+    TimeRemainingColumn
+)
 
 from embodi import __version__
 from embodi.builder import EmbodiBuilder
@@ -38,9 +46,14 @@ def cli(ctx, debug):
 @click.option('--quantize', '-q', type=int, help='Quantization bits (4, 8)')
 @click.pass_context
 def pull(ctx, model, output, format, quantize):
-    """Pull a model from HuggingFace or other sources
-    
+    """Pull a model from HuggingFace, Ollama registry, or other sources
+
+    Supports Ollama-style model names (e.g., 'tinyllama', 'mistral'),
+    HuggingFace repository IDs, and direct URLs.
+
     Examples:
+        embodi pull tinyllama
+        embodi pull mistral --quantize 4
         embodi pull TinyLlama/TinyLlama-1.1B-Chat-v1.0
         embodi pull microsoft/phi-2 --quantize 4
         embodi pull https://huggingface.co/.../model.gguf
@@ -55,35 +68,84 @@ def pull(ctx, model, output, format, quantize):
     # Direct URL download
     if model.startswith('http://') or model.startswith('https://'):
         import urllib.request
-        filename = model.split('/')[-1]
+        import urllib.error
+
+        # Convert HuggingFace /blob/ URLs to /resolve/ for direct download
+        download_url = model
+        if 'huggingface.co' in model and '/blob/' in model:
+            download_url = model.replace('/blob/', '/resolve/')
+            console.print("[dim]Converting HuggingFace URL to direct download link...[/dim]")
+
+        filename = download_url.split('/')[-1].split('?')[0]  # Handle query params
         output_path = output_dir / filename
-        
-        with Progress(console=console) as progress:
-            task = progress.add_task(f"Downloading {filename}...", total=None)
-            urllib.request.urlretrieve(model, output_path)
-            progress.update(task, completed=True)
-        
-        console.print(f"[green]✓ Downloaded to {output_path}[/green]")
-        return
+
+        try:
+            # Get file size
+            req = urllib.request.Request(download_url, method='HEAD')
+            with urllib.request.urlopen(req) as response:
+                total_size = int(response.headers.get('Content-Length', 0))
+
+            # Download with progress
+            with Progress(
+                TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
+                BarColumn(bar_width=None),
+                "[progress.percentage]{task.percentage:>3.1f}%",
+                "•",
+                DownloadColumn(),
+                "•",
+                TransferSpeedColumn(),
+                "•",
+                TimeRemainingColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task("download", filename=filename, total=total_size)
+
+                def reporthook(block_num, block_size, total_size):
+                    downloaded = block_num * block_size
+                    progress.update(task, completed=min(downloaded, total_size))
+
+                urllib.request.urlretrieve(download_url, output_path, reporthook)
+
+            console.print(f"[green]✓ Downloaded to {output_path}[/green]")
+            return
+        except Exception as e:
+            console.print(f"[red]✗ Failed to download: {e}[/red]")
+            sys.exit(1)
     
     # HuggingFace model
     downloader = HuggingFaceDownloader()
     model_name = model.split('/')[-1].lower()
     output_path = output_dir / f"{model_name}.{format}"
-    
+
     with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
+        TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
+        BarColumn(bar_width=None),
+        "[progress.percentage]{task.percentage:>3.1f}%",
+        "•",
+        DownloadColumn(),
+        "•",
+        TransferSpeedColumn(),
+        "•",
+        TimeRemainingColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Downloading from HuggingFace...", total=None)
-        
+        task = progress.add_task("download", filename=model_name, total=100)
+
+        def progress_callback(bytes_downloaded, total_bytes, speed, eta):
+            """Update progress bar with download metrics"""
+            if total_bytes > 0:
+                progress.update(task, completed=bytes_downloaded, total=total_bytes)
+            else:
+                # If total is unknown, show indeterminate progress
+                progress.update(task, completed=bytes_downloaded)
+
         success = downloader.download_and_convert(
-            model, 
+            model,
             output_path,
-            quantization=quantize
+            quantization=quantize,
+            progress_callback=progress_callback
         )
-        
+
         if success:
             console.print(f"[green]✓ Model saved to {output_path}[/green]")
         else:

@@ -10,6 +10,7 @@
 #include "embodios/mm.h"
 #include "embodios/model.h"
 #include "embodios/tvm.h"
+#include "embodios/profiler.h"
 /* #include "embodios/timer.h" */ /* Timer header not yet implemented */
 
 /* Timer function stubs (until timer.h is implemented) */
@@ -52,11 +53,14 @@ static struct {
 /* Initialize inference engine with embedded model */
 int inference_init(struct embodios_model* model)
 {
+    PROFILER_START("inference_init");
+
     if (!model) {
         console_printf("Inference: No model provided\n");
+        PROFILER_STOP();
         return -1;
     }
-    
+
     console_printf("Inference: Initializing with model '%s'\n", model->name);
     
     /* Store model reference */
@@ -69,32 +73,38 @@ int inference_init(struct embodios_model* model)
     /* Initialize transformer */
     if (transformer_init(model) < 0) {
         console_printf("Inference: Failed to initialize transformer\n");
+        PROFILER_STOP();
         return -1;
     }
     console_printf("Inference: Transformer initialized\n");
-    
+
     /* Allocate token and logits buffers - REDUCED for embedded */
     inference_state.token_buffer = kmalloc(512 * sizeof(int));
     inference_state.logits_buffer = kmalloc(1000 * sizeof(float)); /* Match vocab size */
-    
+
     if (!inference_state.token_buffer || !inference_state.logits_buffer) {
         console_printf("Inference: Failed to allocate buffers\n");
+        PROFILER_STOP();
         return -1;
     }
-    
+
     inference_state.initialized = true;
     console_printf("Inference: Engine initialized successfully\n");
+    PROFILER_STOP();
     return 0;
 }
 
 /* Run inference on input text */
 int inference_run(const char* input_text, char* output_buffer, size_t output_size)
 {
+    PROFILER_START("inference_run");
+
     if (!inference_state.initialized) {
         console_printf("Inference: Engine not initialized\n");
+        PROFILER_STOP();
         return -1;
     }
-    
+
     console_printf("Inference: Processing input: '%s'\n", input_text);
     
     /* Start timing */
@@ -104,47 +114,49 @@ int inference_run(const char* input_text, char* output_buffer, size_t output_siz
     int n_tokens = tokenizer_encode(input_text, inference_state.token_buffer, 512);
     if (n_tokens <= 0) {
         console_printf("Inference: Failed to tokenize input\n");
+        PROFILER_STOP();
         return -1;
     }
-    
+
     /* Reset transformer cache for new generation */
     transformer_reset_cache();
-    
+
     /* Run forward pass */
     transformer_forward(inference_state.token_buffer, n_tokens, inference_state.logits_buffer);
-    
+
     /* Generate response tokens */
     int generated[256];
     int n_generated = 0;
     int max_tokens = 50;
-    
+
     for (int i = 0; i < max_tokens; i++) {
         /* Sample next token */
         int next_token = transformer_sample(inference_state.logits_buffer, 0.7f);
         generated[n_generated++] = next_token;
-        
+
         /* Check for EOS token */
         if (next_token == 258) {  /* EOS token */
             break;
         }
-        
+
         /* Run forward pass with new token */
         transformer_forward(&next_token, 1, inference_state.logits_buffer);
     }
-    
+
     /* Calculate inference time */
     uint64_t end_time = timer_get_ticks();
     uint64_t elapsed_ms = (end_time - start_time) * 1000 / timer_get_frequency();
-    
+
     /* Update statistics */
     inference_state.inference_count++;
     inference_state.total_time_ms += elapsed_ms;
-    
+
     /* Decode generated tokens */
     tokenizer_decode(generated, n_generated, output_buffer, output_size);
-    
+
     console_printf("Generated %d tokens in %lu ms\n", n_generated, elapsed_ms);
-    
+
+    PROFILER_STOP();
     return 0;
 }
 
@@ -159,6 +171,8 @@ typedef struct {
 
 /* Worker function for parallel batch processing */
 static void batch_worker(void* arg, int thread_id, int start, int end) {
+    PROFILER_START("batch_worker");
+
     batch_args_t* batch = (batch_args_t*)arg;
     (void)thread_id;  /* Unused - for future thread-local optimizations */
 
@@ -177,6 +191,7 @@ static void batch_worker(void* arg, int thread_id, int start, int end) {
         if (token_buffer) kfree(token_buffer);
         if (logits_buffer) kfree(logits_buffer);
         if (generated) kfree(generated);
+        PROFILER_STOP();
         return;
     }
 
@@ -230,18 +245,24 @@ static void batch_worker(void* arg, int thread_id, int start, int end) {
     kfree(token_buffer);
     kfree(logits_buffer);
     kfree(generated);
+
+    PROFILER_STOP();
 }
 
 /* Run batch inference on multiple inputs */
 int inference_run_batch(const char** inputs, int n_inputs, char** outputs, size_t* output_sizes)
 {
+    PROFILER_START("inference_run_batch");
+
     if (!inference_state.initialized) {
         console_printf("Inference: Engine not initialized\n");
+        PROFILER_STOP();
         return -1;
     }
 
     if (!inputs || !outputs || !output_sizes || n_inputs <= 0) {
         console_printf("Inference: Invalid batch parameters\n");
+        PROFILER_STOP();
         return -1;
     }
 
@@ -259,6 +280,7 @@ int inference_run_batch(const char** inputs, int n_inputs, char** outputs, size_
         console_printf("Inference: Failed to allocate batch tracking arrays\n");
         if (success_flags) kfree(success_flags);
         if (token_counts) kfree(token_counts);
+        PROFILER_STOP();
         return -1;
     }
 
@@ -313,6 +335,7 @@ int inference_run_batch(const char** inputs, int n_inputs, char** outputs, size_
     kfree(success_flags);
     kfree(token_counts);
 
+    PROFILER_STOP();
     return (success_count == n_inputs) ? 0 : -1;
 }
 

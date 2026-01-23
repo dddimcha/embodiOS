@@ -56,12 +56,35 @@ ifeq ($(ARCH),aarch64)
     endif
 endif
 
+# Vulkan shader compiler detection (shaderc)
+# Prefer glslc (from shaderc) as it's the official Vulkan shader compiler
+# Fall back to glslangValidator (from glslang) if glslc is not available
+GLSLC := $(shell which glslc 2>/dev/null)
+GLSLANG := $(shell which glslangValidator 2>/dev/null)
+ifneq ($(GLSLC),)
+    # Use glslc (shaderc) - produces SPIR-V directly
+    SHADER_COMPILER := $(GLSLC)
+    SHADER_FLAGS := -fshader-stage=comp -o
+    $(info Vulkan shader compiler: glslc (shaderc))
+else ifneq ($(GLSLANG),)
+    # Use glslangValidator (glslang) - produces SPIR-V
+    SHADER_COMPILER := $(GLSLANG)
+    SHADER_FLAGS := -V -o
+    $(info Vulkan shader compiler: glslangValidator (glslang))
+else
+    # No shader compiler found - GPU acceleration will be limited
+    SHADER_COMPILER :=
+    $(info Vulkan shader compiler not found - install shaderc or glslang for GPU acceleration)
+endif
+
 # Common flags for all architectures
 CFLAGS = -ffreestanding -nostdlib -fno-builtin -fno-stack-protector
 CFLAGS += -fno-pic -Wall -Wextra -O2
 # IMPORTANT: compat headers MUST come first to override system headers for llama.cpp
 CFLAGS += -I include/compat -I include -I include/arch/$(ARCH)
 CFLAGS += -I llama_cpp/include -I llama_cpp/ggml
+# Vulkan SDK headers for GPU acceleration
+CFLAGS += -I include/vulkan
 # Allow compiler builtin headers for GGML (needs stdbool.h, stdint.h, etc.)
 CFLAGS += -isystem $(shell $(CC) -print-file-name=include)
 
@@ -73,6 +96,17 @@ CXXFLAGS += -fno-pic -Wall -Wextra -O2
 CXXFLAGS += -I include/compat -I include -I include/arch/$(ARCH)
 CXXFLAGS += -fno-exceptions -fno-rtti -std=c++17
 CXXFLAGS += -I llama_cpp/include -I llama_cpp/ggml -I llama_cpp/src
+# Vulkan SDK headers for GPU acceleration
+CXXFLAGS += -I include/vulkan
+
+# Vulkan GPU acceleration support
+# Enable with: make GGML_VULKAN=1
+# Requires Vulkan SDK headers and ggml-vulkan.cpp backend implementation
+ifeq ($(GGML_VULKAN),1)
+    $(info GGML Vulkan backend enabled)
+    CFLAGS += -DGGML_USE_VULKAN
+    CXXFLAGS += -DGGML_USE_VULKAN
+endif
 
 # Coverage instrumentation support (gcov/lcov)
 # Enable with: make COVERAGE=1
@@ -157,6 +191,7 @@ KERNEL_C_SOURCES = \
     timer.c \
     core/hal_cpu.c \
     core/hal_timer.c \
+    core/profiler.c \
     drivers/pci/pci.c \
     drivers/block/virtio_blk.c \
     drivers/block/virtio_mmio.c \
@@ -182,6 +217,9 @@ KERNEL_C_SOURCES = \
     ai/gguf_inference.c \
     ai/quantized_ops.c \
     ai/quantized_test.c \
+    ai/gpu_backend.c \
+    ai/vulkan_test.c \
+    ai/e2e_gpu_test.c \
     ai/quantized_inference.c \
     ai/tinyllama_integer_inference.c \
     ai/tinystories_inference.c \
@@ -209,6 +247,7 @@ KERNEL_C_SOURCES = \
     test/test_framework.c \
     test/example_test.c \
     test/test_pmm.c \
+    test/test_profiler.c \
     lib/string.c \
     lib/stdlib.c \
     lib/math.c \
@@ -242,6 +281,12 @@ endif
 
 LLAMA_CPP_SOURCES = \
     llama_cpp/kernel_stubs.cpp
+
+# GGML Vulkan backend (C++) - compiled when GGML_VULKAN=1
+# Provides GPU-accelerated matrix operations via Vulkan compute shaders
+ifeq ($(GGML_VULKAN),1)
+    LLAMA_CPP_SOURCES += llama_cpp/ggml/ggml-vulkan.cpp
+endif
 
 # GGML core library - ENABLED
 # Complete GGML sources synced from llama.cpp repository
@@ -376,6 +421,22 @@ sign-check: embodios.elf.signed
 
 %.o: %.S
 	$(CC) $(ASFLAGS) -c $< -o $@
+
+# Vulkan shader compilation (GLSL -> SPIR-V)
+# Compile compute shaders (.comp) to SPIR-V (.spv)
+ifneq ($(SHADER_COMPILER),)
+%.spv: %.comp
+	@echo "Compiling shader: $< -> $@"
+	$(SHADER_COMPILER) $(SHADER_FLAGS) $@ $<
+
+%.spv: %.vert
+	@echo "Compiling vertex shader: $< -> $@"
+	$(SHADER_COMPILER) $(SHADER_FLAGS) $@ $<
+
+%.spv: %.frag
+	@echo "Compiling fragment shader: $< -> $@"
+	$(SHADER_COMPILER) $(SHADER_FLAGS) $@ $<
+endif
 
 # Clean
 clean:

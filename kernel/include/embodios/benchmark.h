@@ -249,6 +249,15 @@ int benchmark_multicore(void);
  */
 int benchmark_scaling(int max_threads);
 
+/**
+ * Run GPU vs CPU performance comparison benchmark
+ * Tests matrix multiplication throughput on both backends
+ * Compares GPU Vulkan backend against CPU fallback
+ * Reports GOPS and speedup for multiple matrix sizes
+ * @return 0 on success
+ */
+int benchmark_gpu_vs_cpu(void);
+
 #ifdef __cplusplus
 }
 #endif

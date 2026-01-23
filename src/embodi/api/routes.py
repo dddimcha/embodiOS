@@ -26,12 +26,14 @@ from .models import (
 )
 from ..core.inference import EMBODIOSInferenceEngine
 from .metrics import get_metrics_collector
+from .profiling import get_profiling_collector
 
 # Global inference engine instance (will be set by server)
 _inference_engine: Optional[EMBODIOSInferenceEngine] = None
 
 router = APIRouter(prefix="/v1", tags=["completions"])
 metrics_router = APIRouter(tags=["metrics"])
+profiling_router = APIRouter(tags=["profiling"])
 
 
 def set_inference_engine(engine: EMBODIOSInferenceEngine):
@@ -468,3 +470,59 @@ async def metrics():
     metrics_output = generate_latest()
 
     return Response(content=metrics_output, media_type=CONTENT_TYPE_LATEST)
+
+
+@profiling_router.get("/api/profiling/live")
+async def get_live_profiling():
+    """
+    Get current live profiling snapshot
+
+    Returns real-time profiling data including function-level timing,
+    memory allocation tracking, and hot path information.
+    Returns mock data until kernel integration is complete.
+    """
+    collector = get_profiling_collector()
+
+    # Enable profiling if not already enabled
+    if not collector.is_enabled():
+        collector.enable()
+
+    # Get current profiling statistics
+    stats = collector.get_stats()
+
+    if stats is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Profiling data not available"
+        )
+
+    return stats
+
+
+@profiling_router.get("/api/profiling/stats")
+async def get_profiling_stats():
+    """
+    Get aggregated profiling statistics
+
+    Returns aggregated profiling data with summary information,
+    function statistics, memory tracking, and hot paths.
+    Returns mock data until kernel integration is complete.
+    """
+    collector = get_profiling_collector()
+
+    # Get profiling statistics (returns last snapshot if available)
+    stats = collector.get_last_snapshot()
+
+    # If no snapshot exists, get fresh stats
+    if stats is None:
+        if not collector.is_enabled():
+            collector.enable()
+        stats = collector.get_stats()
+
+    if stats is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Profiling statistics not available"
+        )
+
+    return stats

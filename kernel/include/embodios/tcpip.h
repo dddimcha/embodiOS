@@ -171,6 +171,8 @@ typedef struct socket {
     uint16_t remote_port;       /* Remote port */
     uint32_t seq_num;           /* TCP sequence number */
     uint32_t ack_num;           /* TCP ack number */
+    uint64_t last_activity_ms;  /* Last activity timestamp (ms) */
+    uint32_t timeout_ms;        /* Connection timeout (ms) */
     uint8_t  rx_buffer[SOCKET_BUFFER_SIZE];  /* Receive buffer */
     size_t   rx_len;            /* Data in receive buffer */
     bool     active;            /* Socket in use */
@@ -197,6 +199,9 @@ typedef struct net_stats {
     uint64_t icmp_echo_reply;   /* ICMP echo replies sent */
     uint64_t tcp_connections;   /* TCP connections established */
     uint64_t udp_datagrams;     /* UDP datagrams processed */
+    uint64_t tcp_sockets_created;  /* TCP sockets created */
+    uint64_t tcp_sockets_closed;   /* TCP sockets closed */
+    uint64_t tcp_sockets_leaked;   /* TCP sockets leaked (created - closed) */
 } net_stats_t;
 
 /* ============================================================================
@@ -243,6 +248,12 @@ int tcpip_set_ip(const char *ip, const char *netmask, const char *gateway);
  * @return Number of packets processed
  */
 int tcpip_poll(void);
+
+/**
+ * Check for connection timeouts and close timed-out sockets
+ * Call periodically to handle timeout cleanup
+ */
+void tcpip_check_timeouts(void);
 
 /**
  * Send a raw IP packet
@@ -298,6 +309,9 @@ void tcpip_get_stats(net_stats_t *stats);
 void tcpip_print_info(void);
 int tcpip_run_tests(void);
 int tcpip_start_server(uint16_t port);
+
+/* Test helper functions - only for use by test framework */
+socket_t* tcpip_get_socket_for_testing(int fd);
 
 /* Macros for IP address handling */
 #define IP4(a,b,c,d) (((uint32_t)(a)<<24)|((uint32_t)(b)<<16)|((uint32_t)(c)<<8)|(uint32_t)(d))

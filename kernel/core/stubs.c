@@ -630,6 +630,12 @@ void process_command(const char *command)
     } else if (strcmp(command, "quantbench") == 0) {
         extern int run_quantized_benchmarks(void);
         run_quantized_benchmarks();
+    } else if (strcmp(command, "vulkantest") == 0) {
+        extern int run_vulkan_tests(void);
+        run_vulkan_tests();
+    } else if (strcmp(command, "gpue2e") == 0) {
+        extern void run_e2e_gpu_tests(void);
+        run_e2e_gpu_tests();
     } else if (strcmp(command, "bpeinit") == 0) {
         if (bpe_tokenizer_is_initialized()) {
             console_printf("BPE tokenizer already initialized\n");

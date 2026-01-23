@@ -22,6 +22,8 @@ class EMBODIOSInferenceEngine:
         self.weights_data: Optional[bytes] = None
         self.weights_offset_diff: int = 0
         self.architecture: Optional[Dict[str, Any]] = None
+        self.profiling_enabled = False
+        self._profiling_data: Optional[Dict] = None
         
     def _init_hardware_tokens(self) -> Dict[str, int]:
         """Initialize special tokens for hardware operations"""
@@ -251,10 +253,10 @@ class EMBODIOSInferenceEngine:
             'i2c': [],
             'interrupts': []
         }
-        
+
         # Extract hardware operations from output
         hw_commands = self._extract_hardware_commands(tokens)
-        
+
         for cmd in hw_commands:
             if cmd['type'].startswith('gpio'):
                 operations['gpio'].append(cmd)
@@ -262,8 +264,57 @@ class EMBODIOSInferenceEngine:
                 operations['memory'].append(cmd)
             elif cmd['type'].startswith('i2c'):
                 operations['i2c'].append(cmd)
-        
+
         return operations
+
+    def enable_profiling(self):
+        """Enable profiling for inference operations"""
+        self.profiling_enabled = True
+        self._profiling_data = {
+            'enabled': True,
+            'functions': [],
+            'memory': [],
+            'hot_paths': []
+        }
+
+    def disable_profiling(self):
+        """Disable profiling for inference operations"""
+        self.profiling_enabled = False
+        self._profiling_data = None
+
+    def get_profiling_data(self) -> Optional[Dict]:
+        """
+        Get current profiling data.
+
+        Returns mock data for now. Will be integrated with kernel profiler
+        via ctypes or shared memory in phase 4.
+
+        Returns:
+            Dictionary with profiling statistics, or None if profiling is disabled
+        """
+        if not self.profiling_enabled:
+            return None
+
+        # Mock profiling data for initial implementation
+        # Will be replaced with real kernel profiler data in phase 4
+        import time
+
+        return {
+            'timestamp': int(time.time()),
+            'summary': {
+                'total_entries': 0,
+                'total_samples': 0,
+                'total_time_us': 0,
+                'overhead_us': 0,
+                'overhead_percent': 0.0,
+                'active_functions': 0,
+                'dropped_entries': 0,
+                'enabled': self.profiling_enabled
+            },
+            'functions': [],
+            'memory': [],
+            'hot_paths': []
+        }
 
 
 class BareMetalInference:
