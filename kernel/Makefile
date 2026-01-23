@@ -120,10 +120,18 @@ endif
 # Architecture-specific flags
 ifeq ($(ARCH),x86_64)
     CFLAGS += -mno-red-zone -mcmodel=kernel
-    # NOTE: SSE2 enabled for AI inference SIMD and math functions
+    # NOTE: SSE2 enabled for AI inference SIMD and math functions (required)
     CFLAGS += -msse2 -mfpmath=sse
-    # AVX2 support disabled - QEMU TCG doesn't support AVX
-    # CFLAGS += -mavx2 -mfma
+    # AVX2 support - optional, requires real hardware or KVM (QEMU TCG doesn't support AVX)
+    # Enable with: make AVX2=1
+    ifeq ($(AVX2),1)
+        $(info AVX2 SIMD enabled - requires real hardware or KVM acceleration)
+        CFLAGS += -mavx2 -mfma
+        CXXFLAGS += -msse2 -mfpmath=sse -mavx2 -mfma
+    else
+        # C++ needs at least SSE2 for x86_64
+        CXXFLAGS += -msse2 -mfpmath=sse
+    endif
     # Check if we're using cross-compiler or native tools
     ifneq (,$(findstring x86_64-elf,$(CC)))
         # Cross-compiler (x86_64-elf-gcc)

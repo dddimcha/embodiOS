@@ -150,21 +150,14 @@ void slab_init(void)
     slab_debug_str("SLAB: Enter\n");
 
     /* Test writing to slab_state directly */
-    slab_debug_char('A');
     slab_state.initialized = false;  /* Write to simple bool */
-    slab_debug_char('B');
 
     /* Try getting address of caches array */
-    slab_debug_char('C');
     volatile struct slab_cache* cache_ptr = &slab_state.caches[0];
-    slab_debug_char('D');
 
     /* Try writing through pointer */
-    slab_debug_char('E');
     cache_ptr->partial = NULL;
-    slab_debug_char('F');
     cache_ptr->obj_size = 32;
-    slab_debug_char('G');
 
     /* Skip full init, just mark as done */
     slab_debug_str("\nSLAB: Done (disabled)\n");

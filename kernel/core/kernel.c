@@ -206,19 +206,13 @@ static void check_test_mode_cmdline(void)
 void kernel_main(void)
 {
     /* Debug: Mark kernel_main entry */
-    debug_serial_char('K');
 
     /* Early architecture setup */
-    debug_serial_char('a');
     arch_early_init();
-    debug_serial_char('b');
 
     /* Initialize console for output */
-    debug_serial_char('c');
     console_init();
-    debug_serial_char('d');
     console_printf("EMBODIOS Native Kernel %s\n", kernel_version);
-    debug_serial_char('e');
     console_printf("Build: %s\n", kernel_build);
     console_printf("Kernel: %p - %p\n", _kernel_start, _kernel_end);
     
@@ -228,9 +222,7 @@ void kernel_main(void)
     
     /* CPU initialization */
     console_printf("Initializing CPU features...\n");
-    debug_serial_char('f');
     arch_cpu_init();
-    debug_serial_char('g');
     
     /* Memory management setup */
     console_printf("Initializing memory management...\n");
