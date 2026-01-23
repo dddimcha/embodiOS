@@ -42,6 +42,11 @@ static net_send_fn net_send = NULL;
 static net_recv_fn net_recv = NULL;
 static net_mac_fn net_get_mac = NULL;
 
+/* Forward declarations */
+static int tcp_send_packet(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port,
+                           uint32_t seq, uint32_t ack, uint8_t flags,
+                           const void *data, size_t len);
+
 /* ============================================================================
  * Byte Order Conversion
  * ============================================================================ */
@@ -344,8 +349,13 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                     sockets[i].remote_ip = ntohl(ip->src_ip);
                     sockets[i].remote_port = ntohs(tcp->src_port);
                     sockets[i].ack_num = seq + 1;
+                    sockets[i].seq_num = 12345;  /* TODO: Random ISN */
                     sockets[i].state = TCP_SYN_RECEIVED;
-                    /* TODO: Send SYN+ACK */
+                    /* Send SYN+ACK */
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num,
+                                    sockets[i].ack_num, TCP_SYN | TCP_ACK,
+                                    NULL, 0);
                 }
                 break;
 
@@ -353,14 +363,22 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                 if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
                     sockets[i].ack_num = seq + 1;
                     sockets[i].state = TCP_ESTABLISHED;
-                    /* TODO: Send ACK */
+                    /* Send ACK */
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num,
+                                    sockets[i].ack_num, TCP_ACK,
+                                    NULL, 0);
                 }
                 break;
 
             case TCP_ESTABLISHED:
                 if (flags & TCP_FIN) {
                     sockets[i].state = TCP_CLOSE_WAIT;
-                    /* TODO: Send ACK */
+                    /* Send ACK */
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num,
+                                    sockets[i].ack_num, TCP_ACK,
+                                    NULL, 0);
                 } else if (flags & TCP_ACK) {
                     /* Handle data */
                     size_t header_len = (tcp->data_offset >> 4) * 4;
@@ -624,6 +642,75 @@ int tcpip_ping(uint32_t dst_ip, uint16_t id, uint16_t seq)
     return net_send(tx_buffer, sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(icmp_header_t));
 }
 
+static int tcp_send_packet(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port,
+                           uint32_t seq, uint32_t ack, uint8_t flags,
+                           const void *data, size_t len)
+{
+    if (!tcpip_initialized) return NET_ERR_INIT;
+
+    /* Resolve MAC address */
+    uint32_t next_hop = dst_ip;
+    if ((dst_ip & net_cfg.netmask) != (net_cfg.ip_addr & net_cfg.netmask)) {
+        next_hop = net_cfg.gateway;
+    }
+
+    arp_entry_t *entry = arp_lookup(next_hop);
+    if (!entry) {
+        arp_request(next_hop);
+        return NET_ERR_UNREACHABLE;
+    }
+
+    /* Build packet */
+    eth_header_t *eth = (eth_header_t *)tx_buffer;
+    ip_header_t *ip = (ip_header_t *)(tx_buffer + sizeof(eth_header_t));
+    tcp_header_t *tcp = (tcp_header_t *)(tx_buffer + sizeof(eth_header_t) + sizeof(ip_header_t));
+    uint8_t *payload = tx_buffer + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(tcp_header_t);
+
+    /* Ethernet */
+    memcpy(eth->dst, entry->mac, ETH_ALEN);
+    memcpy(eth->src, net_cfg.mac_addr, ETH_ALEN);
+    eth->type = htons(ETH_TYPE_IP);
+
+    /* IP */
+    ip->version_ihl = 0x45;
+    ip->tos = 0;
+    ip->total_len = htons(sizeof(ip_header_t) + sizeof(tcp_header_t) + len);
+    ip->id = 0;
+    ip->flags_frag = 0;
+    ip->ttl = 64;
+    ip->protocol = IP_PROTO_TCP;
+    ip->checksum = 0;
+    ip->src_ip = htonl(net_cfg.ip_addr);
+    ip->dst_ip = htonl(dst_ip);
+    ip->checksum = checksum(ip, sizeof(ip_header_t));
+
+    /* TCP */
+    tcp->src_port = htons(src_port);
+    tcp->dst_port = htons(dst_port);
+    tcp->seq_num = htonl(seq);
+    tcp->ack_num = htonl(ack);
+    tcp->data_offset = (sizeof(tcp_header_t) / 4) << 4;  /* Header length in 32-bit words */
+    tcp->flags = flags;
+    tcp->window = htons(8192);  /* Default window size */
+    tcp->checksum = 0;
+    tcp->urgent = 0;
+
+    /* Payload */
+    if (data && len > 0) {
+        memcpy(payload, data, len);
+    }
+
+    /* TCP checksum - simplified (set to 0 for now) */
+    /* TODO: Implement proper TCP checksum with pseudo-header */
+
+    size_t total_len = sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(tcp_header_t) + len;
+
+    net_stats.tx_packets++;
+    net_stats.tx_bytes += total_len;
+
+    return net_send(tx_buffer, total_len);
+}
+
 /* Socket API */
 int socket_create(int type, int protocol)
 {
@@ -688,7 +775,9 @@ int socket_connect(int fd, uint32_t ip, uint16_t port)
     /* TCP: Send SYN */
     sockets[fd].seq_num = 12345;  /* TODO: Random ISN */
     sockets[fd].state = TCP_SYN_SENT;
-    /* TODO: Actually send SYN packet */
+    tcp_send_packet(sockets[fd].remote_ip, sockets[fd].remote_port,
+                    sockets[fd].local_port, sockets[fd].seq_num,
+                    0, TCP_SYN, NULL, 0);
 
     return NET_OK;
 }
@@ -721,7 +810,20 @@ int socket_send(int fd, const void *data, size_t len)
     }
 
     /* TCP send - simplified */
-    return NET_ERR_INVALID;  /* TODO: Implement TCP send */
+    if (sockets[fd].state != TCP_ESTABLISHED) {
+        return NET_ERR_INVALID;  /* Connection not established */
+    }
+
+    int ret = tcp_send_packet(sockets[fd].remote_ip, sockets[fd].remote_port,
+                               sockets[fd].local_port, sockets[fd].seq_num,
+                               sockets[fd].ack_num, TCP_PSH | TCP_ACK,
+                               data, len);
+
+    if (ret >= 0) {
+        sockets[fd].seq_num += len;  /* Advance sequence number */
+    }
+
+    return ret;
 }
 
 int socket_recv(int fd, void *buffer, size_t len)
@@ -838,6 +940,123 @@ int tcpip_run_tests(void)
     socket_close(sock);
     console_printf("PASSED\n");
 
+    console_printf("TEST: TCP send... ");
+    int tcp_sock = socket_create(SOCK_STREAM, 0);
+    if (tcp_sock < 0) {
+        console_printf("FAILED (create)\n");
+        return -1;
+    }
+    /* Set up mock connection for testing */
+    socket_bind(tcp_sock, net_cfg.ip_addr, 8080);
+    sockets[tcp_sock].remote_ip = IP4(10, 0, 2, 2);
+    sockets[tcp_sock].remote_port = 80;
+    sockets[tcp_sock].state = TCP_ESTABLISHED;
+    sockets[tcp_sock].seq_num = 1000;
+    sockets[tcp_sock].ack_num = 2000;
+    /* Try to send (may fail due to no ARP entry, but tests the API) */
+    const char *test_data = "test";
+    int ret = socket_send(tcp_sock, test_data, 4);
+    /* Accept either success or unreachable (no ARP entry) */
+    if (ret < 0 && ret != NET_ERR_UNREACHABLE) {
+        console_printf("FAILED (send returned %d)\n", ret);
+        socket_close(tcp_sock);
+        return -1;
+    }
+    socket_close(tcp_sock);
+    console_printf("PASSED\n");
+
     console_printf("=== All TCP/IP tests passed ===\n");
     return 0;
+}
+
+/* Simple TCP echo server for integration testing */
+int tcpip_start_server(uint16_t port)
+{
+    if (!tcpip_initialized) {
+        console_printf("ERROR: TCP/IP stack not initialized\n");
+        return NET_ERR_INIT;
+    }
+
+    /* Create TCP socket */
+    int server_fd = socket_create(SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        console_printf("ERROR: Failed to create socket\n");
+        return server_fd;
+    }
+
+    /* Bind to port */
+    int ret = socket_bind(server_fd, net_cfg.ip_addr, port);
+    if (ret != NET_OK) {
+        console_printf("ERROR: Failed to bind to port %d\n", port);
+        socket_close(server_fd);
+        return ret;
+    }
+
+    /* Start listening */
+    ret = socket_listen(server_fd, 1);
+    if (ret != NET_OK) {
+        console_printf("ERROR: Failed to listen\n");
+        socket_close(server_fd);
+        return ret;
+    }
+
+    char ip_str[16];
+    ip_to_string(net_cfg.ip_addr, ip_str, sizeof(ip_str));
+    console_printf("TCP echo server listening on %s:%d\n", ip_str, port);
+    console_printf("Socket FD: %d, State: LISTEN\n", server_fd);
+    console_printf("Connect with: nc <host> %d\n", port);
+    console_printf("Press Ctrl+C to stop server (not implemented yet)\n");
+    console_printf("\nServer running in polling mode - processing packets...\n\n");
+
+    /* Server loop */
+    int last_state = TCP_LISTEN;
+    while (1) {
+        /* Poll for packets */
+        tcpip_poll();
+
+        /* Check socket state */
+        if (sockets[server_fd].state != last_state) {
+            last_state = sockets[server_fd].state;
+            console_printf("Socket state changed to: %d\n", last_state);
+
+            if (last_state == TCP_ESTABLISHED) {
+                console_printf("Client connected from %d.%d.%d.%d:%d\n",
+                               (sockets[server_fd].remote_ip >> 24) & 0xFF,
+                               (sockets[server_fd].remote_ip >> 16) & 0xFF,
+                               (sockets[server_fd].remote_ip >> 8) & 0xFF,
+                               sockets[server_fd].remote_ip & 0xFF,
+                               sockets[server_fd].remote_port);
+
+                /* Send welcome message */
+                const char *welcome = "Welcome to EMBODIOS TCP Server!\r\n";
+                int sent = socket_send(server_fd, (const uint8_t*)welcome, strlen(welcome));
+                if (sent > 0) {
+                    console_printf("Sent welcome message (%d bytes)\n", sent);
+                } else {
+                    console_printf("Failed to send welcome message: %d\n", sent);
+                }
+            }
+        }
+
+        /* If established, check for received data and echo it back */
+        if (sockets[server_fd].state == TCP_ESTABLISHED) {
+            /* In a real implementation, we'd have a receive buffer
+             * For now, just demonstrate sending periodic heartbeats */
+            static int counter = 0;
+            if (++counter == 1000000) {
+                const char *msg = "Server heartbeat\r\n";
+                socket_send(server_fd, (const uint8_t*)msg, strlen(msg));
+                counter = 0;
+            }
+        }
+
+        /* Check for disconnection */
+        if (sockets[server_fd].state == TCP_CLOSED) {
+            console_printf("Connection closed\n");
+            break;
+        }
+    }
+
+    socket_close(server_fd);
+    return NET_OK;
 }

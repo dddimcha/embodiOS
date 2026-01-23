@@ -753,6 +753,11 @@ void process_command(const char *command)
             virtio_net_run_tests();
         }
         tcpip_run_tests();
+    } else if (strcmp(command, "tcpserver") == 0 || strcmp(command, "server") == 0) {
+        /* Start TCP echo server */
+        extern int tcpip_start_server(uint16_t port);
+        console_printf("Starting TCP echo server on port 80...\n");
+        tcpip_start_server(80);
     } else if (strncmp(command, "ping ", 5) == 0) {
         /* Ping command */
         extern int tcpip_ping(uint32_t dst_ip, uint16_t id, uint16_t seq);
