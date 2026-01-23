@@ -14,6 +14,7 @@
 #include <embodios/ai.h>
 #include <embodios/embeddings.h>
 #include <embodios/gguf.h>
+#include <embodios/profiler.h>
 
 /* Use kernel's string functions */
 extern char* strcpy(char* dest, const char* src);
@@ -121,7 +122,10 @@ struct embodios_model* load_gguf_model(void* data, size_t size)
         console_printf("Model Loader: Failed to allocate model\n");
         return NULL;
     }
-    
+
+    /* Track model allocation for profiling */
+    profiler_track_alloc(sizeof(struct embodios_model), "model_loader:gguf_model");
+
     /* Initialize model */
     model->magic = 0x454D424F;
     model->version_major = 1;
@@ -185,11 +189,14 @@ struct embodios_model* load_gguf_model(void* data, size_t size)
 struct embodios_model* load_ggml_model(void* data, size_t size)
 {
     console_printf("Model Loader: GGML format support coming soon\n");
-    
+
     /* For now, create a placeholder model */
     struct embodios_model* model = kmalloc(sizeof(struct embodios_model));
     if (!model) return NULL;
-    
+
+    /* Track model allocation for profiling */
+    profiler_track_alloc(sizeof(struct embodios_model), "model_loader:ggml_model");
+
     model->magic = 0x454D424F;
     safe_strncpy(model->name, "GGML Model", sizeof(model->name));
     safe_strncpy(model->arch, "unknown", sizeof(model->arch));
@@ -207,6 +214,9 @@ struct embodios_model* load_safetensors_model(void* data, size_t size)
     /* For now, create a placeholder model */
     struct embodios_model* model = kmalloc(sizeof(struct embodios_model));
     if (!model) return NULL;
+
+    /* Track model allocation for profiling */
+    profiler_track_alloc(sizeof(struct embodios_model), "model_loader:safetensors_model");
 
     model->magic = 0x454D424F;
     safe_strncpy(model->name, "SafeTensors Model", sizeof(model->name));

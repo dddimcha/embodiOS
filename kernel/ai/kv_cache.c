@@ -6,6 +6,7 @@
 #include <embodios/types.h>
 #include <embodios/mm.h>
 #include <embodios/console.h>
+#include <embodios/profiler.h>
 
 #define MAX_SEQ_LEN 2048
 #define MAX_LAYERS 32
@@ -37,6 +38,10 @@ int kv_cache_init(uint32_t n_layers, uint32_t n_embd) {
             console_printf("[KV Cache] Failed to allocate for layer %u\n", i);
             return -1;
         }
+
+        /* Track memory allocations for profiling */
+        profiler_track_alloc(cache_size, "kv_cache:k_cache");
+        profiler_track_alloc(cache_size, "kv_cache:v_cache");
 
         g_kv_cache[i].seq_len = 0;
         g_kv_cache[i].n_embd = n_embd;
