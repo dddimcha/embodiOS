@@ -18,6 +18,30 @@ struct block_q4_k {
     uint8_t scales[12];    /* Quantized scales */
     uint8_t qs[QK_K/2];    /* 4-bit quantized values */
 } __attribute__((packed));
+
+/* Q5_K block structure - ARM version with float16_t */
+struct block_q5_k {
+    float16_t d;           /* Delta (scale) */
+    float16_t dmin;        /* Min delta */
+    uint8_t scales[12];    /* Quantized scales */
+    uint8_t qh[QK_K/8];    /* High bits (1 bit per value) */
+    uint8_t qs[QK_K/2];    /* Low 4 bits */
+} __attribute__((packed));
+
+/* Q6_K block structure - ARM version with float16_t */
+struct block_q6_k {
+    uint8_t ql[QK_K/2];    /* Low 4 bits */
+    uint8_t qh[QK_K/4];    /* High 2 bits */
+    int8_t scales[QK_K/16]; /* 8-bit signed scales */
+    float16_t d;           /* Delta (scale) */
+} __attribute__((packed));
+
+/* Q8_0 block structure - ARM version with fixed16_t */
+#define QK8_0 32
+struct block_q8_0 {
+    int16_t d;             /* Delta (scale) in Q8.8 fixed-point */
+    int8_t qs[QK8_0];      /* 8-bit quantized values */
+} __attribute__((packed));
 /* SIMD-optimized Q4_K matrix-vector multiply */
 void q4_k_matvec_neon(const void* weight_data, const fixed_t* input,
                       fixed_t* output, size_t rows, size_t cols) {
@@ -79,6 +103,212 @@ void q4_k_matvec_neon(const void* weight_data, const fixed_t* input,
 
             /* Apply block scale */
             sum = (sum * d) >> FIXED_SHIFT;
+        }
+
+        output[row] = (fixed_t)(sum >> FIXED_SHIFT);
+    }
+}
+
+/* SIMD-optimized Q5_K matrix-vector multiply */
+void q5_k_matvec_neon(const void* weight_data, const fixed_t* input,
+                      fixed_t* output, size_t rows, size_t cols) {
+    const struct block_q5_k* blocks = (const struct block_q5_k*)weight_data;
+    size_t n_blocks_per_row = (cols + QK_K - 1) / QK_K;
+
+    for (size_t row = 0; row < rows; row++) {
+        int64_t sum = 0;
+        const struct block_q5_k* row_blocks = &blocks[row * n_blocks_per_row];
+
+        for (size_t block_idx = 0; block_idx < n_blocks_per_row; block_idx++) {
+            const struct block_q5_k* block = &row_blocks[block_idx];
+            size_t input_offset = block_idx * QK_K;
+
+            /* Extract scale - simplified version without decode_k_scales */
+            fixed_t d = ((int32_t)block->d) << (FIXED_SHIFT - 8);
+
+            /* Process 8 values at a time with NEON */
+            for (size_t i = 0; i < QK_K && (input_offset + i) < cols; i += 8) {
+                /* Load 8 input values */
+                int32x4_t vinput_low = vld1q_s32(&input[input_offset + i]);
+                int32x4_t vinput_high = vld1q_s32(&input[input_offset + i + 4]);
+
+                /* Extract 8 quantized values (5-bit each) */
+                int8_t q[8];
+                for (int j = 0; j < 8; j++) {
+                    size_t idx = i + j;
+
+                    /* Extract low 4 bits from qs */
+                    int byte_idx = idx / 2;
+                    int nibble_shift = (idx % 2) * 4;
+                    uint8_t q_low = (block->qs[byte_idx] >> nibble_shift) & 0x0F;
+
+                    /* Extract high bit from qh */
+                    int qh_byte = idx / 8;
+                    int qh_bit = idx % 8;
+                    uint8_t q_high = (block->qh[qh_byte] >> qh_bit) & 0x01;
+
+                    /* Combine to 5-bit value (0-31) */
+                    q[j] = q_low | (q_high << 4);
+                }
+
+                /* Convert to 32-bit vectors */
+                int32x4_t vq_low = {q[0], q[1], q[2], q[3]};
+                int32x4_t vq_high = {q[4], q[5], q[6], q[7]};
+
+                /* Multiply: weight * input */
+                int64x2_t prod_low = vmull_s32(vget_low_s32(vq_low), vget_low_s32(vinput_low));
+                int64x2_t prod_high = vmull_s32(vget_high_s32(vq_low), vget_high_s32(vinput_low));
+
+                /* Accumulate */
+                sum += vgetq_lane_s64(prod_low, 0) + vgetq_lane_s64(prod_low, 1);
+                sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
+
+                prod_low = vmull_s32(vget_low_s32(vq_high), vget_low_s32(vinput_high));
+                prod_high = vmull_s32(vget_high_s32(vq_high), vget_high_s32(vinput_high));
+
+                sum += vgetq_lane_s64(prod_low, 0) + vgetq_lane_s64(prod_low, 1);
+                sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
+            }
+
+            /* Apply block scale */
+            sum = (sum * d) >> FIXED_SHIFT;
+        }
+
+        output[row] = (fixed_t)(sum >> FIXED_SHIFT);
+    }
+}
+
+/* SIMD-optimized Q6_K matrix-vector multiply */
+void q6_k_matvec_neon(const void* weight_data, const fixed_t* input,
+                      fixed_t* output, size_t rows, size_t cols) {
+    const struct block_q6_k* blocks = (const struct block_q6_k*)weight_data;
+    size_t n_blocks_per_row = (cols + QK_K - 1) / QK_K;
+
+    for (size_t row = 0; row < rows; row++) {
+        int64_t sum = 0;
+        const struct block_q6_k* row_blocks = &blocks[row * n_blocks_per_row];
+
+        for (size_t block_idx = 0; block_idx < n_blocks_per_row; block_idx++) {
+            const struct block_q6_k* block = &row_blocks[block_idx];
+            size_t input_offset = block_idx * QK_K;
+
+            /* Extract global scale */
+            fixed_t d = ((int32_t)block->d) << (FIXED_SHIFT - 8);
+
+            /* Q6_K has 16 groups of 16 values, each with its own 8-bit scale */
+            for (int group = 0; group < 16; group++) {
+                /* 8-bit signed scale for this group */
+                int8_t scale = block->scales[group];
+                fixed_t sc = (d * (int32_t)scale) >> 7;
+
+                /* Process 8 values at a time with NEON */
+                for (int j = 0; j < 16 && (input_offset + group * 16 + j) < cols; j += 8) {
+                    size_t base_idx = group * 16 + j;
+
+                    /* Load 8 input values */
+                    int32x4_t vinput_low = vld1q_s32(&input[input_offset + base_idx]);
+                    int32x4_t vinput_high = vld1q_s32(&input[input_offset + base_idx + 4]);
+
+                    /* Extract 8 quantized values (6-bit each) */
+                    int8_t q[8];
+                    for (int k = 0; k < 8; k++) {
+                        int idx = base_idx + k;
+
+                        /* Extract low 4 bits from ql */
+                        int ql_byte = idx / 2;
+                        int ql_shift = (idx % 2) * 4;
+                        uint8_t q_low = (block->ql[ql_byte] >> ql_shift) & 0x0F;
+
+                        /* Extract high 2 bits from qh */
+                        /* qh packs 4 values per byte (2 bits each) */
+                        int qh_byte = idx / 4;
+                        int qh_shift = (idx % 4) * 2;
+                        uint8_t q_high = (block->qh[qh_byte] >> qh_shift) & 0x03;
+
+                        /* Combine to 6-bit value, then center at 32 for signed */
+                        q[k] = (int8_t)((q_low | (q_high << 4)) - 32);
+                    }
+
+                    /* Convert to 32-bit vectors */
+                    int32x4_t vq_low = {q[0], q[1], q[2], q[3]};
+                    int32x4_t vq_high = {q[4], q[5], q[6], q[7]};
+
+                    /* Multiply: weight * input */
+                    int64x2_t prod_low = vmull_s32(vget_low_s32(vq_low), vget_low_s32(vinput_low));
+                    int64x2_t prod_high = vmull_s32(vget_high_s32(vq_low), vget_high_s32(vinput_low));
+
+                    /* Accumulate */
+                    sum += vgetq_lane_s64(prod_low, 0) + vgetq_lane_s64(prod_low, 1);
+                    sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
+
+                    prod_low = vmull_s32(vget_low_s32(vq_high), vget_low_s32(vinput_high));
+                    prod_high = vmull_s32(vget_high_s32(vq_high), vget_high_s32(vinput_high));
+
+                    sum += vgetq_lane_s64(prod_low, 0) + vgetq_lane_s64(prod_low, 1);
+                    sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
+                }
+
+                /* Apply group scale */
+                sum = (sum * sc) >> 5;
+            }
+        }
+
+        output[row] = (fixed_t)(sum >> FIXED_SHIFT);
+    }
+}
+
+/* SIMD-optimized Q8_0 matrix-vector multiply */
+void q8_0_matvec_neon(const void* weight_data, const fixed_t* input,
+                      fixed_t* output, size_t rows, size_t cols) {
+    const struct block_q8_0* blocks = (const struct block_q8_0*)weight_data;
+    size_t n_blocks_per_row = (cols + QK8_0 - 1) / QK8_0;
+
+    for (size_t row = 0; row < rows; row++) {
+        int64_t sum = 0;
+        const struct block_q8_0* row_blocks = &blocks[row * n_blocks_per_row];
+
+        for (size_t block_idx = 0; block_idx < n_blocks_per_row; block_idx++) {
+            const struct block_q8_0* block = &row_blocks[block_idx];
+            size_t input_offset = block_idx * QK8_0;
+
+            /* Extract scale: convert Q8.8 to Q16.16 */
+            fixed_t d = ((int32_t)block->d) << 8;
+
+            int64_t block_sum = 0;
+
+            /* Process 8 values at a time with NEON */
+            for (size_t i = 0; i < QK8_0 && (input_offset + i) < cols; i += 8) {
+                /* Load 8 input values (32-bit each) */
+                int32x4_t vinput_low = vld1q_s32(&input[input_offset + i]);
+                int32x4_t vinput_high = vld1q_s32(&input[input_offset + i + 4]);
+
+                /* Load 8 quantized values (8-bit each) and convert to 32-bit */
+                int8_t q_vals[8];
+                for (int j = 0; j < 8 && (i + j) < QK8_0; j++) {
+                    q_vals[j] = block->qs[i + j];
+                }
+
+                /* Convert to 32-bit vectors */
+                int32x4_t vq_low = {q_vals[0], q_vals[1], q_vals[2], q_vals[3]};
+                int32x4_t vq_high = {q_vals[4], q_vals[5], q_vals[6], q_vals[7]};
+
+                /* Widening multiply: 32x32→64 bit (weight * input) */
+                int64x2_t prod_low = vmull_s32(vget_low_s32(vq_low), vget_low_s32(vinput_low));
+                int64x2_t prod_high = vmull_s32(vget_high_s32(vq_low), vget_high_s32(vinput_low));
+
+                /* Accumulate */
+                block_sum += vgetq_lane_s64(prod_low, 0) + vgetq_lane_s64(prod_low, 1);
+                block_sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
+
+                prod_low = vmull_s32(vget_low_s32(vq_high), vget_low_s32(vinput_high));
+                prod_high = vmull_s32(vget_high_s32(vq_high), vget_high_s32(vinput_high));
+
+                block_sum += vgetq_lane_s64(prod_low, 0) + vgetq_lane_s64(prod_low, 1);
+                block_sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
+            }
+
+            /* Apply block scale: (block_sum * d) >> 7 to match scalar dequantization */
+            sum += (block_sum * d) >> 7;
         }
 
         output[row] = (fixed_t)(sum >> FIXED_SHIFT);

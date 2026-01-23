@@ -156,6 +156,73 @@ static void test_q5_k_highbit(void)
     console_printf("  PASS: Q5_K high bit handling (%d affected values)\n", high_count);
 }
 
+static void test_q5_k_tensor(void)
+{
+    console_printf("[Test] Q5_K tensor dequantization\n");
+
+    /* Allocate a small tensor (2 blocks = 512 values) */
+    struct block_q5_k blocks[2];
+    memset(blocks, 0, sizeof(blocks));
+
+    blocks[0].d = 256;  /* scale = 1.0 */
+    blocks[1].d = 512;  /* scale = 2.0 */
+
+    /* Set some quantized values for testing */
+    memset(blocks[0].scales, 0x11, K_SCALE_SIZE);
+    memset(blocks[1].scales, 0x11, K_SCALE_SIZE);
+    memset(blocks[0].qs, 0x88, QK_K / 2);
+    memset(blocks[1].qs, 0x88, QK_K / 2);
+    memset(blocks[0].qh, 0x00, QK_K / 8);
+    memset(blocks[1].qh, 0x00, QK_K / 8);
+
+    fixed_t output[512];
+    int ret = dequantize_q5_k(blocks, sizeof(blocks), output, 512);
+
+    TEST_ASSERT(ret == 0, "Q5_K tensor dequant succeeds");
+    console_printf("  PASS: Q5_K tensor dequantization\n");
+}
+
+static void test_q5_k_matmul(void)
+{
+    console_printf("[Test] Q5_K matrix-vector multiplication\n");
+
+    /* Create a small matrix (4 rows x 256 columns = 4 blocks) */
+    const size_t M = 4;
+    const size_t N = 256;
+
+    struct block_q5_k matrix[M];
+    memset(matrix, 0, sizeof(matrix));
+
+    /* Initialize blocks with known values */
+    for (size_t i = 0; i < M; i++) {
+        matrix[i].d = 256;  /* scale = 1.0 */
+        memset(matrix[i].scales, 0x11, K_SCALE_SIZE);
+        memset(matrix[i].qs, 0x88, QK_K / 2);
+        memset(matrix[i].qh, 0x00, QK_K / 8);
+    }
+
+    /* Create input vector */
+    fixed_t x[N];
+    for (size_t i = 0; i < N; i++) {
+        x[i] = (fixed_t)(i << 8);  /* Simple pattern */
+    }
+
+    /* Perform matrix-vector multiplication */
+    fixed_t y[M];
+    int ret = matmul_q5_k(matrix, sizeof(matrix), x, y, M, N);
+
+    TEST_ASSERT(ret == 0, "Q5_K matmul succeeds");
+
+    /* Verify that output is non-zero (NEON implementation produced results) */
+    int nonzero_count = 0;
+    for (size_t i = 0; i < M; i++) {
+        if (y[i] != 0) nonzero_count++;
+    }
+
+    TEST_ASSERT(nonzero_count > 0, "Q5_K matmul produces non-zero output");
+    console_printf("  PASS: Q5_K matrix-vector multiplication (%d non-zero results)\n", nonzero_count);
+}
+
 /* ============================================================================
  * Q6_K Tests
  * ============================================================================ */
@@ -182,6 +249,98 @@ static void test_q6_k_basic(void)
 
     TEST_ASSERT(valid_count > 0, "Q6_K produces non-zero output");
     console_printf("  PASS: Q6_K basic dequantization (%d non-zero values)\n", valid_count);
+}
+
+static void test_q6_k_highbit(void)
+{
+    console_printf("[Test] Q6_K high bit handling\n");
+
+    struct block_q6_k block;
+    memset(&block, 0, sizeof(block));
+
+    block.d = 256;
+    memset(block.scales, 16, QK_K / 16);
+    memset(block.ql, 0x00, QK_K / 2);     /* Low 4 bits = 0 */
+    memset(block.qh, 0xFF, QK_K / 4);     /* High bits = 3 (max 2-bit value) */
+
+    fixed_t output[QK_K];
+    dequantize_block_q6_k(&block, output);
+
+    /* With high bits set, values should be non-zero after scaling */
+    int high_count = 0;
+    for (int i = 0; i < QK_K; i++) {
+        if (output[i] != 0) high_count++;
+    }
+
+    TEST_ASSERT(high_count > 0, "Q6_K high bit produces non-zero output");
+    console_printf("  PASS: Q6_K high bit handling (%d affected values)\n", high_count);
+}
+
+static void test_q6_k_tensor(void)
+{
+    console_printf("[Test] Q6_K tensor dequantization\n");
+
+    /* Allocate a small tensor (2 blocks = 512 values) */
+    struct block_q6_k blocks[2];
+    memset(blocks, 0, sizeof(blocks));
+
+    blocks[0].d = 256;  /* scale = 1.0 */
+    blocks[1].d = 512;  /* scale = 2.0 */
+
+    /* Set some quantized values for testing */
+    memset(blocks[0].scales, 16, QK_K / 16);
+    memset(blocks[1].scales, 16, QK_K / 16);
+    memset(blocks[0].ql, 0x88, QK_K / 2);
+    memset(blocks[1].ql, 0x88, QK_K / 2);
+    memset(blocks[0].qh, 0x00, QK_K / 4);
+    memset(blocks[1].qh, 0x00, QK_K / 4);
+
+    fixed_t output[512];
+    int ret = dequantize_q6_k(blocks, sizeof(blocks), output, 512);
+
+    TEST_ASSERT(ret == 0, "Q6_K tensor dequant succeeds");
+    console_printf("  PASS: Q6_K tensor dequantization\n");
+}
+
+static void test_q6_k_matmul(void)
+{
+    console_printf("[Test] Q6_K matrix-vector multiplication\n");
+
+    /* Create a small matrix (4 rows x 256 columns = 4 blocks) */
+    const size_t M = 4;
+    const size_t N = 256;
+
+    struct block_q6_k matrix[M];
+    memset(matrix, 0, sizeof(matrix));
+
+    /* Initialize blocks with known values */
+    for (size_t i = 0; i < M; i++) {
+        matrix[i].d = 256;  /* scale = 1.0 */
+        memset(matrix[i].scales, 16, QK_K / 16);
+        memset(matrix[i].ql, 0x88, QK_K / 2);
+        memset(matrix[i].qh, 0x00, QK_K / 4);
+    }
+
+    /* Create input vector */
+    fixed_t x[N];
+    for (size_t i = 0; i < N; i++) {
+        x[i] = (fixed_t)(i << 8);  /* Simple pattern */
+    }
+
+    /* Perform matrix-vector multiplication */
+    fixed_t y[M];
+    int ret = matmul_q6_k(matrix, sizeof(matrix), x, y, M, N);
+
+    TEST_ASSERT(ret == 0, "Q6_K matmul succeeds");
+
+    /* Verify that output is non-zero (NEON implementation produced results) */
+    int nonzero_count = 0;
+    for (size_t i = 0; i < M; i++) {
+        if (y[i] != 0) nonzero_count++;
+    }
+
+    TEST_ASSERT(nonzero_count > 0, "Q6_K matmul produces non-zero output");
+    console_printf("  PASS: Q6_K matrix-vector multiplication (%d non-zero results)\n", nonzero_count);
 }
 
 /* ============================================================================
@@ -236,6 +395,48 @@ static void test_q8_0_tensor(void)
 
     TEST_ASSERT(ret == 0, "Q8_0 tensor dequant succeeds");
     console_printf("  PASS: Q8_0 tensor dequantization\n");
+}
+
+static void test_q8_0_matmul(void)
+{
+    console_printf("[Test] Q8_0 matrix-vector multiplication\n");
+
+    /* Create a small matrix (4 rows x 256 columns) */
+    const size_t M = 4;
+    const size_t N = 256;
+    const size_t blocks_per_row = (N + QK8_0 - 1) / QK8_0;  /* 8 blocks per row */
+
+    struct block_q8_0 matrix[M * blocks_per_row];
+    memset(matrix, 0, sizeof(matrix));
+
+    /* Initialize blocks with known values */
+    for (size_t i = 0; i < M * blocks_per_row; i++) {
+        matrix[i].d = 256;  /* scale = 1.0 */
+        for (int j = 0; j < QK8_0; j++) {
+            matrix[i].qs[j] = (int8_t)(j % 16);  /* Simple pattern */
+        }
+    }
+
+    /* Create input vector */
+    fixed_t x[N];
+    for (size_t i = 0; i < N; i++) {
+        x[i] = (fixed_t)(i << 8);  /* Simple pattern */
+    }
+
+    /* Perform matrix-vector multiplication */
+    fixed_t y[M];
+    int ret = matmul_q8_0(matrix, sizeof(matrix), x, y, M, N);
+
+    TEST_ASSERT(ret == 0, "Q8_0 matmul succeeds");
+
+    /* Verify that output is non-zero (NEON implementation produced results) */
+    int nonzero_count = 0;
+    for (size_t i = 0; i < M; i++) {
+        if (y[i] != 0) nonzero_count++;
+    }
+
+    TEST_ASSERT(nonzero_count > 0, "Q8_0 matmul produces non-zero output");
+    console_printf("  PASS: Q8_0 matrix-vector multiplication (%d non-zero results)\n", nonzero_count);
 }
 
 /* ============================================================================
@@ -471,13 +672,19 @@ int run_quantized_tests(void)
     /* Q5_K tests */
     test_q5_k_basic();
     test_q5_k_highbit();
+    test_q5_k_tensor();
+    test_q5_k_matmul();
 
     /* Q6_K tests */
     test_q6_k_basic();
+    test_q6_k_highbit();
+    test_q6_k_tensor();
+    test_q6_k_matmul();
 
     /* Q8_0 tests */
     test_q8_0_basic();
     test_q8_0_tensor();
+    test_q8_0_matmul();
 
     /* Dispatcher tests */
     test_dispatcher();
