@@ -14,6 +14,7 @@
 #include <embodios/gguf_parser.h>
 #include <embodios/kernel.h>
 #include <embodios/mm.h>
+#include <embodios/test.h>
 #include <embodios/types.h>
 
 /* ============================================================================
@@ -508,6 +509,16 @@ int bpe_tokenizer_decode(const int *tokens, int n_tokens, char *text, int max_le
                     for (size_t j = 3; j < len && pos < max_len - 1; j++) {
                         text[pos++] = token_text[j];
                     }
+                } else if (len >= 2 && (uint8_t)token_text[0] == 0xC4 && (uint8_t)token_text[1] == 0xA0) {
+                    /* Handle GPT-2 space marker (Ġ = U+0120) */
+                    /* Replace Ġ with space */
+                    if (pos < max_len - 1) {
+                        text[pos++] = ' ';
+                    }
+                    /* Copy rest of token */
+                    for (size_t j = 2; j < len && pos < max_len - 1; j++) {
+                        text[pos++] = token_text[j];
+                    }
                 } else {
                     /* Copy token text directly */
                     for (size_t j = 0; j < len && pos < max_len - 1; j++) {
@@ -545,6 +556,19 @@ const char *bpe_tokenizer_decode_token(int token_id)
     if (token_id >= 0 && token_id < (int)g_bpe.vocab_size) {
         const char *text = g_bpe.id_to_text[token_id];
         if (text) {
+            size_t len = strlen(text);
+
+            /* Convert Ġ (GPT-2 space marker) to space for display */
+            if (len >= 2 && (uint8_t)text[0] == 0xC4 && (uint8_t)text[1] == 0xA0) {
+                buffer[0] = ' ';
+                size_t i;
+                for (i = 2; i < len && i - 2 < BPE_MAX_TOKEN_LEN - 1; i++) {
+                    buffer[i - 1] = text[i];
+                }
+                buffer[i - 1] = '\0';
+                return buffer;
+            }
+
             return text;
         }
     }
@@ -652,3 +676,67 @@ void bpe_tokenizer_test(void)
 
     console_printf("\n=== Test Complete ===\n");
 }
+
+/* ============================================================================
+ * Unit Test Registration
+ * ============================================================================ */
+
+/**
+ * test_bpe_tokenizer - Unit test for BPE tokenizer
+ *
+ * This test requires a GGUF model to be loaded first. For now, it's a
+ * placeholder that reports the tokenizer state.
+ */
+static int test_bpe_tokenizer(void)
+{
+    console_printf("TEST: BPE Tokenizer\n");
+
+    if (!g_bpe.initialized) {
+        console_printf("SKIP: Tokenizer not initialized (requires GGUF model)\n");
+        console_printf("PASS: BPE tokenizer test skipped (no model loaded)\n");
+        return 0;
+    }
+
+    /* Run actual tokenizer test */
+    bpe_tokenizer_test();
+
+    /* Verify that decode converts Ġ to space */
+    const char *test_texts[] = {"Hello", "Hello world", NULL};
+    int tokens[64];
+    char decoded[256];
+
+    for (int i = 0; test_texts[i]; i++) {
+        int n = bpe_tokenizer_encode(test_texts[i], tokens, 64, false, false);
+        bpe_tokenizer_decode(tokens, n, decoded, sizeof(decoded));
+
+        /* Check that decoded text matches input (spaces preserved) */
+        if (strcmp(decoded, test_texts[i]) != 0) {
+            console_printf("FAIL: Decoded text mismatch\n");
+            console_printf("  Expected: '%s'\n", test_texts[i]);
+            console_printf("  Got:      '%s'\n", decoded);
+            return -1;
+        }
+
+        /* Check that individual tokens show spaces, not Ġ */
+        for (int j = 0; j < n; j++) {
+            const char *token_text = bpe_tokenizer_decode_token(tokens[j]);
+            /* Verify no Ġ character (0xC4 0xA0) in output */
+            for (size_t k = 0; token_text[k]; k++) {
+                if (k + 1 < strlen(token_text) &&
+                    (uint8_t)token_text[k] == 0xC4 && (uint8_t)token_text[k + 1] == 0xA0) {
+                    console_printf("FAIL: Token still contains Ġ character\n");
+                    return -1;
+                }
+            }
+        }
+    }
+
+    console_printf("PASS: BPE tokenizer test passed\n");
+    return 0;
+}
+
+/* Test case structure */
+static struct test_case test_case_bpe = {.name = "bpe", .func = test_bpe_tokenizer, .next = NULL};
+
+/* Test registration using constructor attribute */
+static void __attribute__((constructor)) test_register_bpe(void) { test_register(&test_case_bpe); }
