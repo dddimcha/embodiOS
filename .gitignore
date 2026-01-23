@@ -130,3 +130,4 @@ llama.c/
 .worktrees/
 .security-key
 logs/security/
+checkpoints/
