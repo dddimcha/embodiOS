@@ -28,9 +28,10 @@
 
 /* Number of threads for parallel inference
  * Set to 1 for QEMU single-core emulation
- * Set to 4+ for real multi-core hardware */
+ * Set to 4+ for real multi-core hardware
+ * Now using real context switching! */
 #ifndef PARALLEL_NUM_THREADS
-#define PARALLEL_NUM_THREADS 1  /* Single-threaded for QEMU */
+#define PARALLEL_NUM_THREADS 4  /* 4 threads with real context switching */
 #endif
 
 /* NEON SIMD for ARM64 */
@@ -338,6 +339,29 @@ static inline float fp16_to_fp32(uint16_t h) {
     return u.f;
 }
 
+/* Convert float32 to float16 */
+static inline uint16_t fp32_to_fp16(float f) {
+    union { float f; uint32_t i; } u;
+    u.f = f;
+    uint32_t x = u.i;
+
+    uint32_t sign = (x >> 16) & 0x8000;
+    int exp = ((x >> 23) & 0xff) - 127 + 15;
+    uint32_t mant = (x >> 13) & 0x3ff;
+
+    if (exp <= 0) {
+        /* Subnormal or zero */
+        if (exp < -10) return sign;  /* Too small */
+        mant = (mant | 0x400) >> (1 - exp);
+        return sign | mant;
+    } else if (exp >= 31) {
+        /* Infinity or NaN */
+        return sign | 0x7c00 | (mant ? 0x200 : 0);
+    }
+
+    return sign | (exp << 10) | mant;
+}
+
 /* Quantization block sizes */
 #define QK4_0 32
 #define QK4_1 32
@@ -403,7 +427,8 @@ typedef struct __attribute__((packed)) {
 } block_q8_1;
 
 /* Quantize float input to Q8_1 format on-the-fly
- * Q8_1 includes sum for efficient fused matmul */
+ * Q8_1 includes d (scale) and s (d * sum(qs)) for efficient fused matmul
+ * Note: GGML stores d and s as fp16 (ggml_half) */
 static void quantize_row_q8_1(const float* x, block_q8_1* y, int k) {
     const int nb = k / QK8_0;
 
@@ -423,8 +448,10 @@ static void quantize_row_q8_1(const float* x, block_q8_1* y, int k) {
         float d = amax / 127.0f;
         float id = d != 0.0f ? 1.0f / d : 0.0f;
 
-        y[i].d = d;
-        y[i].s = sum;
+        /* Store d and s as fp16 (GGML format)
+         * s = sum of original float values (NOT d * sum!) */
+        y[i].d = fp32_to_fp16(d);
+        y[i].s = fp32_to_fp16(sum);
 
         /* Quantize */
         for (int j = 0; j < QK8_0; j++) {
@@ -449,7 +476,7 @@ static float vec_dot_q8_0_q8_1_sse(const block_q8_0* x, const block_q8_1* y, int
 
     for (int i = 0; i < nb; i++) {
         float d0 = fp16_to_fp32(x[i].d);
-        float d1 = y[i].d;
+        float d1 = fp16_to_fp32(y[i].d);
 
         /* SSE2 integer dot product */
         __m128i sum_vec = _mm_setzero_si128();
@@ -492,7 +519,7 @@ static float vec_dot_q8_0_q8_1_avx2(const block_q8_0* x, const block_q8_1* y, in
 
     for (int i = 0; i < nb; i++) {
         float d0 = fp16_to_fp32(x[i].d);
-        float d1 = y[i].d;
+        float d1 = fp16_to_fp32(y[i].d);
 
         /* Load 32 int8 values */
         __m256i ax = _mm256_loadu_si256((const __m256i*)x[i].qs);
@@ -545,7 +572,7 @@ static float vec_dot_q8_0_q8_1(const block_q8_0* x, const block_q8_1* y, int nb)
 
     for (int i = 0; i < nb; i++) {
         float d0 = fp16_to_fp32(x[i].d);
-        float d1 = y[i].d;
+        float d1 = fp16_to_fp32(y[i].d);
 
         int32x4_t sum_vec = vdupq_n_s32(0);
 
@@ -576,7 +603,7 @@ static float vec_dot_q8_0_q8_1(const block_q8_0* x, const block_q8_1* y, int nb)
 
     for (int i = 0; i < nb; i++) {
         float d0 = fp16_to_fp32(x[i].d);
-        float d1 = y[i].d;
+        float d1 = fp16_to_fp32(y[i].d);
         int32_t isum = 0;
 
         for (int j = 0; j < QK8_0; j++) {
@@ -621,6 +648,177 @@ static void matmul_q8_0_fused(float* out, const void* w_q8_0, const float* x,
     for (int r = 0; r < rows; r++) {
         const block_q8_0* row_weights = &weights[r * nb_cols];
         out[r] = vec_dot_q8_0_q8_1(row_weights, g_input_q8, nb_cols);
+    }
+}
+
+/* Counter for Q4_K fused matmul */
+static uint32_t g_q4k_fused_count = 0;
+
+/* ============================================================================
+ * Fused Q4_K x Q8_1 dot product - MAJOR OPTIMIZATION
+ * Computes dot product directly on quantized values without dequantization
+ * This is ~3-5x faster than dequant-then-float-matmul for Q4_K
+ * ============================================================================ */
+
+/* Extract scale and min from K-quant scale bytes */
+static inline void get_scale_min_k4_fused(int j, const uint8_t* q, uint8_t* d, uint8_t* m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
+    }
+}
+
+/* Q4_K x Q8_1 vector dot product
+ * Weight: Q4_K block (256 elements per block)
+ * Input: Q8_1 block (32 elements per block)
+ * For each Q4_K block, we need 8 Q8_1 blocks (256/32 = 8)
+ *
+ * Q4_K layout (128 bytes for 256 elements):
+ * - Bytes 0-31: groups 0,1 (low nibbles=group0, high nibbles=group1)
+ * - Bytes 32-63: groups 2,3 (low nibbles=group2, high nibbles=group3)
+ * - Bytes 64-95: groups 4,5 (low nibbles=group4, high nibbles=group5)
+ * - Bytes 96-127: groups 6,7 (low nibbles=group6, high nibbles=group7)
+ */
+#ifdef __aarch64__
+static float vec_dot_q4_k_q8_1(const block_q4_K* x, const block_q8_1* y, int nb) {
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; i++) {
+        const block_q4_K* xb = &x[i];
+        float xd = fp16_to_fp32(xb->d);
+        float xdmin = fp16_to_fp32(xb->dmin);
+
+        float sumi = 0.0f;
+        float summs = 0.0f;
+
+        /* Process 256 elements in groups of 32 (to match Q8_1 blocks) */
+        for (int j = 0; j < QK_K / 32; j++) {  /* 8 groups: 0-7 */
+            const block_q8_1* yb = &y[i * 8 + j];
+            float yd = fp16_to_fp32(yb->d);
+
+            uint8_t sc, m;
+            get_scale_min_k4_fused(j, xb->scales, &sc, &m);
+
+            /* Accumulate min correction: m * yb->s */
+            summs += fp16_to_fp32(yb->s) * (float)m;
+
+            /* Q4_K byte offset: groups 0,1 use bytes 0-31, groups 2,3 use 32-63, etc */
+            const uint8_t* qs = xb->qs + (j / 2) * 32;  /* 32 bytes per pair of groups */
+            int use_high = j & 1;  /* Even groups use low nibbles, odd use high */
+
+            /* NEON: process 32 bytes to get 32 values (from either low or high nibbles) */
+            uint8x16_t xq0 = vld1q_u8(qs);       /* bytes 0-15 */
+            uint8x16_t xq1 = vld1q_u8(qs + 16);  /* bytes 16-31 */
+
+            int8x16_t x0, x1;
+            if (use_high) {
+                /* High nibbles for odd groups (1,3,5,7) */
+                x0 = vreinterpretq_s8_u8(vshrq_n_u8(xq0, 4));
+                x1 = vreinterpretq_s8_u8(vshrq_n_u8(xq1, 4));
+            } else {
+                /* Low nibbles for even groups (0,2,4,6) */
+                x0 = vreinterpretq_s8_u8(vandq_u8(xq0, vdupq_n_u8(0xF)));
+                x1 = vreinterpretq_s8_u8(vandq_u8(xq1, vdupq_n_u8(0xF)));
+            }
+
+            /* Load 32 Q8 values */
+            int8x16_t yq0 = vld1q_s8(yb->qs);       /* Q8 values 0-15 */
+            int8x16_t yq1 = vld1q_s8(yb->qs + 16);  /* Q8 values 16-31 */
+
+            /* Multiply and accumulate: x0*yq0 + x1*yq1 */
+            int16x8_t prod0_lo = vmull_s8(vget_low_s8(x0), vget_low_s8(yq0));
+            int16x8_t prod0_hi = vmull_s8(vget_high_s8(x0), vget_high_s8(yq0));
+            int16x8_t prod1_lo = vmull_s8(vget_low_s8(x1), vget_low_s8(yq1));
+            int16x8_t prod1_hi = vmull_s8(vget_high_s8(x1), vget_high_s8(yq1));
+
+            /* Sum all products */
+            int32x4_t sum32 = vpaddlq_s16(prod0_lo);
+            sum32 = vpadalq_s16(sum32, prod0_hi);
+            sum32 = vpadalq_s16(sum32, prod1_lo);
+            sum32 = vpadalq_s16(sum32, prod1_hi);
+
+            int32_t group_sum = vaddvq_s32(sum32);
+
+            /* Apply scales: sc * yd * group_sum */
+            sumi += (float)sc * yd * (float)group_sum;
+        }
+
+        /* Final: xd * sumi - xdmin * summs */
+        sumf += xd * sumi - xdmin * summs;
+    }
+
+    return sumf;
+}
+#else
+/* Scalar fallback for Q4_K x Q8_1
+ * Same Q4_K layout as NEON version:
+ * - Groups 0,1: bytes 0-31 (low/high nibbles)
+ * - Groups 2,3: bytes 32-63, etc */
+static float vec_dot_q4_k_q8_1(const block_q4_K* x, const block_q8_1* y, int nb) {
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; i++) {
+        const block_q4_K* xb = &x[i];
+        float xd = fp16_to_fp32(xb->d);
+        float xdmin = fp16_to_fp32(xb->dmin);
+
+        float sumi = 0.0f;
+        float summs = 0.0f;
+
+        for (int j = 0; j < QK_K / 32; j++) {
+            const block_q8_1* yb = &y[i * 8 + j];
+            float yd = fp16_to_fp32(yb->d);
+
+            uint8_t sc, m;
+            get_scale_min_k4_fused(j, xb->scales, &sc, &m);
+
+            summs += fp16_to_fp32(yb->s) * (float)m;
+
+            /* Q4_K byte offset: groups 0,1 use bytes 0-31, groups 2,3 use 32-63, etc */
+            const uint8_t* qs = xb->qs + (j / 2) * 32;
+            int use_high = j & 1;
+
+            int32_t group_sum = 0;
+            for (int k = 0; k < 32; k++) {
+                int x_val = use_high ? (qs[k] >> 4) : (qs[k] & 0xF);
+                group_sum += x_val * yb->qs[k];
+            }
+
+            sumi += (float)sc * yd * (float)group_sum;
+        }
+
+        sumf += xd * sumi - xdmin * summs;
+    }
+
+    return sumf;
+}
+#endif
+
+/* Fused Q4_K matrix-vector multiply
+ * Quantizes input on-the-fly, then uses integer SIMD for matmul
+ * Much faster than dequant-then-float for Q4_K models like TinyLlama */
+static void matmul_q4_k_fused(float* out, const void* w_q4_k, const float* x,
+                               int rows, int cols) {
+    const int nb_cols = cols / QK_K;  /* Q4_K blocks per row (256 elements each) */
+    const int nb_q8 = cols / QK8_0;   /* Q8_1 blocks needed (32 elements each) */
+    const block_q4_K* weights = (const block_q4_K*)w_q4_k;
+
+    /* Buffer check */
+    if (nb_q8 > g_input_q8_size) {
+        console_printf("Error: matmul_q4_k_fused buffer overflow\n");
+        return;
+    }
+
+    /* Quantize input vector to Q8_1 */
+    quantize_row_q8_1(x, g_input_q8, cols);
+
+    /* Compute each output row */
+    for (int r = 0; r < rows; r++) {
+        const block_q4_K* row_weights = &weights[r * nb_cols];
+        out[r] = vec_dot_q4_k_q8_1(row_weights, g_input_q8, nb_cols);
     }
 }
 
@@ -1047,13 +1245,24 @@ static void rmsnorm_stream(float* out, const float* x, const void* w_quant,
  */
 static void matmul_stream(float* out, const void* w_quant, int w_type,
                           const float* x, int rows, int cols) {
-    /* FAST PATH: Use fused Q8_0 matmul for Q8_0 weights
-     * This avoids dequantization overhead - operates directly on int8 */
+    /* FAST PATH: Use fused matmul for quantized weights
+     * Avoids dequantization overhead - operates directly on int8/int4 */
+
+    /* Q8_0 fast path */
     if (w_type == 8) {  /* GGML_TYPE_Q8_0 */
         g_q8_fused_count++;
         matmul_q8_0_fused(out, w_quant, x, rows, cols);
         return;
     }
+
+    /* Q4_K fast path - fused quantized matmul for K-quants
+     * Quantizes input on-the-fly, computes dot products in integer */
+    if (w_type == 12) {
+        g_q4k_fused_count++;
+        matmul_q4_k_fused(out, w_quant, x, rows, cols);
+        return;
+    }
+
     g_dequant_count++;
 
     const int chunk_cols = 256;  /* Dequantize 256 columns at a time */
@@ -1418,6 +1627,92 @@ static void extract_embedding_f16_transposed(const void* src, float* dst,
     }
 }
 
+/* Extract token embedding from transposed Q4_K table
+ * Table shape: [dim, vocab_size], so dim rows of vocab_size elements each
+ * Each row is (vocab_size/256) Q4_K blocks
+ * For token t, we need position t from each of the dim rows
+ * Q4_K layout within block (256 elements):
+ *   - 4 groups of 64 elements
+ *   - Each group of 64: first 32 use low nibbles, next 32 use high nibbles
+ *   - Each group has 2 scale/min pairs (one for low, one for high)
+ */
+static void extract_embedding_q4_k_transposed(const void* src, float* dst,
+                                               int dim, int vocab_size, int token) {
+    const int blocks_per_row = vocab_size / QK_K;  /* Q4_K blocks per row (QK_K=256) */
+    const size_t row_bytes = blocks_per_row * sizeof(block_q4_K);
+    const int block_idx = token / QK_K;           /* Which block contains our token */
+    const int pos_in_block = token % QK_K;        /* Position 0-255 within block */
+    const block_q4_K* base = (const block_q4_K*)src;
+
+    /* Precompute position decoding (same for all dim rows) */
+    const int group = pos_in_block / 64;          /* Which group of 64 (0-3) */
+    const int pos_in_group = pos_in_block % 64;   /* Position 0-63 within group */
+    const int is_high_nibble = pos_in_group >= 32;
+    const int qs_offset = group * 32 + (pos_in_group % 32);  /* Index in qs[] */
+    const int scale_idx = group * 2 + (is_high_nibble ? 1 : 0);  /* Scale/min pair index */
+
+    for (int d = 0; d < dim; d++) {
+        /* Navigate to row d, block block_idx */
+        const block_q4_K* block = (const block_q4_K*)((const char*)base + d * row_bytes) + block_idx;
+
+        /* Get scale and min using helper */
+        uint8_t sc, m;
+        get_scale_min_k4(scale_idx, block->scales, &sc, &m);
+
+        float d_scale = fp16_to_fp32(block->d) * sc;
+        float d_min = fp16_to_fp32(block->dmin) * m;
+
+        /* Get quantized value (nibble) */
+        uint8_t q_byte = block->qs[qs_offset];
+        int q_val = is_high_nibble ? (q_byte >> 4) : (q_byte & 0xF);
+
+        /* Dequantize: val * scale - min */
+        dst[d] = d_scale * q_val - d_min;
+    }
+}
+
+/* Extract token embedding from transposed Q6_K table */
+static void extract_embedding_q6_k_transposed(const void* src, float* dst,
+                                               int dim, int vocab_size, int token) {
+    const int blocks_per_row = vocab_size / QK_K;
+    const size_t row_bytes = blocks_per_row * sizeof(block_q6_K);
+    const int block_idx = token / QK_K;
+    const int pos_in_block = token % QK_K;
+    const block_q6_K* base = (const block_q6_K*)src;
+
+    /* Q6_K has 256 elements per block
+     * ql[128]: low 4 bits (2 elements per byte, interleaved)
+     * qh[64]: high 2 bits (4 elements per byte)
+     * scales[16]: one scale per 16 elements
+     */
+    const int scale_idx = pos_in_block / 16;
+    const int ql_idx = pos_in_block / 2;
+    const int qh_idx = pos_in_block / 4;
+    const int is_second_half = pos_in_block >= 128;
+
+    for (int d = 0; d < dim; d++) {
+        const block_q6_K* block = (const block_q6_K*)((const char*)base + d * row_bytes) + block_idx;
+
+        float d_scale = fp16_to_fp32(block->d);
+        int8_t sc = block->scales[scale_idx];
+
+        /* Extract 6-bit value: 4 bits from ql, 2 bits from qh */
+        int ql_byte_pos = is_second_half ? (pos_in_block - 128) / 2 : pos_in_block / 2;
+        uint8_t ql_byte = block->ql[ql_byte_pos];
+        int qh_byte_pos = is_second_half ? (pos_in_block - 128) / 4 : pos_in_block / 4;
+        uint8_t qh_byte = block->qh[qh_byte_pos];
+
+        int q4 = (pos_in_block % 2 == 0) ? (ql_byte & 0xF) : (ql_byte >> 4);
+        int q2_shift = (pos_in_block % 4) * 2;
+        int q2 = (qh_byte >> q2_shift) & 0x3;
+
+        int q6 = q4 | (q2 << 4);  /* Combine to 6-bit value */
+        q6 -= 32;  /* Center around 0 */
+
+        dst[d] = d_scale * sc * q6;
+    }
+}
+
 /* Dispatcher for transposed embedding extraction */
 static void extract_embedding_transposed(const void* src, float* dst,
                                           int dim, int vocab_size, int token, int type) {
@@ -1430,6 +1725,12 @@ static void extract_embedding_transposed(const void* src, float* dst,
             break;
         case 8:  /* Q8_0 */
             extract_embedding_q8_0_transposed(src, dst, dim, vocab_size, token);
+            break;
+        case 12: /* Q4_K */
+            extract_embedding_q4_k_transposed(src, dst, dim, vocab_size, token);
+            break;
+        case 14: /* Q6_K */
+            extract_embedding_q6_k_transposed(src, dst, dim, vocab_size, token);
             break;
         default:
             console_printf("[EMBD] Unsupported transposed type %d, using F32\n", type);
@@ -1595,6 +1896,7 @@ static void transformer_forward_stream(int token, int pos, int layer) {
 
             stream_dequant((const char*)g_weights.token_embd + offset,
                            g_state.x, dim, type);
+
         }
     }
 
@@ -1815,10 +2117,13 @@ int streaming_inference_init(bool preallocate) {
     g_state.layer_buf_size = g_cfg.hidden_dim * sizeof(float);
     g_state.layer_weights = (float*)heap_alloc(g_state.layer_buf_size);  /* init */
 
-    /* Pre-allocate quantized input buffer for matmul_q8_0_fused() at init time
-     * Worst-case size is hidden_dim (largest dimension used in matmuls) */
-    g_input_q8_size = g_cfg.hidden_dim / QK8_0;
+    /* Pre-allocate quantized input buffer for fused matmul at init time
+     * Worst-case size is vocab_size (32000) for output projection
+     * Also used for Q4_K fused matmul which processes larger matrices */
+    int max_cols = g_cfg.vocab_size > g_cfg.hidden_dim ? g_cfg.vocab_size : g_cfg.hidden_dim;
+    g_input_q8_size = max_cols / QK8_0;
     g_input_q8 = (block_q8_1*)heap_alloc(g_input_q8_size * sizeof(block_q8_1));  /* init */
+    console_printf("[STREAM] Q8 buffer: %d blocks for max %d elements\n", g_input_q8_size, max_cols);
 
     /* Check allocations */
     if (!g_state.x || !g_state.xb || !g_state.xb2 || !g_state.q ||
