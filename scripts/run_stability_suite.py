@@ -77,6 +77,13 @@ Examples:
     )
 
     parser.add_argument(
+        '--checkpoint-interval',
+        type=int,
+        default=None,
+        help='Checkpoint interval in seconds (overrides automatic calculation)'
+    )
+
+    parser.add_argument(
         '--resume',
         action='store_true',
         help='Resume from latest checkpoint if available'
@@ -133,7 +140,10 @@ def create_config(args) -> StabilityConfig:
 
     # Determine checkpoint interval based on duration
     checkpoint_interval = 0  # Disabled by default
-    if args.checkpoint_dir:
+    if args.checkpoint_interval is not None:
+        # Use explicit checkpoint interval if provided
+        checkpoint_interval = args.checkpoint_interval
+    elif args.checkpoint_dir:
         if args.duration <= 3600:  # 1 hour or less
             checkpoint_interval = 600  # Every 10 minutes
         elif args.duration <= 43200:  # 12 hours or less
