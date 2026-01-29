@@ -1,5 +1,9 @@
 # EMBODIOS - Bare-Metal AI Operating System
 
+[![Build](https://github.com/dddimcha/embodiOS/actions/workflows/kernel-ci.yml/badge.svg)](https://github.com/dddimcha/embodiOS/actions/workflows/kernel-ci.yml)
+[![License](https://img.shields.io/github/license/dddimcha/embodiOS)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/dddimcha/embodiOS?include_prereleases)](https://github.com/dddimcha/embodiOS/releases)
+
 Run LLMs directly on hardware without any OS overhead. No Linux. No userspace. Just transformers and bare metal.
 
 ## Quick Start
