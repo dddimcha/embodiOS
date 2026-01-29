@@ -28,9 +28,23 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 check_deps() {
     log "Checking dependencies..."
     
-    if ! command -v grub-mkrescue &> /dev/null && ! command -v grub2-mkrescue &> /dev/null; then
-        error "grub-mkrescue not found. Install: brew install grub (macOS) or apt install grub-pc-bin (Linux)"
+    # Find grub-mkrescue (different names on different systems)
+    GRUB_MKRESCUE=""
+    if command -v grub-mkrescue &> /dev/null; then
+        GRUB_MKRESCUE="grub-mkrescue"
+    elif command -v grub2-mkrescue &> /dev/null; then
+        GRUB_MKRESCUE="grub2-mkrescue"
+    elif command -v x86_64-elf-grub-mkrescue &> /dev/null; then
+        GRUB_MKRESCUE="x86_64-elf-grub-mkrescue"
+    elif command -v i686-elf-grub-mkrescue &> /dev/null; then
+        GRUB_MKRESCUE="i686-elf-grub-mkrescue"
     fi
+    
+    if [ -z "$GRUB_MKRESCUE" ]; then
+        error "grub-mkrescue not found. Install: brew install x86_64-elf-grub (macOS) or apt install grub-pc-bin (Linux)"
+    fi
+    
+    log "Using: $GRUB_MKRESCUE"
     
     if ! command -v xorriso &> /dev/null; then
         error "xorriso not found. Install: brew install xorriso (macOS) or apt install xorriso (Linux)"
@@ -43,6 +57,11 @@ check_deps() {
 build_kernel() {
     log "Building kernel with embedded model..."
     
+    # Convert to absolute path
+    if [[ "$MODEL" != /* ]]; then
+        MODEL="$ROOT_DIR/$MODEL"
+    fi
+    
     if [ ! -f "$MODEL" ]; then
         error "Model not found: $MODEL"
     fi
@@ -52,10 +71,21 @@ build_kernel() {
     
     cd "$KERNEL_DIR"
     make clean
+    
+    # Use absolute path for make
     make GGUF_MODEL="$MODEL"
     
     if [ ! -f "embodios.elf" ]; then
         error "Kernel build failed"
+    fi
+    
+    # Verify model was embedded by checking kernel size
+    KERNEL_SIZE=$(stat -f%z "embodios.elf" 2>/dev/null || stat -c%s "embodios.elf" 2>/dev/null)
+    if [ "$KERNEL_SIZE" -lt 10000000 ]; then
+        warn "Kernel is only $(du -h embodios.elf | cut -f1) - model may not be embedded!"
+        warn "Expected > 400MB for SmolLM model"
+    else
+        log "Kernel size: $(du -h embodios.elf | cut -f1) (model embedded)"
     fi
     
     log "Kernel built successfully"
@@ -148,13 +178,9 @@ build_iso() {
     
     mkdir -p "$(dirname "$OUTPUT")"
     
-    # Use grub-mkrescue or grub2-mkrescue
-    GRUB_CMD="grub-mkrescue"
-    if ! command -v grub-mkrescue &> /dev/null; then
-        GRUB_CMD="grub2-mkrescue"
-    fi
-    
-    $GRUB_CMD -o "$OUTPUT" "$ISO_DIR"
+    # GRUB_MKRESCUE is set in check_deps()
+    log "Running: $GRUB_MKRESCUE -o $OUTPUT $ISO_DIR"
+    $GRUB_MKRESCUE -o "$OUTPUT" "$ISO_DIR"
     
     if [ ! -f "$OUTPUT" ]; then
         error "ISO build failed"
