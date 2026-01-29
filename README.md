@@ -1,5 +1,9 @@
 # EMBODIOS - Bare-Metal AI Operating System
 
+[![Kernel CI](https://github.com/dddimcha/embodiOS/actions/workflows/kernel-ci.yml/badge.svg)](https://github.com/dddimcha/embodiOS/actions/workflows/kernel-ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/Status-95%25-brightgreen)](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis)
+
 Run LLMs directly on hardware without any OS overhead. No Linux. No userspace. Just transformers and bare metal.
 
 ## Quick Start
@@ -57,7 +61,6 @@ Commands:
 ```bash
 ./embodi iso                              # Without model
 ./embodi iso --model models/smollm.gguf   # With embedded model
-./embodi iso --model models/smollm.gguf --arch x86_64
 ```
 
 ### Run in QEMU
@@ -87,7 +90,6 @@ curl -L -o models/tinyllama-1.1b.gguf \
 ### Write to USB
 
 ```bash
-# Build ISO with model
 ./embodi iso --model models/smollm-135m.gguf
 
 # Write to USB (replace /dev/sdX with your device)
@@ -102,8 +104,6 @@ sudo dd if=build/embodios.iso of=/dev/sdX bs=4M status=progress conv=fsync
 4. EMBODIOS boots to AI shell
 
 ## Shell Commands
-
-Once booted:
 
 | Command | Description |
 |---------|-------------|
@@ -145,11 +145,12 @@ Any GGUF model from Ollama/HuggingFace should work.
 embodiOS/
 ├── embodi              # CLI tool
 ├── kernel/             # Kernel source
-│   ├── ai/             # AI runtime
-│   ├── core/           # Kernel core
-│   ├── drivers/        # Hardware drivers
+│   ├── ai/             # AI runtime (GGUF, tokenizer, inference)
+│   ├── core/           # Kernel core (console, scheduler)
+│   ├── drivers/        # Hardware drivers (PCI, NVMe, network)
+│   ├── mm/             # Memory management
 │   └── Makefile
-├── models/             # GGUF models
+├── models/             # GGUF models (download separately)
 ├── scripts/            # Build scripts
 └── build/              # Output (ISO, etc.)
 ```
@@ -169,6 +170,7 @@ embodiOS/
 - [Getting Started](https://github.com/dddimcha/embodiOS/wiki/Getting-Started)
 - [Console Commands](https://github.com/dddimcha/embodiOS/wiki/Console-Commands)
 - [Architecture](https://github.com/dddimcha/embodiOS/wiki/Architecture-Overview)
+- [Current State](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis)
 
 ## Contributing
 
@@ -180,6 +182,8 @@ git checkout -b feature/my-feature
 ./embodi test
 # Submit PR
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## License
 
