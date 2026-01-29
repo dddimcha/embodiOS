@@ -66,53 +66,149 @@ void command_processor_init(struct embodios_model *model)
 /* Enhanced command processing */
 void process_command(const char *command)
 {
+    /* Skip empty commands */
+    if (!command || command[0] == '\0') {
+        return;
+    }
+
     /* Basic built-in commands */
-    if (strcmp(command, "help") == 0) {
-        console_printf("\nEMBODIOS Commands:\n");
-        console_printf("================\n\n");
-        console_printf("AI:\n");
-        console_printf("  chat <message>  - Chat with the AI model\n");
-        console_printf("  benchmark       - Run inference benchmark\n");
-        console_printf("  deterministic   - Control deterministic timing mode\n");
+    if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
         console_printf("\n");
-        console_printf("System:\n");
-        console_printf("  help            - Show this help\n");
-        console_printf("  mem             - Show memory info\n");
-        console_printf("  heap            - Show heap stats\n");
-        console_printf("  memtest         - Run memory stress test\n");
-        console_printf("  lspci           - List PCI devices\n");
-        console_printf("  reboot          - Reboot system\n");
+        console_printf(" ╔════════════════════════════════════════╗\n");
+        console_printf(" ║         EMBODIOS Commands              ║\n");
+        console_printf(" ╚════════════════════════════════════════╝\n");
         console_printf("\n");
-        console_printf("Type 'help advanced' for all commands.\n");
-    } else if (strcmp(command, "help advanced") == 0) {
-        console_printf("\nAdvanced Commands:\n");
-        console_printf("==================\n\n");
-        console_printf("Model Management:\n");
-        console_printf("  models, model, model load/switch/unload\n");
+        console_printf(" [AI Chat]\n");
+        console_printf("   chat <message>   Chat with the AI model\n");
+        console_printf("   benchmark        Run inference benchmark\n");
+        console_printf("   status           Show AI model status\n");
         console_printf("\n");
-        console_printf("AI Inference (legacy):\n");
-        console_printf("  ai, infer, gguf, stream, ggufinit, streaminit, bpeinit, bpetest\n");
+        console_printf(" [System]\n");
+        console_printf("   mem              Show memory usage\n");
+        console_printf("   lspci            List PCI devices\n");
+        console_printf("   reboot           Reboot system\n");
         console_printf("\n");
-        console_printf("Hardware:\n");
-        console_printf("  dmatest, dmastats, pcitest, pcistats\n");
+        console_printf(" Type 'help all' for advanced commands.\n");
+        console_printf(" Type 'help ai' for AI-specific commands.\n");
         console_printf("\n");
-        console_printf("Storage:\n");
-        console_printf("  blkinfo, blktest, blkperf, blkread, blkdevs, loadmodel, loadtiny\n");
+    } else if (strcmp(command, "help ai") == 0) {
         console_printf("\n");
-        console_printf("Network:\n");
-        console_printf("  net, netinfo, nettest, ping <ip>\n");
+        console_printf(" [AI Commands]\n");
+        console_printf("   chat <msg>       Interactive chat (auto-initializes model)\n");
+        console_printf("   benchmark        Run inference benchmark with timing\n");
+        console_printf("   status           Show model info and readiness\n");
+        console_printf("   deterministic    Control real-time inference mode\n");
         console_printf("\n");
-        console_printf("Industrial Protocols:\n");
-        console_printf("  modbustest      - Run Modbus TCP integration test\n");
-        console_printf("  ethercattest    - Run EtherCAT frame processing test\n");
-        console_printf("  timingtest      - Verify industrial timing requirements\n");
+        console_printf(" [Advanced AI]\n");
+        console_printf("   stream <prompt>  Low-level streaming inference\n");
+        console_printf("   gguf <prompt>    GGUF format inference\n");
+        console_printf("   bpeinit          Initialize BPE tokenizer\n");
+        console_printf("   bpetest          Test tokenizer encode/decode\n");
         console_printf("\n");
-        console_printf("Testing:\n");
-        console_printf("  locktest, quanttest, quantbench, benchgguf, validate\n");
+        console_printf(" [Model Management]\n");
+        console_printf("   models           List loaded models\n");
+        console_printf("   model            Show active model info\n");
+        console_printf("   loadmodel        Load model from VirtIO disk\n");
         console_printf("\n");
-        console_printf("TVM Runtime:\n");
-        console_printf("  tvmload, tvmrun, tvmbench\n");
-    } else if (strncmp(command, "chat ", 5) == 0) {
+    } else if (strcmp(command, "help all") == 0 || strcmp(command, "help advanced") == 0) {
+        console_printf("\n");
+        console_printf(" [All Commands]\n\n");
+        console_printf(" Model Management:\n");
+        console_printf("   models             List all loaded models\n");
+        console_printf("   model              Show active model info\n");
+        console_printf("   model load <name>  Load embedded model by name\n");
+        console_printf("   model switch <id>  Switch to model by ID\n");
+        console_printf("   model unload <id>  Unload model by ID\n");
+        console_printf("\n");
+        console_printf(" AI Inference:\n");
+        console_printf("   chat <msg>         Interactive chat (recommended)\n");
+        console_printf("   stream <prompt>    Streaming inference\n");
+        console_printf("   gguf <prompt>      GGUF format inference\n");
+        console_printf("   ai <prompt>        TinyStories inference\n");
+        console_printf("   benchmark          Run performance benchmark\n");
+        console_printf("   validate           Validate model performance\n");
+        console_printf("   deterministic      Real-time timing control\n");
+        console_printf("\n");
+        console_printf(" Hardware:\n");
+        console_printf("   dmatest/dmastats   DMA subsystem tests/stats\n");
+        console_printf("   pcitest/pcistats   PCI subsystem tests/stats\n");
+        console_printf("   lspci              List PCI devices\n");
+        console_printf("\n");
+        console_printf(" Storage:\n");
+        console_printf("   blkinfo/blkdevs    Block device info\n");
+        console_printf("   blktest/blkperf    Block device tests\n");
+        console_printf("   blkread <sec> [n]  Read raw sectors\n");
+        console_printf("   loadmodel          Load model from disk\n");
+        console_printf("\n");
+        console_printf(" Network:\n");
+        console_printf("   net/netinfo        Network configuration\n");
+        console_printf("   nettest            Network self-tests\n");
+        console_printf("   ping <ip>          Ping remote host\n");
+        console_printf("\n");
+        console_printf(" Industrial:\n");
+        console_printf("   modbustest         Modbus TCP test\n");
+        console_printf("   ethercattest       EtherCAT frame test\n");
+        console_printf("   timingtest         Real-time timing verification\n");
+        console_printf("\n");
+        console_printf(" Testing:\n");
+        console_printf("   memtest/locktest   Memory and locking tests\n");
+        console_printf("   quanttest/bench    Quantization tests\n");
+        console_printf("   tvmload/run/bench  TVM runtime tests\n");
+        console_printf("\n");
+    } else if (strcmp(command, "status") == 0) {
+        /* System and AI status overview */
+        extern bool streaming_inference_is_ready(void);
+        extern int gguf_model_embedded(void);
+        extern const struct gguf_model_arch *gguf_parser_get_arch(void);
+        extern const uint8_t *get_embedded_gguf_model(size_t *out_size);
+
+        console_printf("\n");
+        console_printf(" ╔════════════════════════════════════════╗\n");
+        console_printf(" ║           EMBODIOS Status              ║\n");
+        console_printf(" ╚════════════════════════════════════════╝\n");
+        console_printf("\n");
+
+        /* AI Model Status */
+        console_printf(" [AI Model]\n");
+        if (gguf_model_embedded()) {
+            size_t model_size = 0;
+            get_embedded_gguf_model(&model_size);
+            console_printf("   Embedded Model:  Yes (%zu MB)\n", model_size / (1024*1024));
+        } else {
+            console_printf("   Embedded Model:  No\n");
+        }
+
+        if (gguf_parser_get_arch()) {
+            console_printf("   Model Loaded:    Yes\n");
+        } else {
+            console_printf("   Model Loaded:    No\n");
+        }
+
+        if (bpe_tokenizer_is_initialized()) {
+            console_printf("   Tokenizer:       Ready\n");
+        } else {
+            console_printf("   Tokenizer:       Not initialized\n");
+        }
+
+        if (streaming_inference_is_ready()) {
+            console_printf("   Inference:       Ready\n");
+        } else {
+            console_printf("   Inference:       Not initialized\n");
+        }
+
+        console_printf("\n");
+        console_printf(" [Memory]\n");
+        heap_stats();
+        console_printf("\n");
+
+        /* Quick tip */
+        if (!streaming_inference_is_ready()) {
+            console_printf(" Tip: Run 'chat <message>' to auto-initialize and start chatting.\n\n");
+        } else {
+            console_printf(" Tip: AI ready! Try 'chat Hello, world!'\n\n");
+        }
+
+    } else if (strncmp(command, "chat ", 5) == 0 || strcmp(command, "chat") == 0) {
         /* Simple unified chat command - auto-initializes everything */
         extern int streaming_inference_init(bool preallocate);
         extern bool streaming_inference_is_ready(void);
@@ -123,45 +219,59 @@ void process_command(const char *command)
         extern int gguf_model_embedded(void);
         extern const struct gguf_model_arch *gguf_parser_get_arch(void);
 
-        const char *prompt = command + 5;
+        const char *prompt = command + 4;
         while (*prompt == ' ') prompt++; /* Skip whitespace */
 
         if (*prompt == '\0') {
-            console_printf("Usage: chat <your message>\n");
-            console_printf("Example: chat Hello, how are you?\n");
+            console_printf("\n");
+            console_printf(" Usage: chat <your message>\n");
+            console_printf("\n");
+            console_printf(" Examples:\n");
+            console_printf("   chat Hello, how are you?\n");
+            console_printf("   chat Once upon a time\n");
+            console_printf("   chat Tell me a story\n");
+            console_printf("\n");
             return;
         }
 
         /* Auto-initialize: Load model if needed */
         if (!gguf_parser_get_arch()) {
             if (!gguf_model_embedded()) {
-                console_printf("Error: No AI model available\n");
+                console_printf("\n");
+                console_printf(" Error: No AI model available.\n");
+                console_printf(" Load a model with 'loadmodel' or embed one in the kernel.\n\n");
                 return;
             }
             size_t gguf_size = 0;
             const uint8_t *gguf_data = get_embedded_gguf_model(&gguf_size);
             if (!gguf_data || gguf_size == 0) {
-                console_printf("Error: Failed to get model data\n");
+                console_printf(" Error: Failed to access embedded model data.\n\n");
                 return;
             }
-            console_printf("Loading model...\n");
+            console_printf(" Loading AI model (%zu MB)...\n", gguf_size / (1024*1024));
             if (gguf_load_model((void *)gguf_data, gguf_size) < 0) {
-                console_printf("Error: Model load failed\n");
+                console_printf(" Error: Model parsing failed.\n\n");
                 return;
             }
+            console_printf(" Model loaded.\n");
         }
 
         /* Auto-initialize: BPE tokenizer */
         if (!bpe_tokenizer_is_initialized()) {
-            bpe_tokenizer_init();
+            console_printf(" Initializing tokenizer...\n");
+            if (bpe_tokenizer_init() != 0) {
+                console_printf(" Warning: Tokenizer init failed, using fallback.\n");
+            }
         }
 
         /* Auto-initialize: Inference engine */
         if (!streaming_inference_is_ready()) {
+            console_printf(" Initializing inference engine...\n");
             if (streaming_inference_init(false) != 0) {
-                console_printf("Error: Inference init failed\n");
+                console_printf(" Error: Inference engine failed to initialize.\n\n");
                 return;
             }
+            console_printf(" Ready!\n");
         }
 
         /* Tokenize */
@@ -175,8 +285,10 @@ void process_command(const char *command)
             prompt_len = 1;
         }
 
-        console_printf("\nYou: %s\n", prompt);
-        console_printf("AI: ");
+        console_printf("\n");
+        console_printf(" You: %s\n", prompt);
+        console_printf("\n");
+        console_printf(" AI:  ");
 
         /* Generate */
         int output_tokens[128];
@@ -195,10 +307,11 @@ void process_command(const char *command)
                     if (tok) console_printf("%s", tok);
                 }
             }
-            console_printf("\n\n");
+            console_printf("\n");
         } else {
-            console_printf("(no response)\n\n");
+            console_printf("(no response generated)\n");
         }
+        console_printf("\n");
     } else if (strncmp(command, "ai ", 3) == 0) {
         /* TinyStories interactive inference */
         const char *prompt = command + 3;
@@ -1712,8 +1825,33 @@ skip_ethercat:
     } else if (strcmp(command, "reboot") == 0) {
         console_printf("Rebooting...\n");
         arch_reboot();
+    } else if (strcmp(command, "clear") == 0 || strcmp(command, "cls") == 0) {
+        /* Clear screen using ANSI escape codes (works with serial terminals) */
+        console_printf("\033[2J\033[H");
+    } else if (strcmp(command, "version") == 0 || strcmp(command, "ver") == 0) {
+        extern const char* kernel_version;
+        extern const char* kernel_build;
+        console_printf("\n");
+        console_printf(" EMBODIOS %s\n", kernel_version);
+        console_printf(" Build: %s\n\n", kernel_build);
     } else {
-        console_printf("Unknown command: %s\n", command);
+        /* Unknown command - provide helpful suggestions */
+        console_printf("\n Unknown command: '%s'\n", command);
+
+        /* Check for common typos/similar commands */
+        if (strncmp(command, "ch", 2) == 0) {
+            console_printf(" Did you mean: chat <message>?\n");
+        } else if (strncmp(command, "he", 2) == 0) {
+            console_printf(" Did you mean: help?\n");
+        } else if (strncmp(command, "ben", 3) == 0) {
+            console_printf(" Did you mean: benchmark?\n");
+        } else if (strncmp(command, "mod", 3) == 0) {
+            console_printf(" Did you mean: models or model?\n");
+        } else if (strncmp(command, "mem", 3) == 0 && strcmp(command, "mem") != 0) {
+            console_printf(" Did you mean: mem or memtest?\n");
+        }
+
+        console_printf(" Type 'help' for available commands.\n\n");
     }
 }
 
