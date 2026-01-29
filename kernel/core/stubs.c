@@ -53,6 +53,47 @@ static int parse_int(const char *s)
     return result * sign;
 }
 
+/* Performance tracking for chat sessions */
+typedef struct {
+    uint64_t last_prefill_us;
+    uint64_t last_decode_us;
+    uint64_t last_total_us;
+    int last_prompt_tokens;
+    int last_generated_tokens;
+    uint64_t session_total_tokens;
+    uint64_t session_total_time_us;
+    int session_messages;
+    bool valid;
+} chat_perf_t;
+
+static chat_perf_t g_chat_perf = {0};
+
+/* rdtsc for timing */
+#if defined(__x86_64__)
+static inline uint64_t chat_get_cycles(void) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+#elif defined(__aarch64__)
+static inline uint64_t chat_get_cycles(void) {
+    uint64_t val;
+    __asm__ volatile ("mrs %0, cntvct_el0" : "=r"(val));
+    return val;
+}
+#else
+static inline uint64_t chat_get_cycles(void) { return 0; }
+#endif
+
+/* Convert cycles to microseconds (approximate) */
+static inline uint64_t chat_cycles_to_us(uint64_t cycles) {
+#if defined(__aarch64__)
+    return cycles / 1000;  /* HVF uses 1GHz virtual timer */
+#else
+    return cycles / 2000;  /* Approximate for ~2GHz x86 */
+#endif
+}
+
 /* Command processor implementation */
 void command_processor_init(struct embodios_model *model)
 {
@@ -79,8 +120,9 @@ void process_command(const char *command)
         console_printf(" ╚════════════════════════════════════════╝\n");
         console_printf("\n");
         console_printf(" [AI Chat]\n");
-        console_printf("   chat <message>   Chat with the AI model\n");
-        console_printf("   benchmark        Run inference benchmark\n");
+        console_printf("   talk             Enter interactive chat mode\n");
+        console_printf("   chat <message>   Single message chat\n");
+        console_printf("   perf             Show last chat performance\n");
         console_printf("   status           Show AI model status\n");
         console_printf("\n");
         console_printf(" [System]\n");
@@ -93,22 +135,25 @@ void process_command(const char *command)
         console_printf("\n");
     } else if (strcmp(command, "help ai") == 0) {
         console_printf("\n");
-        console_printf(" [AI Commands]\n");
-        console_printf("   chat <msg>       Interactive chat (auto-initializes model)\n");
-        console_printf("   benchmark        Run inference benchmark with timing\n");
-        console_printf("   status           Show model info and readiness\n");
-        console_printf("   deterministic    Control real-time inference mode\n");
+        console_printf(" [Interactive Chat]\n");
+        console_printf("   talk             Enter chat mode (type 'exit' to leave)\n");
+        console_printf("   chat <msg>       Single message (for scripting)\n");
         console_printf("\n");
-        console_printf(" [Advanced AI]\n");
+        console_printf(" [Performance]\n");
+        console_printf("   perf             Show last chat timing stats\n");
+        console_printf("   benchmark        Full inference benchmark\n");
+        console_printf("   deterministic    Control real-time timing mode\n");
+        console_printf("\n");
+        console_printf(" [Status]\n");
+        console_printf("   status           Show model/tokenizer/engine status\n");
+        console_printf("   models           List all loaded models\n");
+        console_printf("   model            Show active model details\n");
+        console_printf("\n");
+        console_printf(" [Advanced]\n");
         console_printf("   stream <prompt>  Low-level streaming inference\n");
         console_printf("   gguf <prompt>    GGUF format inference\n");
-        console_printf("   bpeinit          Initialize BPE tokenizer\n");
-        console_printf("   bpetest          Test tokenizer encode/decode\n");
-        console_printf("\n");
-        console_printf(" [Model Management]\n");
-        console_printf("   models           List loaded models\n");
-        console_printf("   model            Show active model info\n");
-        console_printf("   loadmodel        Load model from VirtIO disk\n");
+        console_printf("   bpeinit/bpetest  Tokenizer init/test\n");
+        console_printf("   loadmodel        Load model from disk\n");
         console_printf("\n");
     } else if (strcmp(command, "help all") == 0 || strcmp(command, "help advanced") == 0) {
         console_printf("\n");
@@ -121,12 +166,12 @@ void process_command(const char *command)
         console_printf("   model unload <id>  Unload model by ID\n");
         console_printf("\n");
         console_printf(" AI Inference:\n");
-        console_printf("   chat <msg>         Interactive chat (recommended)\n");
-        console_printf("   stream <prompt>    Streaming inference\n");
+        console_printf("   talk               Interactive chat session\n");
+        console_printf("   chat <msg>         Single message chat\n");
+        console_printf("   perf               Show last chat performance\n");
+        console_printf("   benchmark          Full inference benchmark\n");
+        console_printf("   stream <prompt>    Low-level streaming inference\n");
         console_printf("   gguf <prompt>      GGUF format inference\n");
-        console_printf("   ai <prompt>        TinyStories inference\n");
-        console_printf("   benchmark          Run performance benchmark\n");
-        console_printf("   validate           Validate model performance\n");
         console_printf("   deterministic      Real-time timing control\n");
         console_printf("\n");
         console_printf(" Hardware:\n");
@@ -208,8 +253,197 @@ void process_command(const char *command)
             console_printf(" Tip: AI ready! Try 'chat Hello, world!'\n\n");
         }
 
+    } else if (strcmp(command, "perf") == 0) {
+        /* Show performance stats from last chat */
+        if (!g_chat_perf.valid) {
+            console_printf("\n No chat performance data yet. Run 'chat' or 'talk' first.\n\n");
+            return;
+        }
+
+        console_printf("\n");
+        console_printf(" ╔════════════════════════════════════════╗\n");
+        console_printf(" ║        Chat Performance Stats          ║\n");
+        console_printf(" ╚════════════════════════════════════════╝\n");
+        console_printf("\n");
+        console_printf(" [Last Message]\n");
+        console_printf("   Prompt tokens:     %d\n", g_chat_perf.last_prompt_tokens);
+        console_printf("   Generated tokens:  %d\n", g_chat_perf.last_generated_tokens);
+        console_printf("   Total time:        %llu ms\n", (unsigned long long)(g_chat_perf.last_total_us / 1000));
+
+        if (g_chat_perf.last_generated_tokens > 0) {
+            uint64_t tokens_per_sec = (g_chat_perf.last_generated_tokens * 1000000ULL) / g_chat_perf.last_total_us;
+            console_printf("   Throughput:        %llu tok/s\n", (unsigned long long)tokens_per_sec);
+        }
+
+        if (g_chat_perf.session_messages > 1) {
+            console_printf("\n [Session Totals]\n");
+            console_printf("   Messages:          %d\n", g_chat_perf.session_messages);
+            console_printf("   Total tokens:      %llu\n", (unsigned long long)g_chat_perf.session_total_tokens);
+            console_printf("   Total time:        %llu ms\n", (unsigned long long)(g_chat_perf.session_total_time_us / 1000));
+            if (g_chat_perf.session_total_tokens > 0) {
+                uint64_t avg_tps = (g_chat_perf.session_total_tokens * 1000000ULL) / g_chat_perf.session_total_time_us;
+                console_printf("   Avg throughput:    %llu tok/s\n", (unsigned long long)avg_tps);
+            }
+        }
+
+        console_printf("\n Tip: Run 'benchmark' for detailed timing breakdown.\n\n");
+
+    } else if (strcmp(command, "talk") == 0) {
+        /* Interactive chat mode */
+        extern int streaming_inference_init(bool preallocate);
+        extern bool streaming_inference_is_ready(void);
+        extern int streaming_inference_generate(const int *, int, int *, int);
+        extern const char *streaming_inference_get_token(int);
+        extern const uint8_t *get_embedded_gguf_model(size_t *out_size);
+        extern int gguf_load_model(void *data, size_t size);
+        extern int gguf_model_embedded(void);
+        extern const struct gguf_model_arch *gguf_parser_get_arch(void);
+
+        console_printf("\n");
+        console_printf(" ╔════════════════════════════════════════╗\n");
+        console_printf(" ║         EMBODIOS Chat Mode             ║\n");
+        console_printf(" ╚════════════════════════════════════════╝\n");
+        console_printf("\n");
+        console_printf(" Type your message and press Enter.\n");
+        console_printf(" Commands: 'exit' to leave, 'perf' for stats\n");
+        console_printf("\n");
+
+        /* Auto-initialize everything */
+        if (!gguf_parser_get_arch()) {
+            if (!gguf_model_embedded()) {
+                console_printf(" Error: No AI model available.\n\n");
+                return;
+            }
+            size_t gguf_size = 0;
+            const uint8_t *gguf_data = get_embedded_gguf_model(&gguf_size);
+            if (!gguf_data || gguf_size == 0) {
+                console_printf(" Error: Failed to access model data.\n\n");
+                return;
+            }
+            console_printf(" Loading model (%zu MB)...", gguf_size / (1024*1024));
+            console_flush();
+            if (gguf_load_model((void *)gguf_data, gguf_size) < 0) {
+                console_printf(" failed.\n\n");
+                return;
+            }
+            console_printf(" done.\n");
+        }
+
+        if (!bpe_tokenizer_is_initialized()) {
+            console_printf(" Initializing tokenizer...");
+            console_flush();
+            bpe_tokenizer_init();
+            console_printf(" done.\n");
+        }
+
+        if (!streaming_inference_is_ready()) {
+            console_printf(" Initializing inference engine...");
+            console_flush();
+            if (streaming_inference_init(false) != 0) {
+                console_printf(" failed.\n\n");
+                return;
+            }
+            console_printf(" done.\n");
+        }
+
+        console_printf("\n Ready! Start chatting.\n\n");
+
+        /* Reset session stats */
+        g_chat_perf.session_messages = 0;
+        g_chat_perf.session_total_tokens = 0;
+        g_chat_perf.session_total_time_us = 0;
+
+        /* Chat loop */
+        char input_buf[256];
+        while (1) {
+            console_printf("You> ");
+            console_readline(input_buf, sizeof(input_buf));
+
+            /* Check for exit commands */
+            if (strcmp(input_buf, "exit") == 0 || strcmp(input_buf, "quit") == 0 ||
+                strcmp(input_buf, "q") == 0 || strcmp(input_buf, "/exit") == 0) {
+                break;
+            }
+
+            /* Show perf inline */
+            if (strcmp(input_buf, "perf") == 0 || strcmp(input_buf, "/perf") == 0) {
+                if (g_chat_perf.valid && g_chat_perf.session_messages > 0) {
+                    console_printf("\n [Session: %d msgs, %llu tokens, %llu tok/s avg]\n\n",
+                        g_chat_perf.session_messages,
+                        (unsigned long long)g_chat_perf.session_total_tokens,
+                        g_chat_perf.session_total_time_us > 0 ?
+                            (unsigned long long)((g_chat_perf.session_total_tokens * 1000000ULL) / g_chat_perf.session_total_time_us) : 0);
+                } else {
+                    console_printf("\n [No stats yet]\n\n");
+                }
+                continue;
+            }
+
+            /* Skip empty input */
+            if (input_buf[0] == '\0') continue;
+
+            /* Tokenize */
+            int prompt_tokens[256];
+            int prompt_len = 0;
+            if (bpe_tokenizer_is_initialized()) {
+                prompt_len = bpe_tokenizer_encode(input_buf, prompt_tokens, 256, false, false);
+            }
+            if (prompt_len <= 0) {
+                prompt_tokens[0] = 1;
+                prompt_len = 1;
+            }
+
+            /* Generate with timing */
+            uint64_t start = chat_get_cycles();
+
+            int output_tokens[128];
+            int generated = streaming_inference_generate(prompt_tokens, prompt_len, output_tokens, 50);
+
+            uint64_t end = chat_get_cycles();
+            uint64_t elapsed_us = chat_cycles_to_us(end - start);
+
+            /* Display response */
+            console_printf("\nAI>  ");
+            if (generated > 0) {
+                char decoded[512];
+                int len = bpe_tokenizer_decode(output_tokens, generated, decoded, sizeof(decoded));
+                if (len > 0) {
+                    console_printf("%s", decoded);
+                } else {
+                    for (int i = 0; i < generated; i++) {
+                        const char *tok = streaming_inference_get_token(output_tokens[i]);
+                        if (tok) console_printf("%s", tok);
+                    }
+                }
+            } else {
+                console_printf("(no response)");
+            }
+            console_printf("\n\n");
+
+            /* Update perf stats */
+            g_chat_perf.last_prompt_tokens = prompt_len;
+            g_chat_perf.last_generated_tokens = generated;
+            g_chat_perf.last_total_us = elapsed_us;
+            g_chat_perf.session_messages++;
+            g_chat_perf.session_total_tokens += generated;
+            g_chat_perf.session_total_time_us += elapsed_us;
+            g_chat_perf.valid = true;
+        }
+
+        /* Show session summary */
+        console_printf("\n");
+        console_printf(" ────────────────────────────────────────\n");
+        console_printf(" Session ended.\n");
+        if (g_chat_perf.session_messages > 0) {
+            console_printf(" Messages: %d | Tokens: %llu | Time: %llu ms\n",
+                g_chat_perf.session_messages,
+                (unsigned long long)g_chat_perf.session_total_tokens,
+                (unsigned long long)(g_chat_perf.session_total_time_us / 1000));
+        }
+        console_printf(" ────────────────────────────────────────\n\n");
+
     } else if (strncmp(command, "chat ", 5) == 0 || strcmp(command, "chat") == 0) {
-        /* Simple unified chat command - auto-initializes everything */
+        /* Single message chat command */
         extern int streaming_inference_init(bool preallocate);
         extern bool streaming_inference_is_ready(void);
         extern int streaming_inference_generate(const int *, int, int *, int);
@@ -220,58 +454,50 @@ void process_command(const char *command)
         extern const struct gguf_model_arch *gguf_parser_get_arch(void);
 
         const char *prompt = command + 4;
-        while (*prompt == ' ') prompt++; /* Skip whitespace */
+        while (*prompt == ' ') prompt++;
 
         if (*prompt == '\0') {
             console_printf("\n");
-            console_printf(" Usage: chat <your message>\n");
+            console_printf(" Usage: chat <message>   (single message)\n");
+            console_printf("        talk             (interactive mode)\n");
             console_printf("\n");
-            console_printf(" Examples:\n");
-            console_printf("   chat Hello, how are you?\n");
-            console_printf("   chat Once upon a time\n");
-            console_printf("   chat Tell me a story\n");
-            console_printf("\n");
+            console_printf(" Example: chat Hello, how are you?\n\n");
             return;
         }
 
-        /* Auto-initialize: Load model if needed */
+        /* Auto-initialize (silent if already ready) */
         if (!gguf_parser_get_arch()) {
             if (!gguf_model_embedded()) {
-                console_printf("\n");
-                console_printf(" Error: No AI model available.\n");
-                console_printf(" Load a model with 'loadmodel' or embed one in the kernel.\n\n");
+                console_printf(" Error: No AI model available.\n\n");
                 return;
             }
             size_t gguf_size = 0;
             const uint8_t *gguf_data = get_embedded_gguf_model(&gguf_size);
             if (!gguf_data || gguf_size == 0) {
-                console_printf(" Error: Failed to access embedded model data.\n\n");
+                console_printf(" Error: Failed to access model.\n\n");
                 return;
             }
-            console_printf(" Loading AI model (%zu MB)...\n", gguf_size / (1024*1024));
+            console_printf(" Loading model...");
+            console_flush();
             if (gguf_load_model((void *)gguf_data, gguf_size) < 0) {
-                console_printf(" Error: Model parsing failed.\n\n");
+                console_printf(" failed.\n\n");
                 return;
             }
-            console_printf(" Model loaded.\n");
+            console_printf(" OK\n");
         }
 
-        /* Auto-initialize: BPE tokenizer */
         if (!bpe_tokenizer_is_initialized()) {
-            console_printf(" Initializing tokenizer...\n");
-            if (bpe_tokenizer_init() != 0) {
-                console_printf(" Warning: Tokenizer init failed, using fallback.\n");
-            }
+            bpe_tokenizer_init();
         }
 
-        /* Auto-initialize: Inference engine */
         if (!streaming_inference_is_ready()) {
-            console_printf(" Initializing inference engine...\n");
+            console_printf(" Initializing...");
+            console_flush();
             if (streaming_inference_init(false) != 0) {
-                console_printf(" Error: Inference engine failed to initialize.\n\n");
+                console_printf(" failed.\n\n");
                 return;
             }
-            console_printf(" Ready!\n");
+            console_printf(" OK\n");
         }
 
         /* Tokenize */
@@ -281,37 +507,43 @@ void process_command(const char *command)
             prompt_len = bpe_tokenizer_encode(prompt, prompt_tokens, 256, false, false);
         }
         if (prompt_len <= 0) {
-            prompt_tokens[0] = 1; /* BOS fallback */
+            prompt_tokens[0] = 1;
             prompt_len = 1;
         }
 
-        console_printf("\n");
-        console_printf(" You: %s\n", prompt);
-        console_printf("\n");
-        console_printf(" AI:  ");
+        /* Generate with timing */
+        uint64_t start = chat_get_cycles();
 
-        /* Generate */
         int output_tokens[128];
         int generated = streaming_inference_generate(prompt_tokens, prompt_len, output_tokens, 50);
 
+        uint64_t end = chat_get_cycles();
+        uint64_t elapsed_us = chat_cycles_to_us(end - start);
+
+        /* Display response */
+        console_printf("\n");
         if (generated > 0) {
-            /* Decode tokens to readable text */
             char decoded[512];
             int len = bpe_tokenizer_decode(output_tokens, generated, decoded, sizeof(decoded));
             if (len > 0) {
-                console_printf("%s", decoded);
+                console_printf("%s\n", decoded);
             } else {
-                /* Fallback to raw tokens */
                 for (int i = 0; i < generated; i++) {
                     const char *tok = streaming_inference_get_token(output_tokens[i]);
                     if (tok) console_printf("%s", tok);
                 }
+                console_printf("\n");
             }
-            console_printf("\n");
         } else {
-            console_printf("(no response generated)\n");
+            console_printf("(no response)\n");
         }
         console_printf("\n");
+
+        /* Update perf stats */
+        g_chat_perf.last_prompt_tokens = prompt_len;
+        g_chat_perf.last_generated_tokens = generated;
+        g_chat_perf.last_total_us = elapsed_us;
+        g_chat_perf.valid = true;
     } else if (strncmp(command, "ai ", 3) == 0) {
         /* TinyStories interactive inference */
         const char *prompt = command + 3;
