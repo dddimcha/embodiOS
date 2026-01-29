@@ -10,14 +10,14 @@
 
 ## What's New (January 2026)
 
-- **Stability Testing Suite:** Automated long-running tests (1h-72h) for detecting memory leaks and performance degradation
+- **Interactive Chat Mode:** `talk` command for dedicated conversation sessions with performance tracking
+- **Performance Stats:** Separate `perf` command to view timing metrics without cluttering chat
+- **Console UX:** Polished help system with categories, status display, command suggestions
+- **Production ISO Builder:** One-click bootable ISO with GRUB menu
+- **Stability Testing Suite:** Automated long-running tests (1h-72h) for memory leak detection
 - **Secure Boot:** UEFI Secure Boot support with signed kernel validation
-- **NVMe Driver:** Direct SSD access for model loading
-- **Streaming Inference:** Memory-efficient inference engine
-- **Network Stack:** VirtIO-net, e1000e, TCP/IP foundations
-- **GDB Stub:** Kernel debugging support
-- **ARM64 Support:** Raspberry Pi 5 boot sequence
-- **Fixed-Point Ops:** Integer math for quantized models
+- **Streaming Inference:** Memory-efficient inference engine with parallel workers
+- **Industrial Protocols:** Modbus TCP and EtherCAT support for real-time automation
 
 ## Current Status
 
@@ -53,17 +53,33 @@ make
 qemu-system-x86_64 -kernel embodios.elf -m 256M -serial stdio
 ```
 
-### Shell Commands
+### Chat with AI
 
 ```bash
-EMBODIOS> help           # Show available commands
-EMBODIOS> models         # List loaded AI models
-EMBODIOS> model load tinystories   # Load TinyStories model
-EMBODIOS> ai Hello       # Generate text with AI
-EMBODIOS> bpeinit        # Initialize BPE tokenizer from GGUF
-EMBODIOS> mem            # Show memory stats
-EMBODIOS> lspci          # List PCI devices
+> talk                   # Enter interactive chat mode (recommended!)
+You> Hello, how are you?
+AI>  Hello! I'm doing well. How can I help you today?
+You> perf                # Check performance inline
+ [Session: 1 msgs, 15 tokens, 127 tok/s avg]
+You> exit                # Leave chat mode
+
+> chat Hello world       # Single message (for scripting)
+> perf                   # View detailed performance stats
+> status                 # Check AI readiness
 ```
+
+### System Commands
+
+```bash
+> help                   # Show available commands
+> help ai                # AI-specific commands  
+> help all               # All commands
+> benchmark              # Full inference benchmark
+> mem                    # Show memory stats
+> lspci                  # List PCI devices
+```
+
+See the **[Console Commands Reference](https://github.com/dddimcha/embodiOS/wiki/Console-Commands)** for all commands.
 
 ## Key Features
 
@@ -114,9 +130,11 @@ Full documentation available on the [EMBODIOS Wiki](https://github.com/dddimcha/
 
 ### Quick Start Guides
 - [Getting Started](https://github.com/dddimcha/embodiOS/wiki/Getting-Started) - Installation and first steps
+- [Console Commands](https://github.com/dddimcha/embodiOS/wiki/Console-Commands) - **Complete command reference**
 - [Modelfile Reference](https://github.com/dddimcha/embodiOS/wiki/Modelfile-Reference) - Model configuration
 - [Hardware Requirements](https://github.com/dddimcha/embodiOS/wiki/Hardware-Requirements) - Supported hardware
 - [API Reference](https://github.com/dddimcha/embodiOS/wiki/API-Reference) - API documentation
+- [Contributing](https://github.com/dddimcha/embodiOS/wiki/Contributing) - How to contribute
 
 ### Technical Deep Dives
 - [Architecture Overview](https://github.com/dddimcha/embodiOS/wiki/Architecture-Overview) - System architecture
