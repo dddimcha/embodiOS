@@ -9,6 +9,11 @@
 #include "embodios/console.h"
 #include "embodios/mm.h"
 #include "embodios/tvm.h"
+#include "embodios/fixed_point.h"
+
+/* SIMD matrix multiplication from simd_ops.c */
+extern void matmul_neon(const fixed_t* a, const fixed_t* b, fixed_t* out,
+                        size_t m, size_t k, size_t n);
 
 /* Cache line size for optimization */
 #define CACHE_LINE_SIZE 64
@@ -86,24 +91,73 @@ void tensor_gemm(float* A, float* B, float* C,
 }
 
 /* Optimized dense layer forward pass */
-void tensor_dense_forward(TVMTensor* input, TVMTensor* weight, 
+void tensor_dense_forward(TVMTensor* input, TVMTensor* weight,
                          TVMTensor* bias, TVMTensor* output)
 {
     /* Extract dimensions */
     int batch_size = input->shape[0];
     int in_features = input->shape[1];
     int out_features = weight->shape[0];
-    
+
     float* in_data = (float*)input->data;
     float* weight_data = (float*)weight->data;
     float* bias_data = bias ? (float*)bias->data : NULL;
     float* out_data = (float*)output->data;
-    
-    /* Use optimized GEMM */
-    tensor_gemm(in_data, weight_data, out_data,
-                batch_size, out_features, in_features,
-                1.0f, 0.0f);
-    
+
+    /* Calculate buffer sizes */
+    size_t in_size = (size_t)batch_size * in_features;
+    size_t weight_size = (size_t)in_features * out_features;
+    size_t out_size = (size_t)batch_size * out_features;
+
+    /* Allocate fixed-point buffers for SIMD */
+    fixed_t* in_fixed = (fixed_t*)kmalloc(in_size * sizeof(fixed_t));
+    fixed_t* weight_fixed = (fixed_t*)kmalloc(weight_size * sizeof(fixed_t));
+    fixed_t* out_fixed = (fixed_t*)kmalloc(out_size * sizeof(fixed_t));
+
+    if (!in_fixed || !weight_fixed || !out_fixed) {
+        /* Fallback to scalar on allocation failure */
+        if (in_fixed) kfree(in_fixed);
+        if (weight_fixed) kfree(weight_fixed);
+        if (out_fixed) kfree(out_fixed);
+
+        tensor_gemm(in_data, weight_data, out_data,
+                    batch_size, out_features, in_features,
+                    1.0f, 0.0f);
+
+        if (bias_data) {
+            for (int i = 0; i < batch_size; i++) {
+                for (int j = 0; j < out_features; j++) {
+                    out_data[i * out_features + j] += bias_data[j];
+                }
+            }
+        }
+        return;
+    }
+
+    /* Convert input to fixed-point Q16.16 */
+    for (size_t i = 0; i < in_size; i++) {
+        in_fixed[i] = FLOAT_TO_FIXED(in_data[i]);
+    }
+
+    /* Convert weights to fixed-point Q16.16 */
+    for (size_t i = 0; i < weight_size; i++) {
+        weight_fixed[i] = FLOAT_TO_FIXED(weight_data[i]);
+    }
+
+    /* Use SIMD-accelerated NEON matrix multiplication (~4x faster) */
+    matmul_neon(in_fixed, weight_fixed, out_fixed,
+                batch_size, in_features, out_features);
+
+    /* Convert output back to float */
+    for (size_t i = 0; i < out_size; i++) {
+        out_data[i] = FIXED_TO_FLOAT(out_fixed[i]);
+    }
+
+    /* Free fixed-point buffers */
+    kfree(in_fixed);
+    kfree(weight_fixed);
+    kfree(out_fixed);
+
     /* Add bias if present */
     if (bias_data) {
         for (int i = 0; i < batch_size; i++) {
