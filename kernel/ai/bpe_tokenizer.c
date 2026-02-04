@@ -520,8 +520,26 @@ int bpe_tokenizer_decode(const int *tokens, int n_tokens, char *text, int max_le
                         text[pos++] = token_text[j];
                     }
                 } else {
-                    /* Copy token text directly */
+                    /* Copy token text, converting GPT-2 special chars:
+                     * Ġ (U+0120 = 0xC4 0xA0) -> space
+                     * Ċ (U+010A = 0xC4 0x8A) -> newline
+                     */
                     for (size_t j = 0; j < len && pos < max_len - 1; j++) {
+                        uint8_t c = (uint8_t)token_text[j];
+                        if (c == 0xC4 && j + 1 < len) {
+                            uint8_t c2 = (uint8_t)token_text[j + 1];
+                            if (c2 == 0xA0) {
+                                /* Ġ -> space */
+                                text[pos++] = ' ';
+                                j++;
+                                continue;
+                            } else if (c2 == 0x8A) {
+                                /* Ċ -> newline */
+                                text[pos++] = '\n';
+                                j++;
+                                continue;
+                            }
+                        }
                         text[pos++] = token_text[j];
                     }
                 }
