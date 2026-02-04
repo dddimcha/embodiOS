@@ -27,6 +27,14 @@ SECTIONS
         *(.data.*)
     }
 
+    /* C++ constructors / init_array for global constructors */
+    .init_array : {
+        __init_array_start = .;
+        KEEP(*(.init_array))
+        KEEP(*(.ctors))
+        __init_array_end = .;
+    }
+
     .bss : {
         . = ALIGN(16);
         __bss_start = .;

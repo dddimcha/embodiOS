@@ -95,3 +95,8 @@ void arch_interrupt_init(void)
      */
     uart_puts("GIC: Not yet implemented (single-threaded mode)\n");
 }
+/* SMP initialization stub (single-core for now) */
+void arch_smp_init(void)
+{
+    /* ARM64 SMP not yet implemented */
+}
