@@ -1,0 +1,97 @@
+{
+  "$schema": "https://fundingjson.org/schema/v1.1.0.json",
+  "version": "v1.1.0",
+  "entity": {
+    "type": "individual",
+    "role": "maintainer",
+    "name": "dddimcha",
+    "email": "contact@embodios.dev",
+    "description": "Primary maintainer of embodiOS, a bare-metal AI operating system focused on deterministic, low-latency local LLM inference by minimizing OS-induced interference, especially Time To First Token (TTFT) and latency jitter.",
+    "webpageUrl": {
+      "url": "https://embodios.dev",
+      "wellKnown": ""
+    }
+  },
+  "projects": [
+    {
+      "guid": "embodios",
+      "name": "embodiOS",
+      "description": "embodiOS is a bare-metal AI operating system where AI inference is a first-class primitive. The project focuses on reducing end-to-end inference latency by collapsing Time To First Token (TTFT) and minimizing jitter, rather than optimizing decode throughput alone. This enables fast reaction times for embodied AI, robotics, and dedicated local inference devices.",
+      "webpageUrl": {
+        "url": "https://embodios.dev",
+        "wellKnown": ""
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/dddimcha/embodiOS",
+        "wellKnown": ""
+      },
+      "licenses": [
+        "spdx:Apache-2.0"
+      ],
+      "tags": [
+        "operating-systems",
+        "bare-metal",
+        "ai-systems",
+        "llm-inference",
+        "real-time-systems",
+        "robotics",
+        "embedded-systems",
+        "latency",
+        "determinism",
+        "performance"
+      ]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "bank",
+        "type": "bank",
+        "address": "mailto:contact@embodios.dev",
+        "description": "Primary channel for grants and contracts. Contact via email to coordinate payment or invoicing."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "full-time-maintainer",
+        "status": "active",
+        "name": "Full-time core maintainer",
+        "description": "Funds full-time development and maintenance of embodiOS, including kernel/runtime engineering to reduce TTFT and jitter, deterministic scheduling and memory behavior, GGUF inference robustness, real-hardware validation, releases, documentation, and contributor support.",
+        "amount": 120000,
+        "currency": "USD",
+        "frequency": "yearly",
+        "channels": ["bank"]
+      },
+      {
+        "guid": "core-development",
+        "status": "active",
+        "name": "Core development support",
+        "description": "Partial support for core development such as on-the-fly model loading, benchmarking infrastructure (TTFT/TPS/throughput/jitter), and expanded hardware support.",
+        "amount": 50000,
+        "currency": "USD",
+        "frequency": "yearly",
+        "channels": ["bank"]
+      },
+      {
+        "guid": "maintenance-releases",
+        "status": "active",
+        "name": "Maintenance and release engineering",
+        "description": "Support for bug fixes, CI and benchmarking upkeep, release automation, and documentation improvements.",
+        "amount": 25000,
+        "currency": "USD",
+        "frequency": "yearly",
+        "channels": ["bank"]
+      },
+      {
+        "guid": "goodwill",
+        "status": "active",
+        "name": "Goodwill / any amount",
+        "description": "Support embodiOS with any amount to help sustain long-term open-source development.",
+        "amount": 0,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": ["bank"]
+      }
+    ]
+  }
+}
