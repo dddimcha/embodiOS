@@ -1,0 +1,274 @@
+/* EMBODIOS x86_64 CPU Detection and Management */
+#include <embodios/cpu.h>
+#include <embodios/hal_cpu.h>
+#include <embodios/types.h>
+#include <embodios/console.h>
+#include "vga_io.h"
+
+/* Debug serial output for cpu.c */
+static inline void cpu_debug_char(char c) {
+    while (!(inb(0x3FD) & 0x20));
+    outb(0x3F8, c);
+}
+
+/* CPUID functions */
+#define CPUID_VENDOR        0x00000000
+#define CPUID_FEATURES      0x00000001
+#define CPUID_EXT_MAX       0x80000000
+#define CPUID_EXT_FEATURES  0x80000001
+#define CPUID_BRAND_STRING  0x80000002
+
+/* Feature bits */
+#define CPUID_FEAT_EDX_FPU      (1 << 0)
+#define CPUID_FEAT_EDX_SSE      (1 << 25)
+#define CPUID_FEAT_EDX_SSE2     (1 << 26)
+#define CPUID_FEAT_ECX_SSE3     (1 << 0)
+#define CPUID_FEAT_ECX_SSSE3    (1 << 9)
+#define CPUID_FEAT_ECX_SSE41    (1 << 19)
+#define CPUID_FEAT_ECX_SSE42    (1 << 20)
+#define CPUID_FEAT_ECX_AVX      (1 << 28)
+#define CPUID_FEAT7_EBX_AVX2    (1 << 5)
+#define CPUID_FEAT7_EBX_AVX512F (1 << 16)
+
+static struct cpu_info cpu_info;
+
+/* Forward declarations for HAL interface */
+static bool cpu_sse2_available(void);
+static const char* cpu_get_sse_status(void);
+
+/* Execute CPUID instruction */
+static inline void cpuid(uint32_t func, uint32_t* eax, uint32_t* ebx, 
+                        uint32_t* ecx, uint32_t* edx)
+{
+    __asm__ volatile("cpuid"
+        : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
+        : "a"(func), "c"(0));
+}
+
+/* Read timestamp counter */
+uint64_t cpu_get_timestamp(void)
+{
+    uint32_t low, high;
+    __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
+    return ((uint64_t)high << 32) | low;
+}
+
+/* Get CPU ID (APIC ID) */
+uint32_t cpu_get_id(void)
+{
+    uint32_t eax, ebx, ecx, edx;
+    cpuid(1, &eax, &ebx, &ecx, &edx);
+    return (ebx >> 24) & 0xFF;
+}
+
+/* Initialize CPU detection */
+void cpu_init(void)
+{
+    uint32_t eax, ebx, ecx, edx;
+
+    /* Get vendor string */
+    cpuid(CPUID_VENDOR, &eax, &ebx, &ecx, &edx);
+    *((uint32_t*)&cpu_info.vendor[0]) = ebx;
+    *((uint32_t*)&cpu_info.vendor[4]) = edx;
+    *((uint32_t*)&cpu_info.vendor[8]) = ecx;
+    cpu_info.vendor[12] = '\0';
+    
+    /* Get CPU features */
+    cpuid(CPUID_FEATURES, &eax, &ebx, &ecx, &edx);
+    
+    cpu_info.stepping = eax & 0xF;
+    cpu_info.model_id = (eax >> 4) & 0xF;
+    cpu_info.family = (eax >> 8) & 0xF;
+    
+    if (cpu_info.family == 0xF) {
+        cpu_info.family += (eax >> 20) & 0xFF;
+    }
+    if (cpu_info.family >= 0x6) {
+        cpu_info.model_id += ((eax >> 16) & 0xF) << 4;
+    }
+    
+    /* Detect features */
+    cpu_info.features = 0;
+    
+    if (edx & CPUID_FEAT_EDX_FPU)
+        cpu_info.features |= CPU_FEATURE_FPU;
+    if (edx & CPUID_FEAT_EDX_SSE)
+        cpu_info.features |= CPU_FEATURE_SSE;
+    if (edx & CPUID_FEAT_EDX_SSE2)
+        cpu_info.features |= CPU_FEATURE_SSE2;
+    if (ecx & CPUID_FEAT_ECX_SSE3)
+        cpu_info.features |= CPU_FEATURE_SSE3;
+    if (ecx & CPUID_FEAT_ECX_SSSE3)
+        cpu_info.features |= CPU_FEATURE_SSSE3;
+    if (ecx & CPUID_FEAT_ECX_SSE41)
+        cpu_info.features |= CPU_FEATURE_SSE41;
+    if (ecx & CPUID_FEAT_ECX_SSE42)
+        cpu_info.features |= CPU_FEATURE_SSE42;
+    if (ecx & CPUID_FEAT_ECX_AVX)
+        cpu_info.features |= CPU_FEATURE_AVX;
+
+    /* Check extended features */
+    cpuid(7, &eax, &ebx, &ecx, &edx);
+    if (ebx & CPUID_FEAT7_EBX_AVX2)
+        cpu_info.features |= CPU_FEATURE_AVX2;
+    if (ebx & CPUID_FEAT7_EBX_AVX512F)
+        cpu_info.features |= CPU_FEATURE_AVX512;
+
+    /* Get brand string */
+    cpuid(CPUID_EXT_MAX, &eax, &ebx, &ecx, &edx);
+    /* Skip brand string detection to avoid potential hang */
+    cpu_info.model[0] = '\0';
+#if 0
+    if (eax >= CPUID_BRAND_STRING + 2) {
+        uint32_t* model = (uint32_t*)cpu_info.model;
+        for (int i = 0; i < 3; i++) {
+            cpuid(CPUID_BRAND_STRING + i, &eax, &ebx, &ecx, &edx);
+            model[i*4 + 0] = eax;
+            model[i*4 + 1] = ebx;
+            model[i*4 + 2] = ecx;
+            model[i*4 + 3] = edx;
+        }
+        cpu_info.model[47] = '\0';
+    }
+#endif
+
+    /* Count logical processors */
+    cpuid(1, &eax, &ebx, &ecx, &edx);
+    cpu_info.cores = (ebx >> 16) & 0xFF;
+    if (cpu_info.cores == 0) cpu_info.cores = 1;
+}
+
+/* HAL CPU operations */
+static const struct hal_cpu_ops x86_64_cpu_ops = {
+    .init = cpu_init,
+    .get_info = cpu_get_info,
+    .get_features = cpu_get_features,
+    .has_feature = cpu_has_feature,
+    .get_id = cpu_get_id,
+    .get_timestamp = cpu_get_timestamp,
+    .flush_cache = cpu_flush_cache,
+    .invalidate_cache = cpu_invalidate_cache,
+    .sse2_available = cpu_sse2_available,
+    .get_sse_status = cpu_get_sse_status,
+};
+
+/* Architecture-specific timer initialization */
+extern void arch_timer_init(void);
+
+/* Architecture-specific initialization */
+void arch_cpu_init(void)
+{
+    cpu_init();
+
+    /* Register HAL operations */
+    hal_cpu_register(&x86_64_cpu_ops);
+
+    /* Initialize high-resolution timer HAL */
+    arch_timer_init();
+
+    console_printf("CPU: %s\n", cpu_info.vendor);
+    console_printf("Model: %s\n", cpu_info.model);
+    console_printf("Family: %u, Model: %u, Stepping: %u\n", 
+                   cpu_info.family, cpu_info.model_id, cpu_info.stepping);
+    console_printf("Cores: %u\n", cpu_info.cores);
+    console_printf("Features:");
+    
+    if (cpu_info.features & CPU_FEATURE_FPU) console_printf(" FPU");
+    if (cpu_info.features & CPU_FEATURE_SSE) console_printf(" SSE");
+    if (cpu_info.features & CPU_FEATURE_SSE2) console_printf(" SSE2");
+    if (cpu_info.features & CPU_FEATURE_SSE3) console_printf(" SSE3");
+    if (cpu_info.features & CPU_FEATURE_SSSE3) console_printf(" SSSE3");
+    if (cpu_info.features & CPU_FEATURE_SSE41) console_printf(" SSE4.1");
+    if (cpu_info.features & CPU_FEATURE_SSE42) console_printf(" SSE4.2");
+    if (cpu_info.features & CPU_FEATURE_AVX) console_printf(" AVX");
+    if (cpu_info.features & CPU_FEATURE_AVX2) console_printf(" AVX2");
+    if (cpu_info.features & CPU_FEATURE_AVX512) console_printf(" AVX-512");
+    console_printf("\n");
+}
+
+/* Get CPU info */
+struct cpu_info* cpu_get_info(void)
+{
+    return &cpu_info;
+}
+
+/* Get CPU features */
+uint32_t cpu_get_features(void)
+{
+    return cpu_info.features;
+}
+
+/* Check if CPU has feature */
+bool cpu_has_feature(uint32_t feature)
+{
+    return (cpu_info.features & feature) != 0;
+}
+
+/* Get number of CPUs for SMP */
+uint32_t smp_num_cpus(void)
+{
+    return cpu_info.cores;
+}
+
+/* Get CPU count (alias for smp_num_cpus) */
+uint32_t cpu_count(void)
+{
+    return cpu_info.cores;
+}
+
+/* Flush CPU cache */
+void cpu_flush_cache(void)
+{
+    __asm__ volatile("wbinvd" ::: "memory");
+}
+
+/* Invalidate CPU cache */
+void cpu_invalidate_cache(void)
+{
+    __asm__ volatile("invd" ::: "memory");
+}
+
+/* Check if SSE2 is available */
+static bool cpu_sse2_available(void)
+{
+    return cpu_has_feature(CPU_FEATURE_SSE2);
+}
+
+/* Get SSE status string */
+static const char* cpu_get_sse_status(void)
+{
+    if (cpu_info.features & CPU_FEATURE_AVX512)
+        return "AVX-512";
+    if (cpu_info.features & CPU_FEATURE_AVX2)
+        return "AVX2";
+    if (cpu_info.features & CPU_FEATURE_AVX)
+        return "AVX";
+    if (cpu_info.features & CPU_FEATURE_SSE42)
+        return "SSE4.2";
+    if (cpu_info.features & CPU_FEATURE_SSE41)
+        return "SSE4.1";
+    if (cpu_info.features & CPU_FEATURE_SSSE3)
+        return "SSSE3";
+    if (cpu_info.features & CPU_FEATURE_SSE3)
+        return "SSE3";
+    if (cpu_info.features & CPU_FEATURE_SSE2)
+        return "SSE2";
+    if (cpu_info.features & CPU_FEATURE_SSE)
+        return "SSE";
+    return "None";
+}
+
+/* Reboot the system */
+void arch_reboot(void)
+{
+    /* Disable interrupts */
+    __asm__ volatile("cli");
+    
+    /* Try keyboard controller reset */
+    outb(0x64, 0xFE);
+    
+    /* If that doesn't work, halt */
+    while (1) {
+        __asm__ volatile("hlt");
+    }
+}

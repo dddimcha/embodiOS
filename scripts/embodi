@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+#
+# embodi - EMBODIOS build and management tool
+#
+# Usage:
+#   embodi build [--debug]              Build kernel
+#   embodi iso [--model PATH] [--arch ARCH]  Create bootable ISO
+#   embodi run [--memory SIZE]          Run in QEMU
+#   embodi clean                        Clean build artifacts
+#   embodi test                         Run tests
+#   embodi help                         Show this help
+#
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KERNEL_DIR="$SCRIPT_DIR/kernel"
+BUILD_DIR="$SCRIPT_DIR/build"
+MODELS_DIR="$SCRIPT_DIR/models"
+
+# Colors (disable if not tty)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' NC=''
+fi
+
+log()   { echo -e "${GREEN}[embodi]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[embodi]${NC} $*"; }
+error() { echo -e "${RED}[embodi]${NC} $*" >&2; }
+die()   { error "$@"; exit 1; }
+
+usage() {
+    cat <<EOF
+EMBODIOS Build Tool
+
+Usage: embodi <command> [options]
+
+Commands:
+  build             Build the kernel
+  iso               Create bootable ISO
+  run               Run in QEMU
+  clean             Clean build artifacts
+  test              Run kernel tests
+  help              Show this help
+
+Build Options:
+  embodi build [--debug]
+    --debug         Build with debug symbols
+
+ISO Options:
+  embodi iso [--model PATH] [--arch ARCH]
+    --model PATH    Path to GGUF model file (optional)
+    --arch ARCH     Target architecture: x86_64 (default), arm64
+
+Run Options:
+  embodi run [--memory SIZE] [--iso]
+    --memory SIZE   Memory size (default: 512M)
+    --iso           Boot from ISO instead of kernel
+
+Examples:
+  embodi build                          # Quick kernel build
+  embodi build --debug                  # Debug build
+  embodi iso                            # ISO without model
+  embodi iso --model models/smollm.gguf # ISO with embedded model
+  embodi run                            # Run kernel in QEMU
+  embodi run --memory 2G --iso          # Run ISO with 2GB RAM
+
+EOF
+}
+
+cmd_build() {
+    local debug=0
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --debug|-d) debug=1; shift ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+    
+    log "Building kernel..."
+    cd "$KERNEL_DIR"
+    
+    if [[ $debug -eq 1 ]]; then
+        make DEBUG=1
+    else
+        make
+    fi
+    
+    log "Build complete: $KERNEL_DIR/embodios.elf"
+}
+
+cmd_iso() {
+    local model=""
+    local arch="x86_64"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --model|-m) model="$2"; shift 2 ;;
+            --arch|-a) arch="$2"; shift 2 ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+    
+    # Validate arch
+    case "$arch" in
+        x86_64|arm64) ;;
+        *) die "Unsupported architecture: $arch (supported: x86_64, arm64)" ;;
+    esac
+    
+    log "Creating ISO for $arch..."
+    
+    local iso_args=""
+    if [[ -n "$model" ]]; then
+        if [[ ! -f "$model" ]]; then
+            die "Model file not found: $model"
+        fi
+        iso_args="-m $model"
+        log "Embedding model: $model"
+    fi
+    
+    "$SCRIPT_DIR/scripts/create_iso.sh" $iso_args
+    
+    log "ISO created: $BUILD_DIR/embodios.iso"
+}
+
+cmd_run() {
+    local memory="512M"
+    local use_iso=0
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --memory|-m) memory="$2"; shift 2 ;;
+            --iso|-i) use_iso=1; shift ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+    
+    # Check for QEMU
+    if ! command -v qemu-system-x86_64 &>/dev/null; then
+        die "qemu-system-x86_64 not found. Install QEMU first."
+    fi
+    
+    if [[ $use_iso -eq 1 ]]; then
+        local iso="$BUILD_DIR/embodios.iso"
+        if [[ ! -f "$iso" ]]; then
+            die "ISO not found: $iso (run 'embodi iso' first)"
+        fi
+        log "Running ISO with ${memory} RAM..."
+        log "Note: Large ISOs may not boot in QEMU (SeaBIOS limitation)"
+        qemu-system-x86_64 -cdrom "$iso" -m "$memory" -boot d -nographic
+    else
+        local kernel="$KERNEL_DIR/embodios.elf"
+        if [[ ! -f "$kernel" ]]; then
+            die "Kernel not found: $kernel (run 'embodi build' first)"
+        fi
+        log "Running kernel with ${memory} RAM..."
+        qemu-system-x86_64 -kernel "$kernel" -m "$memory" -nographic
+    fi
+}
+
+cmd_clean() {
+    log "Cleaning build artifacts..."
+    cd "$KERNEL_DIR"
+    make clean
+    rm -rf "$BUILD_DIR"
+    log "Clean complete"
+}
+
+cmd_test() {
+    log "Running tests..."
+    cd "$KERNEL_DIR"
+    make test
+}
+
+# Main
+case "${1:-help}" in
+    build)  shift; cmd_build "$@" ;;
+    iso)    shift; cmd_iso "$@" ;;
+    run)    shift; cmd_run "$@" ;;
+    clean)  shift; cmd_clean "$@" ;;
+    test)   shift; cmd_test "$@" ;;
+    help|-h|--help) usage ;;
+    *) die "Unknown command: $1 (try 'embodi help')" ;;
+esac

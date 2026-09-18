@@ -1,0 +1,3 @@
+# This directory contains AI models
+# Models are downloaded on-demand and not stored in git
+# See models/README.md for download instructions
