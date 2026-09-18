@@ -1,0 +1,22 @@
+# EMBODIOS Modelfile
+FROM scratch
+
+# Select AI model
+MODEL huggingface:TinyLlama/TinyLlama-1.1B-Chat-v1.0
+QUANTIZE 4bit
+
+# System configuration
+MEMORY 2G
+CPU 2
+
+# Hardware capabilities
+HARDWARE gpio:enabled
+HARDWARE uart:enabled
+
+# OS capabilities
+CAPABILITY hardware_control
+CAPABILITY sensor_reading
+
+# Environment
+ENV EMBODIOS_PROMPT "> "
+ENV EMBODIOS_DEBUG 0

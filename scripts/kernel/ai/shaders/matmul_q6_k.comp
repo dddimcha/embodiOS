@@ -1,0 +1,171 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+/* EMBODIOS Q6_K Matrix-Vector Multiply Compute Shader
+ * Performs: y = A * x where A is Q6_K quantized
+ * Reference: kernel/ai/quantized_ops.c
+ *
+ * Block format: ql[128], qh[64], scales[16], d (int16)
+ * 256 values per block, 16 groups of 16 values each
+ * Formula: value = scale * (q - 32) (where q is 6-bit: low 4 bits from ql + high 2 bits from qh)
+ */
+
+/* ============================================================================
+ * Constants
+ * ============================================================================ */
+
+#define QK_K 256
+#define QL_SIZE 128
+#define QH_SIZE 64
+#define SCALES_SIZE 16
+#define FIXED_SHIFT 16
+#define FIXED8_SHIFT 8
+
+/* ============================================================================
+ * Buffer Bindings
+ * ============================================================================ */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+/* Q6_K quantized matrix A (m x n) stored as blocks */
+layout(std430, binding = 0) readonly buffer MatrixA {
+    uint8_t data[];
+} matrix_a;
+
+/* Input vector x (n elements) in Q16.16 fixed-point */
+layout(std430, binding = 1) readonly buffer VectorX {
+    int x[];
+} vector_x;
+
+/* Output vector y (m elements) in Q16.16 fixed-point */
+layout(std430, binding = 2) writeonly buffer VectorY {
+    int y[];
+} vector_y;
+
+/* Dimensions: m (rows), n (cols), block_stride */
+layout(push_constant) uniform Params {
+    uint m;
+    uint n;
+    uint n_blocks_per_row;
+} params;
+
+/* ============================================================================
+ * Q6_K Block Structure (210 bytes total)
+ * Layout: ql(128) + qh(64) + scales(16) + d(2) = 210 bytes
+ * ============================================================================ */
+
+struct BlockQ6K {
+    uint8_t ql[QL_SIZE];
+    uint8_t qh[QH_SIZE];
+    int8_t scales[SCALES_SIZE];
+    int16_t d;
+};
+
+/* ============================================================================
+ * Helper Functions
+ * ============================================================================ */
+
+/* Load int16 from byte array at offset */
+int16_t load_int16(uint offset) {
+    uint8_t lo = matrix_a.data[offset];
+    uint8_t hi = matrix_a.data[offset + 1];
+    return int16_t(uint16_t(lo) | (uint16_t(hi) << 8));
+}
+
+/* Load uint8 from byte array at offset */
+uint8_t load_uint8(uint offset) {
+    return matrix_a.data[offset];
+}
+
+/* Load int8 from byte array at offset */
+int8_t load_int8(uint offset) {
+    return int8_t(matrix_a.data[offset]);
+}
+
+/* Convert Q8.8 fixed-point to Q16.16 */
+int fixed8_to_fixed16(int16_t x) {
+    return int(x) << (FIXED_SHIFT - FIXED8_SHIFT);
+}
+
+/* ============================================================================
+ * Q6_K Block Dequantization and Dot Product
+ * ============================================================================ */
+
+int dequant_and_dot_q6_k(uint block_offset, uint x_offset) {
+    /* Load global scale from end of block */
+    int16_t d = load_int16(block_offset + QL_SIZE + QH_SIZE + SCALES_SIZE);
+    int d_fixed = fixed8_to_fixed16(d);
+
+    /* Compute dot product over 256 values */
+    int sum = 0;
+    uint ql_offset = block_offset;
+    uint qh_offset = block_offset + QL_SIZE;
+    uint scales_offset = block_offset + QL_SIZE + QH_SIZE;
+
+    /* Q6_K has 16 groups of 16 values, each with its own 8-bit scale */
+    for (int group = 0; group < 16; group++) {
+        /* 8-bit signed scale for this group */
+        int8_t scale = load_int8(scales_offset + group);
+        int sc = (d_fixed * int(scale)) >> 7;
+
+        /* Dequantize and multiply 16 values */
+        for (int j = 0; j < 16; j++) {
+            int idx = group * 16 + j;
+
+            /* Extract low 4 bits from ql */
+            int ql_byte = idx / 2;
+            int ql_shift = (idx % 2) * 4;
+            uint8_t ql_byte_val = load_uint8(ql_offset + ql_byte);
+            int q_low = int(ql_byte_val >> ql_shift) & 0x0F;
+
+            /* Extract high 2 bits from qh */
+            /* qh packs 4 values per byte (2 bits each) */
+            int qh_byte = idx / 4;
+            int qh_shift = (idx % 4) * 2;
+            uint8_t qh_byte_val = load_uint8(qh_offset + qh_byte);
+            int q_high = int(qh_byte_val >> qh_shift) & 0x03;
+
+            /* Combine to 6-bit value, then center at 32 for signed */
+            int q = (q_low | (q_high << 4)) - 32;
+
+            /* Dequantize */
+            int dequant_val = (sc * q) >> 5;
+
+            /* Accumulate dot product */
+            sum += dequant_val * vector_x.x[x_offset + idx];
+        }
+    }
+
+    return sum;
+}
+
+/* ============================================================================
+ * Main Compute Shader
+ * ============================================================================ */
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+
+    /* Bounds check */
+    if (row >= params.m) {
+        return;
+    }
+
+    /* Compute dot product for this row */
+    int sum = 0;
+
+    /* Each row consists of n_blocks_per_row blocks */
+    uint row_block_offset = row * params.n_blocks_per_row * 210; /* 210 bytes per block */
+
+    for (uint block_idx = 0; block_idx < params.n_blocks_per_row; block_idx++) {
+        uint block_offset = row_block_offset + block_idx * 210;
+        uint x_offset = block_idx * QK_K;
+
+        /* Dequantize block and compute partial dot product */
+        sum += dequant_and_dot_q6_k(block_offset, x_offset);
+    }
+
+    /* Write result (already in Q16.16 fixed-point) */
+    vector_y.y[row] = sum;
+}

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://embodios.dev/schemas/manifest-v1.json",
+  "version": "1.0.0",
+  "name": "EMBODIOS Production ISO",
+  "description": "Bare-metal AI operating system with embedded model",
+  
+  "kernel": {
+    "path": "/boot/embodios.elf",
+    "version": "0.1.0-native",
+    "arch": "x86_64",
+    "features": [
+      "gguf",
+      "bpe-tokenizer",
+      "streaming-inference",
+      "parallel-workers",
+      "simd-sse2",
+      "simd-avx2"
+    ]
+  },
+  
+  "model": {
+    "name": "${MODEL_NAME}",
+    "path": "/boot/model.gguf",
+    "format": "gguf",
+    "quantization": "${MODEL_QUANT}",
+    "parameters": "${MODEL_PARAMS}",
+    "source": "${MODEL_SOURCE}"
+  },
+  
+  "boot": {
+    "timeout": 5,
+    "default": "normal",
+    "entries": [
+      {
+        "id": "normal",
+        "title": "EMBODIOS - Bare Metal AI OS",
+        "kernel_args": ""
+      },
+      {
+        "id": "debug",
+        "title": "EMBODIOS - Debug Mode",
+        "kernel_args": "debug serial"
+      },
+      {
+        "id": "safe",
+        "title": "EMBODIOS - Safe Mode (No AI)",
+        "kernel_args": "noai"
+      }
+    ]
+  },
+  
+  "hardware": {
+    "minimum": {
+      "ram_mb": 512,
+      "cpu_features": ["sse2"]
+    },
+    "recommended": {
+      "ram_mb": 2048,
+      "cpu_features": ["sse2", "avx2"]
+    }
+  },
+  
+  "metadata": {
+    "created": "${BUILD_DATE}",
+    "builder": "scripts/create_iso.sh",
+    "commit": "${GIT_COMMIT}"
+  }
+}
