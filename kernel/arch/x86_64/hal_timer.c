@@ -129,6 +129,13 @@ static void x86_64_timer_configure(const struct timer_config *config)
 /* HAL timer get ticks */
 static uint64_t x86_64_timer_get_ticks(void)
 {
+    /* In polling mode the PIT interrupt never fires, so timer_state.ticks
+     * stays 0 and tick-based profiling/deadlines would be broken. Use the
+     * calibrated TSC as the tick source when available; ticks_to_us()
+     * below converts with the matching TSC frequency. */
+    if (tsc_get_frequency() > 0) {
+        return rdtsc() - timer_state.tsc_boot;
+    }
     return timer_state.ticks;
 }
 
@@ -229,12 +236,20 @@ static void x86_64_timer_delay_ms(uint64_t milliseconds)
 /* HAL timer convert ticks to microseconds */
 static uint64_t x86_64_timer_ticks_to_us(uint64_t ticks)
 {
+    uint64_t tsc_freq = tsc_get_frequency();
+    if (tsc_freq > 0) {
+        return (ticks * 1000000ULL) / tsc_freq;
+    }
     return (ticks * 1000000ULL) / timer_state.frequency;
 }
 
 /* HAL timer convert microseconds to ticks */
 static uint64_t x86_64_timer_us_to_ticks(uint64_t microseconds)
 {
+    uint64_t tsc_freq = tsc_get_frequency();
+    if (tsc_freq > 0) {
+        return (microseconds * tsc_freq) / 1000000ULL;
+    }
     return (microseconds * timer_state.frequency) / 1000000ULL;
 }
 

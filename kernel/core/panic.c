@@ -132,6 +132,10 @@ void kernel_panic(const char* msg, ...)
 {
     /* Disable interrupts immediately */
     arch_disable_interrupts();
+
+    /* Break the SMP console lock: the holder (another CPU or a preempted
+     * task) may never release it, and the panic output must get out. */
+    console_force_unlock();
     
     /* Clear screen and set panic colors */
     console_clear();

@@ -8,12 +8,20 @@
 
 static void serial_init(void)
 {
+    /* See serial.c: boot.S already configured the UART; re-running the
+     * DLAB/divisor/FCR sequence drops a byte being received right now.
+     * Skip if the port is already in 8N1 mode. */
+    if ((inb(SERIAL_COM1 + 3) & 0x7F) == 0x03) {
+        return;
+    }
     outb(SERIAL_COM1 + 1, 0x00);    /* Disable interrupts */
     outb(SERIAL_COM1 + 3, 0x80);    /* Enable DLAB */
     outb(SERIAL_COM1 + 0, 0x03);    /* 38400 baud */
     outb(SERIAL_COM1 + 1, 0x00);
     outb(SERIAL_COM1 + 3, 0x03);    /* 8N1 */
-    outb(SERIAL_COM1 + 2, 0xC7);    /* FIFO */
+    /* 0xC1: FIFO on without RX/TX reset (0xC7 would drop input bytes
+       received during boot — boot.S already did the one-time reset). */
+    outb(SERIAL_COM1 + 2, 0xC1);    /* FIFO, no reset */
     outb(SERIAL_COM1 + 4, 0x0B);    /* IRQs enabled, RTS/DSR set */
 }
 

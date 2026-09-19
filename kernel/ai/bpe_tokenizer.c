@@ -5,9 +5,10 @@
  * Compatible with LLaMA/SentencePiece tokenization.
  *
  * Algorithm:
- * 1. Convert text to UTF-8 bytes
- * 2. Look up longest matching tokens in vocabulary
- * 3. Use scores for tie-breaking (greedy longest match)
+ * 1. Convert text to UTF-8 bytes (GPT-2 Ġ/Ċ or SentencePiece ▁ preprocessing)
+ * 2. If tokenizer.ggml.merges is present: true merge-order BPE
+ *    (repeatedly merge the lowest-rank adjacent pair, HF-compatible)
+ * 3. Otherwise: greedy longest-match fallback with byte fallback
  */
 
 #include <embodios/console.h>
@@ -72,7 +73,61 @@ static struct {
     char *text_pool;                     /* Pre-allocated text pool */
     size_t text_pool_idx;                /* Next free text position */
     size_t text_pool_size;               /* Total text pool size */
+
+    /* Special tokens (<|im_start|>, [INST], ...) must be split out of the
+     * raw text BEFORE greedy matching, otherwise a preceding character can
+     * "eat" their first byte (e.g. "?<") and they never match whole. */
+    int special_ids[128];                /* Token IDs of special tokens */
+    int n_special;
+
+    /* True merge-order BPE (tokenizer.ggml.merges):
+     * token_id -> merge rank, -1 if the token is not a merge product */
+    int32_t *merge_rank;
+    bool has_merges;
 } g_bpe = {0};
+
+/* Check if vocab token text is a special/control token */
+static bool bpe_is_special_text(const char *t)
+{
+    size_t n = strlen(t);
+    /* <|...|> pattern: <|im_start|>, <|im_end|>, <|user|>, ... */
+    if (n >= 4 && t[0] == '<' && t[1] == '|' && t[n - 2] == '|' && t[n - 1] == '>')
+        return true;
+    /* Classic control tokens */
+    if (strcmp(t, "<s>") == 0 || strcmp(t, "</s>") == 0)
+        return true;
+    if (strcmp(t, "[INST]") == 0 || strcmp(t, "[/INST]") == 0)
+        return true;
+    if (strcmp(t, "<<SYS>>") == 0 || strcmp(t, "<</SYS>>") == 0)
+        return true;
+    if (strcmp(t, "[gMASK]") == 0)
+        return true;
+    /* GLM sequence markers (bracketed, cannot false-match plain words) */
+    if (strcmp(t, "<sop>") == 0 || strcmp(t, "<eop>") == 0)
+        return true;
+    return false;
+}
+
+/* Match a special token at the given raw-text position.
+ * Returns token ID, or -1. Longest match wins. */
+static int bpe_match_special(const char *text, int *out_len)
+{
+    int best_id = -1;
+    size_t best_len = 0;
+
+    for (int s = 0; s < g_bpe.n_special; s++) {
+        int id = g_bpe.special_ids[s];
+        const char *st = g_bpe.id_to_text[id];
+        if (!st) continue;
+        size_t sl = strlen(st);
+        if (sl > best_len && strncmp(text, st, sl) == 0) {
+            best_id = id;
+            best_len = sl;
+        }
+    }
+    if (best_id >= 0) *out_len = (int)best_len;
+    return best_id;
+}
 
 /* ============================================================================
  * String Utilities
@@ -82,6 +137,7 @@ extern size_t strlen(const char *s);
 extern int strcmp(const char *s1, const char *s2);
 extern int strncmp(const char *s1, const char *s2, size_t n);
 extern void *memcpy(void *dest, const void *src, size_t n);
+extern void *memmove(void *dest, const void *src, size_t n);
 extern void *memset(void *s, int c, size_t n);
 
 /**
@@ -230,6 +286,96 @@ static int bpe_encode_greedy(const char *text, int *tokens, int max_tokens)
 }
 
 /**
+ * bpe_encode_merges - True merge-order BPE tokenization
+ *
+ * Splits the (preprocessed) text into UTF-8 codepoint symbols, then
+ * repeatedly merges the adjacent pair with the lowest merge rank from
+ * tokenizer.ggml.merges - matching the HuggingFace tokenizers output.
+ * Falls back per-byte for symbols that never made it into the vocab.
+ */
+static int bpe_encode_merges(const char *text, int *tokens, int max_tokens)
+{
+    size_t text_len = strlen(text);
+    if (text_len == 0) return 0;
+
+    /* Symbols as (offset, length) spans over text; merging grows lengths */
+    typedef struct { uint32_t off; uint32_t len; } bpe_sym_t;
+    bpe_sym_t *syms = heap_alloc((text_len + 1) * sizeof(bpe_sym_t));
+    if (!syms) return 0;
+
+    /* Initial split: one symbol per UTF-8 codepoint (Ġ/Ċ are 2 bytes) */
+    size_t n_syms = 0;
+    size_t i = 0;
+    while (i < text_len) {
+        uint8_t c = (uint8_t)text[i];
+        uint32_t slen = 1;
+        if (c >= 0xF0) slen = 4;
+        else if (c >= 0xE0) slen = 3;
+        else if (c >= 0xC0) slen = 2;
+        if (i + slen > text_len) slen = 1;  /* truncated sequence: byte */
+        syms[n_syms].off = (uint32_t)i;
+        syms[n_syms].len = slen;
+        n_syms++;
+        i += slen;
+    }
+
+    /* Merge loop: pick the lowest-rank adjacent pair, merge, repeat */
+    for (;;) {
+        int best = -1;
+        int32_t best_rank = 0x7FFFFFFF;
+
+        for (size_t j = 0; j + 1 < n_syms; j++) {
+            uint32_t ml = syms[j].len + syms[j + 1].len;
+            if (ml > BPE_MAX_TOKEN_LEN) continue;
+
+            char buf[BPE_MAX_TOKEN_LEN + 1];
+            memcpy(buf, text + syms[j].off, syms[j].len);
+            memcpy(buf + syms[j].len, text + syms[j + 1].off, syms[j + 1].len);
+            buf[ml] = '\0';
+
+            int id = bpe_vocab_lookup(buf, ml);
+            if (id >= 0) {
+                int32_t r = g_bpe.merge_rank[id];
+                if (r >= 0 && r < best_rank) {
+                    best_rank = r;
+                    best = (int)j;
+                }
+            }
+        }
+
+        if (best < 0) break;  /* no mergeable pair left */
+
+        syms[best].len += syms[best + 1].len;
+        memmove(&syms[best + 1], &syms[best + 2],
+                (n_syms - best - 2) * sizeof(bpe_sym_t));
+        n_syms--;
+    }
+
+    /* Map final symbols to token IDs */
+    int n_tokens = 0;
+    for (size_t j = 0; j < n_syms && n_tokens < max_tokens; j++) {
+        int id = bpe_vocab_lookup(text + syms[j].off, syms[j].len);
+        if (id >= 0) {
+            tokens[n_tokens++] = id;
+        } else {
+            /* Byte fallback for each raw byte of the symbol */
+            for (uint32_t b = 0; b < syms[j].len && n_tokens < max_tokens; b++) {
+                uint8_t byte = (uint8_t)text[syms[j].off + b];
+                char byte_token[8];
+                const char *hex = "0123456789ABCDEF";
+                byte_token[0] = '<'; byte_token[1] = '0'; byte_token[2] = 'x';
+                byte_token[3] = hex[byte >> 4]; byte_token[4] = hex[byte & 0xF];
+                byte_token[5] = '>'; byte_token[6] = '\0';
+                int bid = bpe_vocab_lookup(byte_token, 6);
+                tokens[n_tokens++] = (bid >= 0) ? bid : (int)g_bpe.unk_token;
+            }
+        }
+    }
+
+    return n_tokens;
+}
+
+/**
  * bpe_preprocess_text - Preprocess text based on tokenizer type
  *
  * For SentencePiece (LLaMA): Convert spaces to '▁' (U+2581)
@@ -246,7 +392,8 @@ static int bpe_preprocess_text(const char *input, char *output, size_t max_len)
      * ASCII space (0x20) to the Ġ prefix (0xC4 0xA0) before words.
      */
     if (g_bpe.tokenizer_type == BPE_TYPE_GPT2) {
-        bool at_word_start = false;  /* First word doesn't get space prefix */
+        bool at_word_start = false;  /* Next word gets Ġ prefix */
+        bool after_newline = true;   /* Text start / post-newline: no Ġ prefix */
 
         while (in_pos < in_len && out_pos < max_len - 3) {
             uint8_t c = (uint8_t)input[in_pos];
@@ -256,19 +403,25 @@ static int bpe_preprocess_text(const char *input, char *output, size_t max_len)
                 at_word_start = true;
                 in_pos++;
             } else if (c == '\n' || c == '\r') {
-                /* Newline - copy as-is, next char gets prefix */
-                output[out_pos++] = (char)c;
-                at_word_start = true;
+                /* Newline - GPT-2 vocab stores it as Ċ (U+010A = 0xC4 0x8A).
+                 * Raw 0x0A is NOT in the vocab and would become UNK.
+                 * After a newline the next word gets NO Ġ prefix. */
+                output[out_pos++] = (char)0xC4;
+                output[out_pos++] = (char)0x8A;
+                at_word_start = false;
+                after_newline = true;
                 in_pos++;
             } else {
-                /* Regular character - add Ġ prefix if preceded by space */
-                if (at_word_start) {
+                /* Regular character - add Ġ prefix if preceded by space
+                 * (but not right after a newline) */
+                if (at_word_start && !after_newline) {
                     /* Add Ġ prefix (U+0120 = 0xC4 0xA0 in UTF-8) */
                     output[out_pos++] = (char)0xC4;
                     output[out_pos++] = (char)0xA0;
                 }
                 output[out_pos++] = (char)c;
                 at_word_start = false;
+                after_newline = false;
                 in_pos++;
             }
         }
@@ -405,13 +558,63 @@ int bpe_tokenizer_init(void)
         g_bpe.tokenizer_type = BPE_TYPE_GPT2; /* Default */
     }
 
-    /* Load all tokens into hash table */
+    /* Load all tokens into hash table, collecting special tokens */
+    g_bpe.n_special = 0;
     for (uint32_t i = 0; i < vocab_size; i++) {
         const char *text = gguf_parser_get_token(i);
         float score = gguf_parser_get_token_score(i);
 
         if (text && strlen(text) > 0) {
             bpe_vocab_insert(text, i, score);
+            if (g_bpe.n_special < 128 && bpe_is_special_text(text)) {
+                g_bpe.special_ids[g_bpe.n_special++] = (int)i;
+            }
+        }
+    }
+
+    /* Build merge-rank table from tokenizer.ggml.merges (true BPE).
+     * A merge "left right" with rank i produces the token whose text is
+     * exactly left+right, so merge_rank[token_id(left+right)] = i. */
+    g_bpe.has_merges = false;
+    g_bpe.merge_rank = NULL;
+    uint32_t n_merges = gguf_parser_get_merges_count();
+    if (n_merges > 0) {
+        g_bpe.merge_rank = heap_alloc(vocab_size * sizeof(int32_t));
+        if (g_bpe.merge_rank) {
+            for (uint32_t i = 0; i < vocab_size; i++)
+                g_bpe.merge_rank[i] = -1;
+
+            uint32_t mapped = 0;
+            for (uint32_t i = 0; i < n_merges; i++) {
+                const char *m = gguf_parser_get_merge(i);
+                if (!m) continue;
+
+                /* Split at the first literal space separator (GPT-2 byte
+                 * encoding guarantees parts contain no raw spaces) */
+                const char *sp = m;
+                while (*sp && *sp != ' ') sp++;
+                if (*sp != ' ') continue;
+
+                char merged[BPE_MAX_TOKEN_LEN + 1];
+                size_t llen = (size_t)(sp - m);
+                size_t rlen = strlen(sp + 1);
+                if (llen == 0 || rlen == 0 || llen + rlen > BPE_MAX_TOKEN_LEN) continue;
+
+                memcpy(merged, m, llen);
+                memcpy(merged + llen, sp + 1, rlen);
+                merged[llen + rlen] = '\0';
+
+                int id = bpe_vocab_lookup(merged, llen + rlen);
+                if (id >= 0 && g_bpe.merge_rank[id] < 0) {
+                    g_bpe.merge_rank[id] = (int32_t)i;
+                    mapped++;
+                }
+            }
+            if (mapped > 0) {
+                g_bpe.has_merges = true;
+                console_printf("[BPE] Merge-order tokenizer active (%u/%u rules mapped)\n",
+                               mapped, n_merges);
+            }
         }
     }
 
@@ -443,20 +646,56 @@ int bpe_tokenizer_encode(const char *text, int *tokens, int max_tokens, bool add
         tokens[n_tokens++] = (int)g_bpe.bos_token;
     }
 
-    /* Preprocess text for SentencePiece compatibility */
+    /* Encode raw text, splitting out special tokens first (llama.cpp style):
+     * a special token must match atomically in the RAW text, otherwise a
+     * preceding regular character can merge with its first byte (e.g. "?<")
+     * and the template markers would never tokenize correctly. */
     size_t text_len = strlen(text);
-    char *processed = heap_alloc(text_len * 4 + 1); /* Worst case: 3 bytes per char */
-    if (!processed) {
-        return n_tokens;
+    size_t pos = 0;
+
+    while (pos < text_len && n_tokens < max_tokens - 1) {
+        /* Special token at current position? */
+        int special_len = 0;
+        int sid = bpe_match_special(text + pos, &special_len);
+        if (sid >= 0) {
+            tokens[n_tokens++] = sid;
+            pos += (size_t)special_len;
+            continue;
+        }
+
+        /* Find extent of regular text up to the next special token */
+        size_t seg_end = pos;
+        while (seg_end < text_len) {
+            int dummy = 0;
+            if (bpe_match_special(text + seg_end, &dummy) >= 0) break;
+            seg_end++;
+        }
+        size_t seg_len = seg_end - pos;
+
+        /* Copy segment, preprocess, greedy-encode */
+        char *segment = heap_alloc(seg_len + 1);
+        char *processed = heap_alloc(seg_len * 4 + 1);
+        if (!segment || !processed) break;
+        memcpy(segment, text + pos, seg_len);
+        segment[seg_len] = '\0';
+
+        bpe_preprocess_text(segment, processed, seg_len * 4);
+
+        int encoded;
+        if (g_bpe.has_merges) {
+            /* True merge-order BPE (matches HF tokenizers) */
+            encoded = bpe_encode_merges(processed, tokens + n_tokens,
+                                        max_tokens - n_tokens - 1);
+        } else {
+            /* Fallback: greedy longest-match (models without merges) */
+            encoded = bpe_encode_greedy(processed, tokens + n_tokens,
+                                        max_tokens - n_tokens - 1);
+        }
+        n_tokens += encoded;
+        pos = seg_end;
     }
 
-    bpe_preprocess_text(text, processed, text_len * 4);
-
-    /* Encode using greedy longest match */
-    int encoded = bpe_encode_greedy(processed, tokens + n_tokens, max_tokens - n_tokens - 1);
-    n_tokens += encoded;
-
-    /* Note: heap_alloc doesn't have free, but this is small and short-lived */
+    /* Note: heap_alloc doesn't have free, but these are small and short-lived */
 
     /* Add EOS token if requested */
     if (add_eos && n_tokens < max_tokens) {
@@ -666,8 +905,8 @@ void bpe_tokenizer_test(void)
         return;
     }
 
-    const char *test_texts[] = {"Hello", "Hello world", "Once upon a time", "The quick brown fox",
-                                NULL};
+    const char *test_texts[] = {"Hello", "Hello world", "assistant", "Once upon a time",
+                                "The quick brown fox", NULL};
 
     int tokens[64];
     char decoded[256];

@@ -42,11 +42,73 @@ int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
 /* Check if inference engine is ready */
 bool streaming_inference_is_ready(void);
 
+/* ============================================================================
+ * Layer-range API (exo distributed inference)
+ * ============================================================================
+ * Stages of a single-token forward step, exposed so the exo ring orchestrator
+ * can distribute a model across nodes (pipeline parallelism by layer range).
+ * The KV cache lives in this engine indexed by absolute layer number and
+ * position, so each node only reads/writes the KV region of its own shard;
+ * only the hidden vector (dim floats) travels between nodes per token.
+ */
+
+/* Embed a token: out receives dim float32 values (token_embd lookup,
+ * any supported quantization/layout). Returns 0 or -1. */
+int streaming_inference_embed(int token, float* out);
+
+/* Run transformer layers [start_layer, end_layer) over `hidden`
+ * (dim floats, updated in place) at sequence position `pos`
+ * (RoPE + KV cache). Out-of-range bounds are clamped to the model.
+ * Returns 0 or -1. */
+int streaming_inference_forward_layers(float* hidden, int pos,
+                                       int start_layer, int end_layer);
+
+/* Sample the next token.
+ * hidden_or_logits == NULL:      use the engine's current hidden state;
+ * hidden_or_logits == logits:    sample from already-computed logits;
+ * otherwise:                     pointer to a dim-float hidden state.
+ * Applies final RMSNorm + output projection when given a hidden state,
+ * then samples according to temperature/top-p settings.
+ * Returns the token id or -1. */
+int streaming_inference_sample_token(const float* hidden_or_logits);
+
+/* Check a token against EOS and the registered stop tokens */
+bool streaming_inference_is_stop_token(int token_id);
+
+/* Override EOS/stop token (e.g. chat template stop token like <|im_end|>) */
+void streaming_inference_set_eos(int token_id);
+
+/* Get current EOS/stop token */
+int streaming_inference_get_eos(void);
+
+/* Add an extra stop token checked in addition to EOS (max 4).
+ * Used for GLM-style chat where generation stops on <|user|>/<|assistant|>. */
+void streaming_inference_add_stop_token(int token_id);
+
+/* Debug/verification: forward a prompt and print top-k logits to console */
+void streaming_inference_debug_logits(const int* prompt_tokens, int prompt_len, int topk);
+
 /* Get token text from vocabulary */
 const char* streaming_inference_get_token(int token_id);
 
 /* Get model information */
 void streaming_inference_get_info(int* dim, int* layers, int* vocab, int* ctx);
+
+/* ============================================================================
+ * Sampling configuration
+ * ============================================================================ */
+
+/* Set sampling temperature [0.0, 2.0]. 0.0 = greedy argmax (deterministic) */
+void streaming_inference_set_temperature(float temp);
+
+/* Get current sampling temperature */
+float streaming_inference_get_temperature(void);
+
+/* Set nucleus (top-p) threshold [0.0, 1.0]. 1.0 = no nucleus filtering */
+void streaming_inference_set_top_p(float p);
+
+/* Get current nucleus (top-p) threshold */
+float streaming_inference_get_top_p(void);
 
 /* ============================================================================
  * Deterministic Mode Configuration

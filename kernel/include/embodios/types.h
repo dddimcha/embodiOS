@@ -24,7 +24,15 @@ typedef long                intptr_t;
 
 /* Boolean type (C only - C++ has built-in bool) */
 #ifndef __cplusplus
-#if __STDC_VERSION__ < 202311L
+#ifdef bool
+/* bool already defined as a macro (e.g. by compat/stdbool.h) - keep it */
+#ifndef true
+#define true                1
+#endif
+#ifndef false
+#define false               0
+#endif
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ < 202311L
 /* C versions before C23 need bool typedef */
 typedef _Bool               bool;
 #define true                1

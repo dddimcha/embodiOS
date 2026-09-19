@@ -11,6 +11,23 @@
 #include <embodios/types.h>
 #include <embodios/hal_timer.h>
 
+#if defined(__x86_64__)
+#include <embodios/tsc.h>
+/* Absolute timing-tolerance assertions only make sense with a stable
+ * (invariant) TSC. Under QEMU TCG the TSC is not invariant and each
+ * rdtsc carries heavy emulation overhead (~100s of us per profiled
+ * section), so nanosecond-precision bounds cannot hold. */
+static bool timing_asserts_enabled(void)
+{
+    return tsc_is_stable();
+}
+#else
+static bool timing_asserts_enabled(void)
+{
+    return true;
+}
+#endif
+
 /* External string function declarations */
 extern int strcmp(const char* s1, const char* s2);
 
@@ -73,8 +90,15 @@ static int test_profiler_basic_timing(void)
     ASSERT_EQ(stats.call_count, 1);
 
     /* Verify timing is reasonable (within 50% tolerance) */
-    ASSERT_GT(stats.total_time_us, 50);  /* At least 50us */
-    ASSERT_LT(stats.total_time_us, 200);  /* At most 200us */
+    if (timing_asserts_enabled()) {
+        ASSERT_GT(stats.total_time_us, 50);  /* At least 50us */
+        ASSERT_LT(stats.total_time_us, 200);  /* At most 200us */
+    } else {
+        console_printf("SKIP: timing tolerance (unstable TSC / emulated rdtsc), "
+                       "measured %lu us\n", (unsigned long)stats.total_time_us);
+        /* Sanity only: non-zero duration was recorded */
+        ASSERT_GT(stats.total_time_us, 0);
+    }
 
     profiler_disable();
     return TEST_PASS;
@@ -102,8 +126,14 @@ static int test_profiler_multiple_calls(void)
     ASSERT_EQ(stats.call_count, 5);
 
     /* Verify total time is reasonable (5 calls * 50us = 250us, with tolerance) */
-    ASSERT_GT(stats.total_time_us, 150);  /* At least 150us */
-    ASSERT_LT(stats.total_time_us, 500);  /* At most 500us */
+    if (timing_asserts_enabled()) {
+        ASSERT_GT(stats.total_time_us, 150);  /* At least 150us */
+        ASSERT_LT(stats.total_time_us, 500);  /* At most 500us */
+    } else {
+        console_printf("SKIP: timing tolerance (unstable TSC / emulated rdtsc), "
+                       "measured %lu us\n", (unsigned long)stats.total_time_us);
+        ASSERT_GT(stats.total_time_us, 0);
+    }
 
     /* Verify min/max/avg */
     ASSERT_GT(stats.min_time_us, 0);
@@ -323,7 +353,11 @@ static int test_profiler_overhead(void)
 
     /* Verify overhead is less than 10% (relaxed from 5% for test stability) */
     /* In production, aim for < 5%, but tests can be more variable */
-    ASSERT_LT(overhead_percent, 10);
+    if (timing_asserts_enabled()) {
+        ASSERT_LT(overhead_percent, 10);
+    } else {
+        console_printf("SKIP: overhead bound (unstable TSC / emulated rdtsc)\n");
+    }
 
     return TEST_PASS;
 }

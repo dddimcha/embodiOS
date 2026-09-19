@@ -14,13 +14,22 @@
 #include <embodios/nvme.h>
 #include <embodios/virtio_mmio.h>
 #include <embodios/virtio_net.h>
+#include <embodios/e1000e.h>
 #include <embodios/tcpip.h>
+#include <embodios/exo.h>
+#include <embodios/hal_timer.h>
 #include <embodios/can.h>
 #include <embodios/model_registry.h>
 #include <embodios/test.h>
+#include <embodios/ui.h>
+#if defined(__x86_64__)
+#include "../../include/arch/x86_64/paging.h"
+#endif
 
 /* Kernel version info */
-const char* kernel_version = "EMBODIOS v0.1.0-native";
+/* Single source of truth for the kernel version. create_iso.sh
+   extracts this via grep to keep the ISO manifest in sync. */
+const char* kernel_version = "v0.4.0";
 const char* kernel_build = __DATE__ " " __TIME__;
 
 /* External symbols from linker script */
@@ -123,11 +132,24 @@ extern char __test_name_start[];
 extern char __test_name_end[];
 static char test_mode_name[64] = {0};
 
-/* Parse multiboot2 info and check for test mode cmdline parameter */
-static void check_test_mode_cmdline(void)
-{
-    bool found_cmdline = false;
+/* Xen PVH hvm_start_info (QEMU -kernel direct boot passes its physical
+ * address in ebx; boot.S stores it in multiboot_info). Identity-mapped,
+ * so the cmdline physical address can be dereferenced directly. */
+#define XEN_HVM_START_MAGIC 0x336ec578U
+struct hvm_start_info_k {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t flags;
+    uint32_t nr_modules;
+    uint64_t modlist_paddr;
+    uint64_t cmdline_paddr;
+    uint64_t rsdp_paddr;
+};
 
+/* Fetch the kernel command line from the boot environment.
+ * Supports multiboot2 (GRUB/ISO) and Xen PVH (QEMU -kernel ... -append). */
+static const char* get_boot_cmdline(void)
+{
     /* Check if we have valid multiboot2 info */
     if (multiboot_magic == MULTIBOOT2_MAGIC) {
         /* Multiboot2 info starts with total size and reserved field */
@@ -142,13 +164,39 @@ static void check_test_mode_cmdline(void)
             if (tag->type == MULTIBOOT2_TAG_CMDLINE) {
                 struct multiboot2_tag_cmdline* cmdline_tag =
                     (struct multiboot2_tag_cmdline*)tag;
-                const char* cmdline = cmdline_tag->string;
+                return cmdline_tag->string;
+            }
 
-                console_printf("Kernel cmdline: %s\n", cmdline);
-                found_cmdline = true;
+            /* Move to next tag (tags are 8-byte aligned) */
+            tag = (struct multiboot2_tag*)((uintptr_t)tag + ((tag->size + 7) & ~7));
+        }
+        return NULL;
+    }
 
-                /* Check for "test" parameter - run all tests */
-                if (kernel_strstr(cmdline, "test")) {
+    /* QEMU -kernel PVH boot: multiboot_info holds hvm_start_info paddr */
+    if (multiboot_info != 0) {
+        struct hvm_start_info_k* info =
+            (struct hvm_start_info_k*)(uintptr_t)multiboot_info;
+        if (info->magic == XEN_HVM_START_MAGIC && info->cmdline_paddr != 0) {
+            return (const char*)(uintptr_t)info->cmdline_paddr;
+        }
+    }
+
+    return NULL;
+}
+
+/* Parse boot cmdline and check for test mode parameter */
+static void check_test_mode_cmdline(void)
+{
+    bool found_cmdline = false;
+    const char* cmdline = get_boot_cmdline();
+
+    if (cmdline) {
+        console_printf("Kernel cmdline: %s\n", cmdline);
+        found_cmdline = true;
+
+        /* Check for "test" parameter - run all tests */
+        if (kernel_strstr(cmdline, "test")) {
                     /* Check if it's "runtest=<name>" for single test */
                     char* runtest = kernel_strstr(cmdline, "runtest=");
                     if (runtest) {
@@ -180,13 +228,6 @@ static void check_test_mode_cmdline(void)
                     }
 
                     return;
-                }
-
-                return;
-            }
-
-            /* Move to next tag (tags are 8-byte aligned) */
-            tag = (struct multiboot2_tag*)((uintptr_t)tag + ((tag->size + 7) & ~7));
         }
     }
 
@@ -203,6 +244,23 @@ static void check_test_mode_cmdline(void)
 }
 #endif
 
+/* True once the PIT IRQ is unmasked and IF=1 (not in 'poll' fallback mode).
+ * kernel_loop uses this to decide whether hlt is safe while idle. */
+static bool interrupts_enabled = false;
+
+bool kernel_interrupts_enabled(void)
+{
+    return interrupts_enabled;
+}
+
+/* Count of hlt idle sleeps in kernel_loop (power management telemetry) */
+static uint64_t idle_hlt_count = 0;
+
+uint64_t kernel_idle_hlt_count(void)
+{
+    return idle_hlt_count;
+}
+
 void kernel_main(void)
 {
     /* Debug: Mark kernel_main entry */
@@ -212,28 +270,84 @@ void kernel_main(void)
 
     /* Initialize console for output */
     console_init();
+
+    /* Interrupt infrastructure: IDT (exceptions -> panic) + remapped PIC.
+     * IRQ lines stay masked until arch_enable_interrupts(). */
+    arch_interrupt_init();
+
+    /* Test mode runs headless under the QEMU test harness: keep the output
+     * free of ANSI escapes so scripts/run_kernel_tests.sh can grep the
+     * [TEST]/[PASS]/summary markers reliably. */
+#if defined(__x86_64__)
+    {
+        const char* early_cmdline = get_boot_cmdline();
+        if (early_cmdline && kernel_strstr(early_cmdline, "test")) {
+            ui_set_color(0);
+        }
+    }
+#endif
+
+    /* Startup banner (logo + version + motto) */
+    ui_banner();
+
     console_printf("EMBODIOS Native Kernel %s\n", kernel_version);
     console_printf("Build: %s\n", kernel_build);
     console_printf("Kernel: %p - %p\n", _kernel_start, _kernel_end);
     
-    /* Note: BSS is NOT cleared here because boot stack is in .bss and is in use.
-     * The multiboot loader should have already zeroed BSS.
-     * If needed, clear specific subsections before use. */
+    /* Note: BSS is zeroed in boot.S (_start) before the page tables and
+     * stacks in .bss are set up, so all static storage is clean by now. */
     
     /* CPU initialization */
     console_printf("Initializing CPU features...\n");
     arch_cpu_init();
-    
+
+    /* HAL timer (TSC/HPET/PIT): без этого hal_timer_get_milliseconds()
+     * всегда 0 — ломаются таймауты и интервалы tcpip/exo (discovery,
+     * HTTP-таймауты). arch_timer_init() вызван из arch_cpu_init(). */
+    console_printf("Initializing HAL timer...\n");
+    hal_timer_init();
+
     /* Memory management setup */
     console_printf("Initializing memory management...\n");
-    /* Calculate available memory after kernel
-     * Currently limited to 1GB due to page table setup in boot.S
-     * TODO: Extend page tables for larger memory support */
-    size_t total_ram = 1UL * 1024 * 1024 * 1024; /* 1GB - limited by page tables */
     void* mem_start = (void*)ALIGN_UP((uintptr_t)_kernel_end, PAGE_SIZE);
+#if defined(__x86_64__)
+    /* Detect physical RAM from the boot environment (multiboot2 mmap under
+     * GRUB/ISO, Xen PVH hvm_start_info memmap under QEMU -kernel, or a
+     * conservative 1GB fallback), extend the identity map beyond the
+     * boot-time 1GB, and hand the usable regions to the PMM. */
+    {
+        struct boot_mem_region boot_regions[BOOT_MEM_MAX_REGIONS];
+        size_t num_boot = arch_detect_memory(boot_regions, BOOT_MEM_MAX_REGIONS);
+        uint64_t map_ceiling = arch_identity_map_ram(boot_regions, num_boot);
+
+        struct pmm_region pmm_regions[BOOT_MEM_MAX_REGIONS];
+        size_t num_pmm = 0;
+        for (size_t i = 0; i < num_boot; i++) {
+            uint64_t base = boot_regions[i].base;
+            uint64_t end = base + boot_regions[i].size;
+            /* PMM manages memory after the kernel; only use mapped RAM */
+            if (base < (uint64_t)(uintptr_t)mem_start) {
+                base = (uint64_t)(uintptr_t)mem_start;
+            }
+            if (end > map_ceiling) {
+                end = map_ceiling;
+            }
+            if (end <= base) {
+                continue;
+            }
+            pmm_regions[num_pmm].base = base;
+            pmm_regions[num_pmm].size = end - base;
+            num_pmm++;
+        }
+        pmm_init_regions(mem_start, pmm_regions, num_pmm);
+    }
+#else
+    /* Non-x86 fallback: assume 1GB of RAM */
+    size_t total_ram = 1UL * 1024 * 1024 * 1024;
     size_t kernel_size = (uintptr_t)mem_start - (uintptr_t)_kernel_start;
     size_t mem_size = total_ram - kernel_size;
     pmm_init(mem_start, mem_size);
+#endif
     vmm_init();
     slab_init();
     
@@ -282,6 +396,10 @@ void kernel_main(void)
     console_printf("Initializing VirtIO network driver...\n");
     virtio_net_init();
 
+    /* Intel e1000e network driver (no-op if device absent; tcpip picks
+     * whichever NIC is ready: virtio-net first, e1000e as fallback) */
+    e1000e_init();
+
     /* TCP/IP stack */
     console_printf("Initializing TCP/IP stack...\n");
     tcpip_init();
@@ -293,6 +411,11 @@ void kernel_main(void)
     /* Initialize task scheduler */
     console_printf("Initializing task scheduler...\n");
     scheduler_init();
+
+    /* Adopt this boot context as task 'main' so the preemptive scheduler
+     * can suspend/resume kernel_loop like any other task. Must happen
+     * before sti (IRQ0 -> scheduler_tick needs a valid current_task). */
+    scheduler_start();
 
     /* Run scheduler tests */
     #ifdef SCHEDULER_RUN_TESTS
@@ -310,22 +433,22 @@ void kernel_main(void)
     if (gguf_model_embedded()) {
         size_t gguf_size = 0;
         const uint8_t* gguf_data = get_embedded_gguf_model(&gguf_size);
+        (void)gguf_data;
         if (gguf_data && gguf_size > 0) {
-            console_printf("GGUF model embedded: %zu MB\n", gguf_size / (1024*1024));
-            console_printf("Use 'benchmark' command to test inference\n");
+            ui_boot_model_info();
+        } else {
+            ui_warn("Embedded GGUF model is present but unreadable");
         }
     } else {
-        console_printf("No GGUF model embedded\n");
+        ui_boot_model_info();
     }
     
-    /* Initialize command processor */
-    if (ai_model) {
-        console_printf("Initializing AI command processor...\n");
-        command_processor_init(ai_model);
-    }
+    /* Initialize command processor (works without a loaded AI model too) */
+    command_processor_init(ai_model);
 
-    /* Enable interrupts - DISABLED for UEFI */
-    /* arch_enable_interrupts(); */
+    /* Interrupt mode decision: PIT IRQ0 + preemptive scheduling are enabled
+     * at the end of kernel_main (see below), unless the boot cmdline asks
+     * for the legacy polling mode ("poll"). */
 
     console_printf("[DEBUG] About to call constructors...\n");
 
@@ -345,8 +468,8 @@ void kernel_main(void)
     }
     console_printf("[DEBUG] Constructors done\n");
 
-    console_printf("\nEMBODIOS Ready (polling mode - no interrupts).\n");
-    console_printf("Type 'help' for available commands.\n\n");
+    ui_ok("EMBODIOS Ready");
+    console_printf("\n");
 
     /* TEMPORARY: Manually run PMM test to verify framework works */
     /* TODO: Fix multiboot2 cmdline parsing for QEMU -kernel boot */
@@ -354,9 +477,12 @@ void kernel_main(void)
     /* console_printf("[DEBUG] Manually running PMM test...\n");
     test_run_single("pmm"); */
 
-    /* Check for test mode command-line parameter */
+    /* Check for test mode command-line parameter (multiboot2 cmdline under
+     * GRUB/ISO or PVH hvm_start_info cmdline under QEMU -kernel -append).
+     * In test mode the framework runs the tests and shuts QEMU down via
+     * the isa-debug-exit device instead of entering the shell loop. */
     #if defined(__x86_64__)
-    /* check_test_mode_cmdline(); */  /* Disabled for now */
+    check_test_mode_cmdline();
     #endif
 
     /* Auto-run benchmark for testing */
@@ -364,6 +490,28 @@ void kernel_main(void)
     console_printf("Auto-running benchmark...\n");
     process_command("benchmark");
     #endif
+
+    /* === Interrupt enable point ===
+     * Everything the timer tick path can touch (heap, console, model
+     * runtime, scheduler) is initialized by now. Enable PIT ticks and
+     * preemptive scheduling unless the boot cmdline forces polling mode. */
+#if defined(__x86_64__)
+    {
+        const char* cmdline = get_boot_cmdline();
+        bool want_poll = cmdline && kernel_strstr(cmdline, "poll");
+        if (!want_poll) {
+            extern void hal_timer_enable(void);
+            hal_timer_enable();        /* ungate PIT tick counting */
+            scheduler_register_timer();/* scheduler_tick on every IRQ0 */
+            arch_enable_interrupts();  /* unmask IRQ0 + sti */
+            interrupts_enabled = true;
+            console_printf("Interrupts: ENABLED (PIT IRQ0 @ 100 Hz, preemptive scheduling)\n");
+        } else {
+            console_printf("Interrupts: DISABLED (cmdline 'poll' -> legacy polling mode)\n");
+        }
+    }
+#endif
+
     /* Main kernel loop */
     kernel_loop();
 }
@@ -371,16 +519,59 @@ void kernel_main(void)
 void kernel_loop(void)
 {
     char cmd_buffer[256];
-    
+    size_t cmd_pos = 0;
+    bool prompt_shown = false;
+
+
     while (1) {
-        console_printf("> ");
-        console_readline(cmd_buffer, sizeof(cmd_buffer));
-        
-        if (cmd_buffer[0] != '\0') {
-            process_command(cmd_buffer);
+        if (!prompt_shown) {
+            ui_prompt();
+            console_flush();
+            prompt_shown = true;
         }
-        
-        /* Yield to other tasks if scheduler is active */
-        schedule();
+
+        int c = console_getchar();
+        if (c == -1) {
+            /* Нет ввода: обслужить фоновые подсистемы (exo: discovery,
+             * тензорный транспорт, OpenAI API → tcpip_poll внутри) */
+            exo_poll();
+            /* Yield to other tasks if scheduler is active */
+            schedule();
+            /* Sleep until the next IRQ (PIT tick wakes us at 100 Hz).
+             * Only safe when interrupts are actually enabled - in poll
+             * fallback mode hlt would never wake. */
+            if (interrupts_enabled) {
+                idle_hlt_count++;
+                __asm__ volatile("hlt");
+            }
+            continue;
+        }
+
+        /* Line editing (как console_readline, но неблокирующее ожидание —
+         * иначе exo_poll() не выполнялся бы, пока shell ждёт ввод) */
+        if (c == '\n' || c == '\r') {
+            console_putchar('\n');
+            cmd_buffer[cmd_pos] = '\0';
+            cmd_pos = 0;
+            prompt_shown = false;
+
+            if (cmd_buffer[0] != '\0') {
+                process_command(cmd_buffer);
+            }
+
+            /* Фоновый шаг и после команды */
+            exo_poll();
+            schedule();
+        } else if (c == '\b' || c == 127) { /* Backspace */
+            if (cmd_pos > 0) {
+                cmd_pos--;
+                console_putchar('\b');
+                console_putchar(' ');
+                console_putchar('\b');
+            }
+        } else if (c >= 32 && c < 127 && cmd_pos < sizeof(cmd_buffer) - 1) {
+            cmd_buffer[cmd_pos++] = (char)c;
+            console_putchar((char)c);
+        }
     }
 }

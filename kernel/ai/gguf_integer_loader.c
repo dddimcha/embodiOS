@@ -44,6 +44,8 @@ enum ggml_type {
     GGML_TYPE_Q5_1 = 7,
     GGML_TYPE_Q8_0 = 8,
     GGML_TYPE_Q8_1 = 9,
+    GGML_TYPE_Q2_K = 10,
+    GGML_TYPE_Q3_K = 11,
     GGML_TYPE_Q4_K = 12,
     GGML_TYPE_Q5_K = 13,
     GGML_TYPE_Q6_K = 14,
@@ -141,7 +143,10 @@ static size_t get_type_size(enum ggml_type type) {
         case GGML_TYPE_F32:  return 4;
         case GGML_TYPE_F16:  return 2;
         case GGML_TYPE_Q4_0: return 18;   /* 32 values per block */
+        case GGML_TYPE_Q2_K: return 84;   /* 256 values per block */
+        case GGML_TYPE_Q3_K: return 110;  /* 256 values per block */
         case GGML_TYPE_Q4_K: return 144;  /* 256 values per block */
+        case GGML_TYPE_Q5_K: return 176;  /* 256 values per block */
         case GGML_TYPE_Q8_0: return 34;   /* 32 values per block */
         default: return 0;
     }
@@ -157,8 +162,14 @@ static size_t calc_tensor_size(uint32_t type, uint32_t n_dims, uint64_t* dims) {
 
     /* For quantized types, compute based on block size */
     switch (type) {
+        case GGML_TYPE_Q2_K:
+            return ((n_elements + QK_K - 1) / QK_K) * 84;
+        case GGML_TYPE_Q3_K:
+            return ((n_elements + QK_K - 1) / QK_K) * 110;
         case GGML_TYPE_Q4_K:
             return ((n_elements + QK_K - 1) / QK_K) * sizeof(struct block_q4_k);
+        case GGML_TYPE_Q5_K:
+            return ((n_elements + QK_K - 1) / QK_K) * 176;
         case GGML_TYPE_Q8_0:
             return ((n_elements + QK8_0 - 1) / QK8_0) * sizeof(struct block_q8_0);
         case GGML_TYPE_Q4_0:
@@ -396,7 +407,13 @@ int gguf_integer_is_loaded(void) {
  * Caller must free the returned pointer with kfree()
  */
 fixed_t* gguf_load_dequantized_tensor(const char* name, size_t* out_n_elements) {
+    extern int dequantize_q2_k(const void* quant, size_t quant_size,
+                               fixed_t* output, size_t n_values);
+    extern int dequantize_q3_k(const void* quant, size_t quant_size,
+                               fixed_t* output, size_t n_values);
     extern int dequantize_q4_k(const void* quant, size_t quant_size,
+                               fixed_t* output, size_t n_values);
+    extern int dequantize_q5_k(const void* quant, size_t quant_size,
                                fixed_t* output, size_t n_values);
     extern int dequantize_q8_0(const void* quant, size_t quant_size,
                                fixed_t* output, size_t n_values);
@@ -439,8 +456,17 @@ fixed_t* gguf_load_dequantized_tensor(const char* name, size_t* out_n_elements) 
     /* Dequantize based on type */
     int result = -1;
     switch (tensor_type) {
+        case GGML_TYPE_Q2_K:
+            result = dequantize_q2_k(tensor_data, tensor_size, output, n_elements);
+            break;
+        case GGML_TYPE_Q3_K:
+            result = dequantize_q3_k(tensor_data, tensor_size, output, n_elements);
+            break;
         case GGML_TYPE_Q4_K:
             result = dequantize_q4_k(tensor_data, tensor_size, output, n_elements);
+            break;
+        case GGML_TYPE_Q5_K:
+            result = dequantize_q5_k(tensor_data, tensor_size, output, n_elements);
             break;
         case GGML_TYPE_Q8_0:
             result = dequantize_q8_0(tensor_data, tensor_size, output, n_elements);

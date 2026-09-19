@@ -65,6 +65,24 @@ void scheduler_init(void);
  */
 void scheduler_register_timer(void);
 
+/**
+ * scheduler_start - Adopt the boot context as task "main"
+ *
+ * Gives the kernel_main/kernel_loop execution context a task control block
+ * so the preemptive scheduler can suspend and resume it. Must be called
+ * once after scheduler_init(), before interrupts are enabled.
+ */
+void scheduler_start(void);
+
+/**
+ * scheduler_tasktest - Preemption demo (shell 'tasktest' command)
+ *
+ * Spawns two equal-priority tasks that print 'A'/'B' with short sleeps;
+ * the timer-driven round-robin preempts between them so the interleaved
+ * output proves preemptive multitasking. Blocks until both tasks exit.
+ */
+void scheduler_tasktest(void);
+
 /* ============================================================================
  * Task Management
  * ============================================================================ */

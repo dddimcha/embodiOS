@@ -9,6 +9,7 @@
 #include <embodios/console.h>
 #include <embodios/mm.h>
 #include <embodios/kernel.h>
+#include <embodios/hal_timer.h>
 
 /* Debug output (uncomment to enable) */
 /* #define VIRTIO_NET_DEBUG 1 */
@@ -366,31 +367,50 @@ int virtio_net_send(const void *data, size_t length)
     /* Submit to device */
     virtqueue_kick(vq, desc_idx);
 
-    /* Wait for completion (polling) */
-    uint32_t timeout = 100000;
-    while (timeout > 0) {
+    /* Wait for completion (polling, time-based).
+     *
+     * QEMU обрабатывает TX через async bottom half — completion приходит
+     * только когда vCPU возвращается в main loop, это заметно дольше
+     * прежнего busy-цикла на 100000 итераций (~100 мкс). По таймауту
+     * дескриптор НЕЛЬЗЯ возвращать в free-list: запись о нём остаётся в
+     * avail ring, и устройство позже вычитает F_NEXT-цепочку свободных
+     * дескрипторов ("virtio: zero sized buffers are not allowed", после
+     * чего QEMU ломает RX-доставку). Вместо этого дренируем used-ring по
+     * фактически завершённым elem->id (включая поздние completion прошлых
+     * отправок), а при настоящем таймауте дескриптор остаётся устройству
+     * (утечка одного desc безопаснее коррупции очереди). */
+    uint64_t start_us = hal_timer_get_microseconds();
+    for (;;) {
         rmb();
         used_idx = vq->used->idx;
 
         if (used_idx != vq->last_used_idx) {
-            /* TX completed */
-            vq->last_used_idx = used_idx;
-            virtqueue_free_desc(vq, desc_idx);
-
-            g_net.tx_packets++;
-            g_net.tx_bytes += length;
+            /* Drain all completed descriptors (free by actual used id) */
+            bool ours_done = false;
+            while (vq->last_used_idx != used_idx) {
+                struct virtq_used_elem *e =
+                    &vq->used->ring[vq->last_used_idx % vq->size];
+                if ((uint16_t)e->id == desc_idx) ours_done = true;
+                virtqueue_free_desc(vq, (uint16_t)e->id);
+                vq->last_used_idx++;
+            }
+            if (ours_done) {
+                g_net.tx_packets++;
+                g_net.tx_bytes += length;
 
 #ifdef VIRTIO_NET_DEBUG
-            console_printf("[VirtIO-Net] TX: %zu bytes\n", length);
+                console_printf("[VirtIO-Net] TX: %zu bytes\n", length);
 #endif
-            return VIRTIO_NET_OK;
+                return VIRTIO_NET_OK;
+            }
         }
 
-        timeout--;
+        if (hal_timer_get_microseconds() - start_us > 100000) {
+            break;  /* 100 ms */
+        }
     }
 
-    /* Timeout - free descriptor anyway */
-    virtqueue_free_desc(vq, desc_idx);
+    /* Timeout: дескриптор остаётся во владении устройства (см. выше) */
     g_net.tx_errors++;
     return VIRTIO_ERR_TIMEOUT;
 }

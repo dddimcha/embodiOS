@@ -6,8 +6,8 @@
 #include "embodios/console.h"
 
 /* Heap configuration - expanded for larger AI models */
-#define MIN_HEAP_SIZE   (64 * 1024 * 1024)   /* Minimum 64MB heap */
-#define MAX_HEAP_SIZE   (1024 * 1024 * 1024) /* Maximum 1GB for larger models */
+#define MIN_HEAP_SIZE   (64 * 1024 * 1024)      /* Minimum 64MB heap */
+#define MAX_HEAP_SIZE   (3UL * 1024 * 1024 * 1024) /* Maximum 3GB for >0.5B models */
 #define HEAP_PERCENT    70                    /* Use 70% of available memory for AI */
 #define MIN_BLOCK_SIZE  64
 #define ALIGNMENT       16
@@ -64,22 +64,25 @@ void heap_init(void)
     size_t heap_pages = heap_size / PAGE_SIZE;
     console_printf("Heap: Need %zu MB (%zu pages)\n", heap_size / (1024*1024), heap_pages);
 
-    /* Allocate heap memory from PMM */
+    /* Allocate heap memory from PMM. The heap must be one contiguous run of
+     * usable pages; if RAM is fragmented by holes (PCI hole below 4GB),
+     * halve the request until it fits, down to MIN_HEAP_SIZE. */
     console_printf("Heap: Allocating from PMM...\n");
-    void* heap_mem = pmm_alloc_pages(heap_pages);
-    console_printf("Heap: PMM returned %p\n", heap_mem);
-    if (!heap_mem) {
-        /* Fallback: try with minimum heap size */
-        console_printf("Heap: Failed to allocate %zu MB, trying minimum...\n",
-                       heap_size / (1024 * 1024));
-        heap_size = MIN_HEAP_SIZE;
+    void* heap_mem = NULL;
+    while (heap_size >= MIN_HEAP_SIZE) {
         heap_pages = heap_size / PAGE_SIZE;
         heap_mem = pmm_alloc_pages(heap_pages);
-
-        if (!heap_mem) {
-            console_printf("Heap: FATAL - Cannot allocate memory for heap!\n");
-            return;
+        if (heap_mem) {
+            break;
         }
+        console_printf("Heap: Failed to allocate %zu MB, halving...\n",
+                       heap_size / (1024 * 1024));
+        heap_size >>= 1;
+    }
+    console_printf("Heap: PMM returned %p\n", heap_mem);
+    if (!heap_mem) {
+        console_printf("Heap: FATAL - Cannot allocate memory for heap!\n");
+        return;
     }
 
     console_printf("Heap: Setting up state...\n");

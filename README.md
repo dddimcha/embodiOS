@@ -1,193 +1,239 @@
-# EMBODIOS - Bare-Metal AI Operating System
+# embodiOS
 
-[![Build](https://github.com/dddimcha/embodiOS/actions/workflows/kernel-ci.yml/badge.svg)](https://github.com/dddimcha/embodiOS/actions/workflows/kernel-ci.yml)
-[![License](https://img.shields.io/github/license/dddimcha/embodiOS)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/dddimcha/embodiOS?include_prereleases)](https://github.com/dddimcha/embodiOS/releases)
+**One binary. Any machine. No OS.**
 
-Run LLMs directly on hardware without any OS overhead. No Linux. No userspace. Just transformers and bare metal.
+`embodios.elf` is a bare-metal x86_64 kernel with a quantized LLM compiled
+straight into it — one file that *is* the operating system and the model.
+Boot it as a kernel, an ISO, or a USB stick, and you land in a chat session
+with a transformer running on raw hardware. No Linux. No libc. No userspace.
+No dependencies.
 
-## Quick Start
+![version](https://img.shields.io/badge/version-0.4.0-blue)
+![build](https://img.shields.io/badge/build-passing-brightgreen)
+![license](https://img.shields.io/badge/license-Apache--2.0-orange)
+![platform](https://img.shields.io/badge/platform-x86__64-lightgrey)
 
-### Prerequisites
+---
 
-**macOS:**
-```bash
-brew install x86_64-elf-gcc x86_64-elf-binutils x86_64-elf-grub xorriso qemu
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt install gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu grub-pc-bin xorriso qemu-system-x86
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S x86_64-elf-gcc x86_64-elf-binutils grub xorriso qemu
-```
-
-### Build and Run
+## 60-second quickstart
 
 ```bash
 git clone https://github.com/dddimcha/embodiOS.git
 cd embodiOS
-
-./embodi build
-./embodi run
+./embodi pull smollm   # fetch SmolLM-135M-Instruct Q4_K_M (~106 MB, sha256-verified)
+./embodi build         # link the model into embodios.elf
+./embodi run           # boot in QEMU — you're chatting with an LLM on bare metal
 ```
 
-## CLI Reference
+No toolchain yet? See [Prerequisites](docs/QUICKSTART.md#prerequisites) —
+one package install on macOS, Debian/Ubuntu, or Arch.
+
+## Run it your way
+
+| Format | Command | Status |
+|--------|---------|--------|
+| QEMU direct kernel (PVH) | `qemu-system-x86_64 -kernel kernel/embodios.elf -nographic` | ✅ Verified |
+| QEMU via CLI | `./embodi run` | ✅ Verified |
+| Bootable ISO (BIOS, multiboot2) | `./embodi iso && ./embodi run --iso` | ✅ Verified |
+| Bootable ISO (UEFI, OVMF) | `./embodi run --iso --uefi` | ✅ Verified |
+| USB stick | `sudo dd if=dist/embodios.iso of=/dev/sdX bs=4M status=progress conv=fsync` | ✅ Hybrid image (El Torito + ESP), hardware 📖 |
+| Real hardware | Boot the USB, pick it in the boot menu | 📖 Documented |
+
+Prebuilt `elf` + `iso` + a QUICKSTART ship in `dist/` via `./embodi release`.
+
+## What it looks like
 
 ```
-Usage: embodi <command> [options]
+  ███████╗███╗   ███╗██████╗  ██████╗ ██████╗ ██╗ ██████╗ ███████╗
+  ██╔════╝████╗ ████║██╔══██╗██╔═══██╗██╔══██╗██║██╔═══██╗██╔════╝
+  █████╗  ██╔████╔██║██████╔╝██║   ██║██║  ██║██║██║   ██║███████╗
+  ██╔══╝  ██║╚██╔╝██║██╔══██╗██║   ██║██║  ██║██║██║   ██║╚════██║
+  ███████╗██║ ╚═╝ ██║██████╔╝╚██████╔╝██████╔╝██║╚██████╔╝███████║
+  ╚══════╝╚═╝     ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝ ╚═════╝ ╚══════╝
+              One binary. Any machine. No OS.        v0.4.0 Pragma
 
-Commands:
-  build             Build the kernel
-  iso               Create bootable ISO
-  run               Run in QEMU
-  clean             Clean build artifacts
-  test              Run kernel tests
-  help              Show help
+  [ OK ] CPU features initialized
+  [ OK ] Memory: 2048 MB detected, identity-mapped
+  [ OK ] TCP/IP stack up
+  [....] Loading SmolLM-135M-Instruct Q4_K_M (106 MB) [██████████] 100%
+  [ OK ] Model ready — 30 layers, 48900 BPE merges, chatml template
+
+embodios> chat What is the capital of France?
+The capital of France is Paris.
+
+embodios> help
+  talk       interactive chat        demo       guided tour
+  status     model & system status   benchmark  inference benchmark
+  temp/topp  sampling controls       exo*       distributed inference
 ```
 
-### Build Kernel
+Greedy decoding matches the HuggingFace `transformers` reference output
+for SmolLM-135M-Instruct **word for word** — the answer above is not staged.
+
+## Features
+
+### LLM inference without an OS
+
+Full transformer inference in ring 0: GGUF parser, BPE tokenizer, RoPE, GQA,
+KV cache — all freestanding C. Supported architectures and quantization
+formats:
+
+| Architecture | Models | Status |
+|--------------|--------|--------|
+| `llama` | SmolLM-135M, TinyLlama-1.1B, Qwen2.5 | ✅ Verified |
+| `chatglm` | GLM-Edge-1.5B-Chat | ✅ Verified (synthetic + real GGUF forward pass) |
+| `glm4` | GLM-4-9B/32B-0414 | ✅ Verified (synthetic, numpy-checked) |
+
+| Quant | Bits/weight | Status |
+|-------|-------------|--------|
+| F32 / F16 | 32 / 16 | ✅ Verified |
+| Q4_0 / Q4_1 / Q5_0 | 4.5–5.5 | ✅ Verified |
+| Q8_0 | 8.5 | ✅ Verified (fused matmul) |
+| Q2_K / Q3_K / Q4_K / Q5_K / Q6_K | 2.6–6.6 | ✅ Bit-exact port of ggml `ggml-quants.c` |
+| IQ4_NL | 4.5 | ✅ Verified E2E |
+
+K-quant dequantization is byte-exact against llama.cpp (max abs error 0.0
+on real tensor data, `tools/verify_kquants.py`).
+
+### Tokenizer & chat formats
+
+Merge-order BPE (48,900 merges) with autodetected chat templates:
+ChatML, llama2, GLM. Override at runtime with `chatformat`.
+
+### Sampling controls
+
+Temperature (`temp 0..2`, 0 = greedy) and nucleus sampling (`topp 0..1`),
+live from the shell.
+
+### Distributed inference (exo-style) + OpenAI API
+
+Nodes discover each other over UDP (`:5678`), form a ring, and shard models
+layer-wise over a TCP transport. One node can serve an OpenAI-compatible
+API straight from bare metal:
+
+```
+embodios> exo                    # start node, UDP discovery on :5678
+embodios> exoshard even          # split layers across the ring
+embodios> exoserve 8080          # OpenAI-compatible HTTP API
+```
 
 ```bash
-./embodi build              # Standard build
-./embodi build --debug      # Debug build with symbols
+# QEMU: -netdev user,id=n0,hostfwd=tcp::18080-:8080 -device virtio-net-pci,netdev=n0
+curl -X POST localhost:18080/v1/chat/completions \
+  -d '{"model":"smollm","messages":[{"role":"user","content":"What is the capital of France?"}]}'
+# → {"choices":[{"message":{"content":"The capital of France is Paris."}}],...}
 ```
 
-### Create Bootable ISO
+Status: single-node ring fully working; a two-node ring agrees on 15/15
+shard splits and starts token exchange. Known limitation: virtio-net RX on
+the second guest under QEMU TCG — documented in `kernel/exo/README.md`.
 
-```bash
-./embodi iso                              # Without model
-./embodi iso --model models/smollm.gguf   # With embedded model
-```
+### Beautiful serial UX
 
-### Run in QEMU
+ASCII banner, colorized shell, a progress bar while the model loads, and a
+`demo` command that walks you through the highlights. All over a plain
+serial console — it has no business looking this good.
 
-```bash
-./embodi run                    # Run kernel directly
-./embodi run --memory 2G        # With more RAM
-./embodi run --iso              # Boot from ISO
-```
+### Tests & CI
 
-### Download Models
+`make test` runs the in-kernel test suite inside QEMU — **6/6 PASS**.
+GitHub Actions (`kernel-build` + `smoke-boot`) builds the kernel and boots
+it on every push.
 
-```bash
-mkdir -p models
+## Why embodiOS
 
-# SmolLM-135M (469MB, fast)
-curl -L -o models/smollm-135m.gguf \
-  "https://huggingface.co/HuggingFaceTB/SmolLM-135M-Instruct-GGUF/resolve/main/smollm-135m-instruct-q6_k.gguf"
+- **Zero dependencies.** No Linux, no libc, no runtime. The ELF is the whole
+  software stack — kernel, drivers, TCP/IP, tokenizer, model.
+- **One file to rule it all.** `embodios.elf` (~106 MB with SmolLM inside)
+  boots from QEMU, GRUB ISO, or a USB stick. Copy one file, boot anywhere.
+- **Educational value.** A complete, readable path from bootloader to
+  transformer logits — paging, memory management, GGUF parsing, BPE,
+  attention — nothing hidden behind an OS.
+- **A foundation for what's next.** GLM architectures and exo-style
+  distributed inference are already landed; the porting playbook is in
+  [docs/PORTING_GLM_EXO.md](docs/PORTING_GLM_EXO.md).
 
-# TinyLlama-1.1B (638MB, better quality)
-curl -L -o models/tinyllama-1.1b.gguf \
-  "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
-```
+## Performance, honestly
 
-## Run on Real Hardware
+Under QEMU **TCG** (pure software CPU emulation, no KVM) expect **~6–7
+seconds per token**. That's the emulator, not the kernel: with `-enable-kvm`
+or on real hardware the same binary runs orders of magnitude faster. Boot
+to shell is under a second either way.
 
-### Write to USB
+| Model | Size | How it runs | Status |
+|-------|------|-------------|--------|
+| SmolLM-135M-Instruct Q4_K_M | ~106 MB | Embedded in the ELF | ✅ Verified vs HF reference (word-exact) |
+| TinyLlama-1.1B-Chat Q4_K_M | ~669 MB | virtio-blk disk, `loadmodel`, 3 GB RAM | ✅ Verified in QEMU |
+| GLM-Edge-1.5B / GLM-4-9B (`chatglm`) | — | Embedded / `loadmodel` | ✅ Synthetic-verified + real GGUF forward pass |
+| GLM-4-9B/32B-0414 (`glm4`) | — | Embedded / `loadext` | ✅ Synthetic-verified (needs multi-GB RAM for real GGUF) |
+| Qwen2.5 0.5B/1.5B | — | Embedded | ⚠️ Runtime-supported, not yet QEMU-verified |
 
-```bash
-./embodi iso --model models/smollm-135m.gguf
+## Shell commands
 
-# Write to USB (replace /dev/sdX with your device)
-sudo dd if=build/embodios.iso of=/dev/sdX bs=4M status=progress conv=fsync
-```
+| Command | What it does |
+|---------|--------------|
+| `talk` | Interactive chat session (`exit` to leave) |
+| `chat <msg>` | Single-shot message to the model |
+| `demo` | Guided tour of the kernel + model |
+| `status` / `version` | Model & system status / kernel version |
+| `benchmark` / `perf` | Full inference benchmark / last-run timings |
+| `validate` | Validate the loaded model (5 checks) |
+| `temp [0..2]` / `topp [0..1]` | Sampling temperature / nucleus threshold |
+| `chatformat` | Chat template: `auto / off / chatml / llama2 / glm` |
+| `loadmodel` | Load a GGUF model from a virtio-blk disk |
+| `exo` / `exonodes` / `exoshard` | Distributed node: start, peers, layer shard |
+| `exoserve [port]` | OpenAI-compatible API server |
+| `mem` / `lspci` / `reboot` | Memory, PCI devices, reboot |
+| `uptime` / `power` | Uptime & ticks / power & idle telemetry |
+| `shutdown` / `poweroff` | Real ACPI S5 poweroff (PIIX4/ICH9) |
+| `cpus` / `smpwork` / `smpbench` | SMP: online cores / AP work demo / parallel matmul bench |
+| `fls` / `fsave` / `fload` / `frm` / `df` | embfs persistent files on virtio-blk |
+| `color on\|off` | Toggle ANSI colors |
+| `help` / `help all` / `help ai` | Command reference |
 
-### Boot
+## Kernel capabilities (the old roadmap — now actually done)
 
-1. Insert USB into target machine
-2. Enter BIOS boot menu (F12, F2, or Del)
-3. Select USB device
-4. EMBODIOS boots to AI shell
+| Capability | Status |
+|------------|--------|
+| Preemptive multitasking | ✅ PIT IRQ0 @100 Hz drives a priority preemptive scheduler with real context switches (`tasktest` shows interleaved tasks); `-append poll` keeps the old polling mode |
+| Interrupt handling (IDT/GDT) | ✅ IDT with full register-dump panics, remapped PIC 8259, LAPIC LVT setup, EOI-before-dispatch |
+| Model runtime | ✅ GGUF + 12 quant formats + llama/chatglm/glm4 architectures |
+| Command processor | ✅ 30+ command shell with boxed help |
+| Network stack | ✅ TCP/IP + virtio-net/e1000e + exo distributed inference + OpenAI API |
+| Persistent storage | ✅ virtio-blk write + `embfs` mini-FS (atomic double-buffered commits, CRC32) + persistent config across reboots |
+| Multi-core (SMP) | ✅ Real AP boot via INIT-SIPI-SIPI trampoline; parallel inference workers run on real cores (`-smp 4` verified, `cpus` shows per-core work) |
+| Power management | ✅ ACPI S5 shutdown, hardened reboot, `hlt` idle (~99% host CPU saved vs busy-poll) |
 
-## Shell Commands
+## Roadmap
 
-| Command | Description |
-|---------|-------------|
-| `talk` | Start interactive AI chat |
-| `chat <msg>` | Single message to AI |
-| `status` | System and AI status |
-| `help` | Show all commands |
-| `benchmark` | Run inference benchmark |
-| `mem` | Memory usage |
-| `perf` | Chat performance stats |
-
-### Example Session
-
-```
-embodios> talk
-You> Hello!
-AI>  Hello! How can I help you today?
-You> exit
-
-embodios> status
-  AI: Ready (SmolLM-135M)
-  Memory: 120MB / 512MB
-```
-
-## Supported Models
-
-| Model | Size | Quantization |
-|-------|------|--------------|
-| SmolLM-135M | 469 MB | Q6_K |
-| TinyLlama-1.1B | 638 MB | Q4_K_M |
-| Phi-2-2.7B | 1.7 GB | Q4_K_M |
-| Mistral-7B | 4.2 GB | Q4_K_M |
-
-Any GGUF model from Ollama/HuggingFace should work.
-
-## Project Structure
-
-```
-embodiOS/
-├── embodi              # CLI tool
-├── kernel/             # Kernel source
-│   ├── ai/             # AI runtime (GGUF, tokenizer, inference)
-│   ├── core/           # Kernel core (console, scheduler)
-│   ├── drivers/        # Hardware drivers (PCI, NVMe, network)
-│   ├── mm/             # Memory management
-│   └── Makefile
-├── models/             # GGUF models (download separately)
-├── scripts/            # Build scripts
-└── build/              # Output (ISO, etc.)
-```
-
-## Performance
-
-| Metric | EMBODIOS | llama.cpp |
-|--------|----------|-----------|
-| Memory | 120 MB | 160 MB |
-| Latency jitter | ±0.5ms | ±5-10ms |
-| Boot time | <1 sec | N/A |
-| First token | <20ms | ~50ms |
+- [ ] Direct UEFI boot without GRUB (hybrid BIOS+UEFI ISO already ships)
+- [ ] Per-CPU LAPIC timers + IPI wakeups (APs currently poll a mailbox with IF=0)
+- [ ] More verified models (Qwen2.5, larger GLM variants)
+- [ ] Multi-node exo inference over a real network (two-node ring works
+      under QEMU with a documented TCG caveat)
+- [ ] GPU backend (`kernel/ai/gpu_backend.c` scaffold is in place)
 
 ## Documentation
 
-- [Wiki](https://github.com/dddimcha/embodiOS/wiki)
-- [Getting Started](https://github.com/dddimcha/embodiOS/wiki/Getting-Started)
-- [Console Commands](https://github.com/dddimcha/embodiOS/wiki/Console-Commands)
-- [Architecture](https://github.com/dddimcha/embodiOS/wiki/Architecture-Overview)
-- [Current State](https://github.com/dddimcha/embodiOS/wiki/Current-State-Analysis)
+- [docs/QUICKSTART.md](docs/QUICKSTART.md) — get from zero to chat in minutes
+- [docs/PORTING_GLM_EXO.md](docs/PORTING_GLM_EXO.md) — porting GLM & exo playbook
+- [kernel/exo/README.md](kernel/exo/README.md) — distributed inference internals
+- [models/README.md](models/README.md) — model downloads, manifest, checksums
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to contribute
 
 ## Contributing
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/embodiOS.git
-cd embodiOS
-git checkout -b feature/my-feature
-./embodi build
-./embodi test
-# Submit PR
+cd embodiOS && git checkout -b feature/my-feature
+./embodi build && ./embodi test
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE)
+Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Links
 

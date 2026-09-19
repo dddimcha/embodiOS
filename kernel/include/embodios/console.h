@@ -18,6 +18,9 @@ size_t console_readline(char* buffer, size_t max_len);
 /* Console control */
 void console_flush(void);
 void console_clear(void);
+
+/* Force-release the SMP console lock (kernel_panic path only) */
+void console_force_unlock(void);
 void console_set_color(uint8_t fg, uint8_t bg);
 
 /* Color codes */

@@ -11,7 +11,8 @@ ISO_DIR="$ROOT_DIR/build/iso"
 GRUB_CFG="$ISO_DIR/boot/grub/grub.cfg"
 
 # Default model (can be overridden)
-MODEL="${MODEL:-$ROOT_DIR/models/smollm-135m.gguf}"
+# Default model matches what `embodi pull smollm` downloads
+MODEL="${MODEL:-$ROOT_DIR/models/smollm-135m-instruct-q4_k_m.gguf}"
 OUTPUT="${OUTPUT:-$ROOT_DIR/build/embodios.iso}"
 
 # Colors for output
@@ -45,11 +46,28 @@ check_deps() {
     fi
     
     log "Using: $GRUB_MKRESCUE"
-    
+
     if ! command -v xorriso &> /dev/null; then
         error "xorriso not found. Install: brew install xorriso (macOS) or apt install xorriso (Linux)"
     fi
-    
+
+    # Detect GRUB platform modules: i386-pc (BIOS El Torito) + x86_64-efi (UEFI ESP).
+    # grub-mkrescue emits a hybrid BIOS+UEFI ISO automatically when both are present.
+    GRUB_LIBDIR=""
+    for d in /tmp/lib/grub /usr/lib/grub "$HOME/sysroot/usr/lib/grub" /usr/local/lib/grub; do
+        if [ -d "$d/i386-pc" ]; then GRUB_LIBDIR="$d"; break; fi
+    done
+    if [ -n "$GRUB_LIBDIR" ]; then
+        if [ -d "$GRUB_LIBDIR/x86_64-efi" ]; then
+            log "GRUB modules: i386-pc + x86_64-efi found in $GRUB_LIBDIR -> hybrid BIOS+UEFI ISO"
+        else
+            warn "x86_64-efi GRUB modules not found in $GRUB_LIBDIR - ISO will be BIOS-only"
+            warn "Install grub-efi-amd64-bin (or run scripts/bootstrap_toolchain.sh) for UEFI support"
+        fi
+    else
+        warn "Could not locate GRUB module directory - relying on grub-mkrescue defaults"
+    fi
+
     log "Dependencies OK"
 }
 
@@ -62,18 +80,20 @@ build_kernel() {
         MODEL="$ROOT_DIR/$MODEL"
     fi
     
-    if [ ! -f "$MODEL" ]; then
-        error "Model not found: $MODEL"
-    fi
-    
-    MODEL_SIZE=$(du -h "$MODEL" | cut -f1)
-    log "Using model: $MODEL ($MODEL_SIZE)"
-    
     cd "$KERNEL_DIR"
     make clean
-    
-    # Use absolute path for make
-    make GGUF_MODEL="$MODEL"
+
+    if [ ! -f "$MODEL" ]; then
+        warn "Model not found: $MODEL"
+        warn "Building kernel WITHOUT an embedded model"
+        MODEL=""
+        make GGUF_MODEL=
+    else
+        MODEL_SIZE=$(du -h "$MODEL" | cut -f1)
+        log "Using model: $MODEL ($MODEL_SIZE)"
+        # Use absolute path for make
+        make GGUF_MODEL="$MODEL"
+    fi
     
     if [ ! -f "embodios.elf" ]; then
         error "Kernel build failed"
@@ -83,7 +103,6 @@ build_kernel() {
     KERNEL_SIZE=$(stat -f%z "embodios.elf" 2>/dev/null || stat -c%s "embodios.elf" 2>/dev/null)
     if [ "$KERNEL_SIZE" -lt 10000000 ]; then
         warn "Kernel is only $(du -h embodios.elf | cut -f1) - model may not be embedded!"
-        warn "Expected > 400MB for SmolLM model"
     else
         log "Kernel size: $(du -h embodios.elf | cut -f1) (model embedded)"
     fi
@@ -102,11 +121,19 @@ create_iso_structure() {
     cp "$KERNEL_DIR/embodios.elf" "$ISO_DIR/boot/"
     
     # Create manifest
-    MODEL_NAME=$(basename "$MODEL" .gguf)
-    MODEL_QUANT=$(echo "$MODEL_NAME" | grep -oP 'Q[0-9]_K(_M)?' || echo "unknown")
-    MODEL_PARAMS=$(du -h "$MODEL" | cut -f1)
+    if [ -n "$MODEL" ] && [ -f "$MODEL" ]; then
+        MODEL_NAME=$(basename "$MODEL" .gguf)
+        MODEL_QUANT=$(echo "$MODEL_NAME" | grep -oP 'Q[0-9]_K(_M)?' || echo "unknown")
+        MODEL_PARAMS=$(du -h "$MODEL" | cut -f1)
+    else
+        MODEL_NAME="none"
+        MODEL_QUANT="none"
+        MODEL_PARAMS="0"
+    fi
     BUILD_DATE=$(date -Iseconds)
     GIT_COMMIT=$(cd "$ROOT_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    # Keep manifest in sync with the kernel version (single source of truth)
+    KERNEL_VERSION=$(grep -oP 'kernel_version = "\Kv[0-9.]+' "$KERNEL_DIR/core/kernel.c" || echo "unknown")
     
     cat > "$ISO_DIR/boot/manifest.json" << EOF
 {
@@ -114,7 +141,7 @@ create_iso_structure() {
   "name": "EMBODIOS Production ISO",
   "kernel": {
     "path": "/boot/embodios.elf",
-    "version": "0.1.0-native",
+    "version": "$KERNEL_VERSION",
     "arch": "x86_64"
   },
   "model": {
@@ -136,27 +163,29 @@ EOF
 create_grub_config() {
     log "Creating GRUB configuration..."
     
-    cat > "$GRUB_CFG" << 'EOF'
-# EMBODIOS Boot Configuration
-set timeout=5
+    # KERNEL_VERSION comes from kernel/core/kernel.c (set in create_iso_structure)
+    local v="${KERNEL_VERSION:-unknown}"
+    cat > "$GRUB_CFG" << EOF
+# EMBODIOS Boot Configuration (BIOS + UEFI via GRUB multiboot2)
+set timeout=3
 set default=0
 
 # Boot menu styling
 set menu_color_normal=white/black
 set menu_color_highlight=black/light-gray
 
-menuentry "EMBODIOS - Bare Metal AI OS" {
-    multiboot /boot/embodios.elf
+menuentry "EMBODIOS $v - AI OS" {
+    multiboot2 /boot/embodios.elf
     boot
 }
 
-menuentry "EMBODIOS - Debug Mode (Serial Console)" {
-    multiboot /boot/embodios.elf debug serial
+menuentry "EMBODIOS $v - Debug Mode (Serial Console)" {
+    multiboot2 /boot/embodios.elf debug serial
     boot
 }
 
-menuentry "EMBODIOS - Safe Mode (No AI)" {
-    multiboot /boot/embodios.elf noai
+menuentry "EMBODIOS $v - Safe Mode (No AI)" {
+    multiboot2 /boot/embodios.elf noai
     boot
 }
 
@@ -181,13 +210,19 @@ build_iso() {
     # GRUB_MKRESCUE is set in check_deps()
     log "Running: $GRUB_MKRESCUE -o $OUTPUT $ISO_DIR"
     $GRUB_MKRESCUE -o "$OUTPUT" "$ISO_DIR"
-    
+
     if [ ! -f "$OUTPUT" ]; then
         error "ISO build failed"
     fi
-    
+
     ISO_SIZE=$(du -h "$OUTPUT" | cut -f1)
     log "ISO created: $OUTPUT ($ISO_SIZE)"
+
+    # Report El Torito boot entries (BIOS + UEFI) for verification
+    if command -v xorriso &> /dev/null; then
+        log "El Torito catalog:"
+        xorriso -indev "$OUTPUT" -report_el_torito plain 2>/dev/null | grep -E '^(El Torito|.*boot img|.*platform|.*bootability)' || true
+    fi
 }
 
 # Print usage
@@ -195,7 +230,7 @@ usage() {
     echo "Usage: $0 [options]"
     echo ""
     echo "Options:"
-    echo "  -m, --model PATH    Path to GGUF model (default: models/smollm-135m.gguf)"
+    echo "  -m, --model PATH    Path to GGUF model (default: models/smollm-135m-instruct-q4_k_m.gguf)"
     echo "  -o, --output PATH   Output ISO path (default: build/embodios.iso)"
     echo "  -h, --help          Show this help"
     echo ""
@@ -242,10 +277,13 @@ main() {
     log "ISO build complete!"
     log "=========================================="
     log ""
-    log "To test in QEMU:"
-    log "  qemu-system-x86_64 -cdrom $OUTPUT -m 1024M -serial stdio"
+    log "To test in QEMU (BIOS):"
+    log "  qemu-system-x86_64 -cdrom $OUTPUT -m 1024M -serial stdio -display none"
     log ""
-    log "To write to USB:"
+    log "To test in QEMU (UEFI):"
+    log "  qemu-system-x86_64 -bios /usr/share/OVMF/OVMF_CODE.fd -cdrom $OUTPUT -m 1024M -serial stdio -display none"
+    log ""
+    log "To write to USB (hybrid image, BIOS+UEFI):"
     log "  sudo dd if=$OUTPUT of=/dev/sdX bs=4M status=progress"
     log ""
 }

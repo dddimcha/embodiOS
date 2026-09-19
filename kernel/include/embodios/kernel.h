@@ -26,6 +26,12 @@ void arch_enable_interrupts(void);
 void arch_disable_interrupts(void);
 void arch_halt(void);
 
+/* True when IRQs are unmasked and IF=1 (false in 'poll' fallback mode) */
+bool kernel_interrupts_enabled(void);
+
+/* Number of hlt idle sleeps entered by kernel_loop (0 in polling mode) */
+uint64_t kernel_idle_hlt_count(void);
+
 /* Forward declaration */
 struct embodios_model;
 

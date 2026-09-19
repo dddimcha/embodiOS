@@ -2,7 +2,10 @@
  * EMBODIOS Quantized Operations Header
  *
  * Pure integer dequantization for GGUF quantization types.
- * Supports Q4_K, Q5_K, Q6_K, and Q8_0.
+ * Supports Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, and Q8_0.
+ *
+ * Q2_K/Q3_K/Q5_K are ggml-faithful ports (fp16 super-block scales);
+ * Q4_K/Q6_K use the legacy Q8.8 fixed-point block scale convention.
  *
  * Uses Q16.16 fixed-point arithmetic (no floating-point).
  */
@@ -70,9 +73,29 @@ struct block_q4_k {
     uint8_t qs[QK_K/2];
 } __attribute__((packed));
 
+/* Q2_K: ggml-compatible layout, d/dmin are raw fp16 bits.
+ * Size: 16 + 64 + 2 + 2 = 84 bytes, 256 values per block. */
+struct block_q2_k {
+    uint8_t scales[QK_K/16];  /* 4-bit packed scales (low nibble) and mins (high) */
+    uint8_t qs[QK_K/4];       /* 2-bit quants */
+    uint16_t d;               /* super-block scale, fp16 bits */
+    uint16_t dmin;            /* super-block min scale, fp16 bits */
+} __attribute__((packed));
+
+/* Q3_K: ggml-compatible layout, d is raw fp16 bits.
+ * Size: 32 + 64 + 12 + 2 = 110 bytes, 256 values per block. */
+struct block_q3_k {
+    uint8_t hmask[QK_K/8];    /* quants - high bit */
+    uint8_t qs[QK_K/4];       /* quants - low 2 bits */
+    uint8_t scales[12];       /* 6-bit packed signed scales (biased +32) */
+    uint16_t d;               /* super-block scale, fp16 bits */
+} __attribute__((packed));
+
+/* Q5_K: ggml-compatible layout, d/dmin are raw fp16 bits.
+ * Size: 2 + 2 + 12 + 32 + 128 = 176 bytes, 256 values per block. */
 struct block_q5_k {
-    fixed16_t d;
-    fixed16_t dmin;
+    uint16_t d;               /* super-block scale, fp16 bits */
+    uint16_t dmin;            /* super-block min scale, fp16 bits */
     uint8_t scales[K_SCALE_SIZE];
     uint8_t qh[QK_K/8];
     uint8_t qs[QK_K/2];
@@ -93,6 +116,16 @@ struct block_q8_0 {
 /* ============================================================================
  * Block-level Dequantization
  * ============================================================================ */
+
+/**
+ * Dequantize a single Q2_K block (256 values)
+ */
+void dequantize_block_q2_k(const struct block_q2_k* block, fixed_t* output);
+
+/**
+ * Dequantize a single Q3_K block (256 values)
+ */
+void dequantize_block_q3_k(const struct block_q3_k* block, fixed_t* output);
 
 /**
  * Dequantize a single Q4_K block (256 values)
@@ -117,6 +150,19 @@ void dequantize_block_q8_0(const struct block_q8_0* block, fixed_t* output);
 /* ============================================================================
  * Tensor-level Dequantization
  * ============================================================================ */
+
+/**
+ * Dequantize Q2_K tensor
+ * @return 0 on success, -1 on invalid size
+ */
+int dequantize_q2_k(const void* quantized_data, size_t quantized_size,
+                    fixed_t* output, size_t n_values);
+
+/**
+ * Dequantize Q3_K tensor
+ */
+int dequantize_q3_k(const void* quantized_data, size_t quantized_size,
+                    fixed_t* output, size_t n_values);
 
 /**
  * Dequantize Q4_K tensor
@@ -155,6 +201,12 @@ int dequantize_tensor(quant_type_t type, const void* quantized_data,
  * Quantized Matrix-Vector Multiplication
  * Computes y = A * x where A is quantized
  * ============================================================================ */
+
+int matmul_q2_k(const void* A_quantized, size_t A_quant_size,
+                const fixed_t* x, fixed_t* y, size_t m, size_t n);
+
+int matmul_q3_k(const void* A_quantized, size_t A_quant_size,
+                const fixed_t* x, fixed_t* y, size_t m, size_t n);
 
 int matmul_q4_k(const void* A_quantized, size_t A_quant_size,
                 const fixed_t* x, fixed_t* y, size_t m, size_t n);
@@ -197,7 +249,8 @@ const char* get_type_name(quant_type_t type);
  * Check if a quantization type is supported
  */
 static inline bool is_quant_type_supported(quant_type_t type) {
-    return type == QUANT_TYPE_Q4_K || type == QUANT_TYPE_Q5_K ||
+    return type == QUANT_TYPE_Q2_K || type == QUANT_TYPE_Q3_K ||
+           type == QUANT_TYPE_Q4_K || type == QUANT_TYPE_Q5_K ||
            type == QUANT_TYPE_Q6_K || type == QUANT_TYPE_Q8_0;
 }
 
