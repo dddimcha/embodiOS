@@ -14,12 +14,16 @@
 
 #include <embodios/console.h>
 #include <embodios/gguf_parser.h>
+#include <embodios/kquants_dequant.h>
+#include <embodios/simd_kernels.h>
 #include <embodios/mm.h>
 #include <embodios/types.h>
 #include <embodios/streaming_inference.h>
 #include <embodios/parallel_inference.h>
 #include <embodios/kernel.h>
 #include <embodios/profiler.h>
+#include <embodios/cpu.h>
+#include <embodios/ui.h>
 
 /* Enable parallel inference (set to 0 to disable) */
 #ifndef PARALLEL_INFERENCE_ENABLED
@@ -209,6 +213,16 @@ typedef struct {
     int eos_token_id;  /* End of sequence token */
     int bos_token_id;  /* Beginning of sequence token */
 
+    /* Extra stop token IDs (GLM: <|user|>, <|assistant|>, ...) */
+    int stop_token_ids[4];
+    int n_stop_tokens;
+
+    /* GLM (chatglm/glm4) architecture features */
+    int rope_n_dims;     /* Partial rotary dims per head (0 or head_dim = full) */
+    int fused_qkv;       /* blk.N.attn_qkv.weight/.bias instead of separate q/k/v */
+    int fused_ffn_up;    /* blk.N.ffn_up holds [gate|up] (SwiGLU seq-split) */
+    int has_post_norms;  /* attn_post_norm + ffn_post_norm (glm4) */
+
     /* Architecture name */
     char arch_name[64];
 } StreamingConfig;
@@ -286,10 +300,20 @@ typedef struct {
     int ffn_gate_type;
     int ffn_up_type;
     int ffn_down_type;
+    /* Optional QKV biases (Qwen2/GLM-4 style) - dequantized at init, NULL if absent */
+    float* attn_q_bias;  /* [dim] */
+    float* attn_k_bias;  /* [kv_dim] */
+    float* attn_v_bias;  /* [kv_dim] */
+    /* Optional post-norms (glm4): applied inside the residual branches */
+    const void* attn_post_norm;
+    const void* ffn_post_norm;
+    int attn_post_norm_type;
+    int ffn_post_norm_type;
 } LayerWeights;
 
 static GlobalWeights g_weights = {0};
 static LayerWeights* g_layer_weights = NULL;
+static bool g_has_qkv_bias = false;  /* True if model has attn_q/k/v.bias (Qwen2/GLM-4) */
 
 /* ============================================================================
  * Deterministic Mode Critical Section Helpers
@@ -382,18 +406,8 @@ typedef struct __attribute__((packed)) {
     uint8_t qs[QK4_1 / 2];
 } block_q4_1;
 
-typedef struct __attribute__((packed)) {
-    uint16_t d;
-    int8_t qs[QK8_0];
-} block_q8_0;
-
-/* Q4_K block structure */
-typedef struct __attribute__((packed)) {
-    uint16_t d;
-    uint16_t dmin;
-    uint8_t scales[12];
-    uint8_t qs[QK_K / 2];
-} block_q4_K;
+/* block_q8_0 / block_q8_1 / block_q4_K / block_q5_0 / block_q6_K come from
+ * embodios/simd_kernels.h (shared with the SIMD kernel translation units). */
 
 /* Q2_K block structure - 2-bit K-quantization
  * 256 elements per block, ~2.625 bits per weight
@@ -406,25 +420,18 @@ typedef struct __attribute__((packed)) {
     uint16_t dmin;             /* super-block scale for quantized mins */
 } block_q2_K;
 
-/* Q6_K block structure - 6-bit K-quantization */
-typedef struct __attribute__((packed)) {
-    uint8_t ql[QK_K / 2];     /* low 4 bits of quants */
-    uint8_t qh[QK_K / 4];     /* high 2 bits of quants */
-    int8_t scales[QK_K / 16]; /* scales */
-    uint16_t d;               /* super-block scale */
-} block_q6_K;
+/* Q3_K / Q5_K / IQ4_NL block structures - shared ggml-compatible definitions */
+typedef kquant_block_q3_K block_q3_K;
+typedef kquant_block_q5_K block_q5_K;
+typedef kquant_block_iq4_nl block_iq4_nl;
 
 /* ============================================================================
  * FUSED QUANTIZED OPERATIONS - No dequantization overhead
  * These operate directly on quantized data using integer SIMD
  * ============================================================================ */
 
-/* Q8_1 block for quantized input (includes sum for fused matmul) */
-typedef struct __attribute__((packed)) {
-    float d;                  /* scale */
-    float s;                  /* sum of elements (for fused matmul) */
-    int8_t qs[QK8_0];        /* quantized values */
-} block_q8_1;
+/* Q8_1 block for quantized input (includes sum for fused matmul)
+ * type: block_q8_1 from embodios/simd_kernels.h */
 
 /* Quantize float input to Q8_1 format on-the-fly
  * Q8_1 includes d (scale) and s (d * sum(qs)) for efficient fused matmul
@@ -464,158 +471,10 @@ static void quantize_row_q8_1(const float* x, block_q8_1* y, int k) {
     }
 }
 
-/* Fused Q8_0 x Q8_1 dot product using integer SIMD
- * Computes: sum(dequant(q8_0) * dequant(q8_1))
- *         = sum(d0 * qs0[i] * d1 * qs1[i])
- *         = d0 * d1 * sum(qs0[i] * qs1[i])
- * The integer sum is computed with SIMD, then scaled at the end.
- */
-#if defined(__x86_64__) || defined(_M_X64)
-static float vec_dot_q8_0_q8_1_sse(const block_q8_0* x, const block_q8_1* y, int nb) {
-    float sumf = 0.0f;
-
-    for (int i = 0; i < nb; i++) {
-        float d0 = fp16_to_fp32(x[i].d);
-        float d1 = fp16_to_fp32(y[i].d);
-
-        /* SSE2 integer dot product */
-        __m128i sum_vec = _mm_setzero_si128();
-
-        for (int j = 0; j < QK8_0; j += 16) {
-            /* Load 16 int8 values from each */
-            __m128i ax = _mm_loadu_si128((const __m128i*)(x[i].qs + j));
-            __m128i ay = _mm_loadu_si128((const __m128i*)(y[i].qs + j));
-
-            /* Unpack to 16-bit and multiply */
-            __m128i ax_lo = _mm_srai_epi16(_mm_unpacklo_epi8(ax, ax), 8);
-            __m128i ax_hi = _mm_srai_epi16(_mm_unpackhi_epi8(ax, ax), 8);
-            __m128i ay_lo = _mm_srai_epi16(_mm_unpacklo_epi8(ay, ay), 8);
-            __m128i ay_hi = _mm_srai_epi16(_mm_unpackhi_epi8(ay, ay), 8);
-
-            /* Multiply and add pairs */
-            __m128i prod_lo = _mm_madd_epi16(ax_lo, ay_lo);
-            __m128i prod_hi = _mm_madd_epi16(ax_hi, ay_hi);
-
-            sum_vec = _mm_add_epi32(sum_vec, prod_lo);
-            sum_vec = _mm_add_epi32(sum_vec, prod_hi);
-        }
-
-        /* Horizontal sum of 4 int32s */
-        __m128i sum_hi = _mm_shuffle_epi32(sum_vec, _MM_SHUFFLE(1, 0, 3, 2));
-        sum_vec = _mm_add_epi32(sum_vec, sum_hi);
-        sum_hi = _mm_shuffle_epi32(sum_vec, _MM_SHUFFLE(2, 3, 0, 1));
-        sum_vec = _mm_add_epi32(sum_vec, sum_hi);
-
-        int32_t isum = _mm_cvtsi128_si32(sum_vec);
-        sumf += d0 * d1 * (float)isum;
-    }
-
-    return sumf;
-}
-
-#ifdef __AVX2__
-static float vec_dot_q8_0_q8_1_avx2(const block_q8_0* x, const block_q8_1* y, int nb) {
-    __m256 accum = _mm256_setzero_ps();
-
-    for (int i = 0; i < nb; i++) {
-        float d0 = fp16_to_fp32(x[i].d);
-        float d1 = fp16_to_fp32(y[i].d);
-
-        /* Load 32 int8 values */
-        __m256i ax = _mm256_loadu_si256((const __m256i*)x[i].qs);
-        __m256i ay = _mm256_loadu_si256((const __m256i*)y[i].qs);
-
-        /* Sign-extend to 16-bit and multiply-add */
-        __m256i ax_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(ax));
-        __m256i ax_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(ax, 1));
-        __m256i ay_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(ay));
-        __m256i ay_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(ay, 1));
-
-        __m256i prod_lo = _mm256_madd_epi16(ax_lo, ay_lo);
-        __m256i prod_hi = _mm256_madd_epi16(ax_hi, ay_hi);
-        __m256i sum32 = _mm256_add_epi32(prod_lo, prod_hi);
-
-        /* Horizontal sum */
-        __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(sum32),
-                                        _mm256_extracti128_si256(sum32, 1));
-        sum128 = _mm_hadd_epi32(sum128, sum128);
-        sum128 = _mm_hadd_epi32(sum128, sum128);
-
-        int32_t isum = _mm_cvtsi128_si32(sum128);
-        __m256 scale = _mm256_set1_ps(d0 * d1 * (float)isum);
-        accum = _mm256_add_ps(accum, scale);
-    }
-
-    /* Final horizontal sum */
-    __m128 sum128 = _mm_add_ps(_mm256_castps256_ps128(accum),
-                               _mm256_extractf128_ps(accum, 1));
-    sum128 = _mm_hadd_ps(sum128, sum128);
-    sum128 = _mm_hadd_ps(sum128, sum128);
-    return _mm_cvtss_f32(sum128);
-}
-#endif /* __AVX2__ */
-
-/* Dispatcher for Q8_0 x Q8_1 dot product */
-static inline float vec_dot_q8_0_q8_1(const block_q8_0* x, const block_q8_1* y, int nb) {
-#ifdef __AVX2__
-    if (has_avx2()) {
-        return vec_dot_q8_0_q8_1_avx2(x, y, nb);
-    }
-#endif
-    return vec_dot_q8_0_q8_1_sse(x, y, nb);
-}
-
-#elif defined(__aarch64__)
-/* ARM NEON fused Q8_0 x Q8_1 dot product */
-static float vec_dot_q8_0_q8_1(const block_q8_0* x, const block_q8_1* y, int nb) {
-    float sumf = 0.0f;
-
-    for (int i = 0; i < nb; i++) {
-        float d0 = fp16_to_fp32(x[i].d);
-        float d1 = fp16_to_fp32(y[i].d);
-
-        int32x4_t sum_vec = vdupq_n_s32(0);
-
-        for (int j = 0; j < QK8_0; j += 16) {
-            int8x16_t ax = vld1q_s8(x[i].qs + j);
-            int8x16_t ay = vld1q_s8(y[i].qs + j);
-
-            /* Multiply low and high halves */
-            int16x8_t prod_lo = vmull_s8(vget_low_s8(ax), vget_low_s8(ay));
-            int16x8_t prod_hi = vmull_s8(vget_high_s8(ax), vget_high_s8(ay));
-
-            /* Pairwise add to 32-bit and accumulate */
-            sum_vec = vpadalq_s16(sum_vec, prod_lo);
-            sum_vec = vpadalq_s16(sum_vec, prod_hi);
-        }
-
-        int32_t isum = vaddvq_s32(sum_vec);
-        sumf += d0 * d1 * (float)isum;
-    }
-
-    return sumf;
-}
-
-#else
-/* Scalar fallback */
-static float vec_dot_q8_0_q8_1(const block_q8_0* x, const block_q8_1* y, int nb) {
-    float sumf = 0.0f;
-
-    for (int i = 0; i < nb; i++) {
-        float d0 = fp16_to_fp32(x[i].d);
-        float d1 = fp16_to_fp32(y[i].d);
-        int32_t isum = 0;
-
-        for (int j = 0; j < QK8_0; j++) {
-            isum += (int32_t)x[i].qs[j] * (int32_t)y[i].qs[j];
-        }
-
-        sumf += d0 * d1 * (float)isum;
-    }
-
-    return sumf;
-}
-#endif
+/* Fused Q8_0 x Q8_1 dot product: implementations moved to
+ * kernel/ai/simd_kernels_scalar.c (scalar/SSE2/NEON) and
+ * kernel/ai/simd_kernels_avx2.c (AVX2, -mavx2 TU). Calls go through the
+ * runtime dispatch pointer g_vec_dot_q8_0_q8_1 (simd_dispatch.c). */
 
 /* Pre-allocated buffer for quantized input (reused across calls) */
 static block_q8_1* g_input_q8 = NULL;
@@ -623,6 +482,8 @@ static int g_input_q8_size = 0;
 
 /* Counters for quantization path usage (useful for profiling) */
 static uint32_t g_q8_fused_count = 0;
+static uint32_t g_q5_fused_count = 0;
+static uint32_t g_q6k_fused_count = 0;
 static uint32_t g_dequant_count = 0;
 
 /* Fused Q8_0 matrix-vector multiply
@@ -647,7 +508,7 @@ static void matmul_q8_0_fused(float* out, const void* w_q8_0, const float* x,
     /* Compute each output row */
     for (int r = 0; r < rows; r++) {
         const block_q8_0* row_weights = &weights[r * nb_cols];
-        out[r] = vec_dot_q8_0_q8_1(row_weights, g_input_q8, nb_cols);
+        out[r] = g_vec_dot_q8_0_q8_1(row_weights, g_input_q8, nb_cols);
     }
 }
 
@@ -660,142 +521,10 @@ static uint32_t g_q4k_fused_count = 0;
  * This is ~3-5x faster than dequant-then-float-matmul for Q4_K
  * ============================================================================ */
 
-/* Extract scale and min from K-quant scale bytes */
-static inline void get_scale_min_k4_fused(int j, const uint8_t* q, uint8_t* d, uint8_t* m) {
-    if (j < 4) {
-        *d = q[j] & 63;
-        *m = q[j + 4] & 63;
-    } else {
-        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
-        *m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
-    }
-}
-
-/* Q4_K x Q8_1 vector dot product
- * Weight: Q4_K block (256 elements per block)
- * Input: Q8_1 block (32 elements per block)
- * For each Q4_K block, we need 8 Q8_1 blocks (256/32 = 8)
- *
- * Q4_K layout (128 bytes for 256 elements):
- * - Bytes 0-31: groups 0,1 (low nibbles=group0, high nibbles=group1)
- * - Bytes 32-63: groups 2,3 (low nibbles=group2, high nibbles=group3)
- * - Bytes 64-95: groups 4,5 (low nibbles=group4, high nibbles=group5)
- * - Bytes 96-127: groups 6,7 (low nibbles=group6, high nibbles=group7)
- */
-#ifdef __aarch64__
-static float vec_dot_q4_k_q8_1(const block_q4_K* x, const block_q8_1* y, int nb) {
-    float sumf = 0.0f;
-
-    for (int i = 0; i < nb; i++) {
-        const block_q4_K* xb = &x[i];
-        float xd = fp16_to_fp32(xb->d);
-        float xdmin = fp16_to_fp32(xb->dmin);
-
-        float sumi = 0.0f;
-        float summs = 0.0f;
-
-        /* Process 256 elements in groups of 32 (to match Q8_1 blocks) */
-        for (int j = 0; j < QK_K / 32; j++) {  /* 8 groups: 0-7 */
-            const block_q8_1* yb = &y[i * 8 + j];
-            float yd = fp16_to_fp32(yb->d);
-
-            uint8_t sc, m;
-            get_scale_min_k4_fused(j, xb->scales, &sc, &m);
-
-            /* Accumulate min correction: m * yb->s */
-            summs += fp16_to_fp32(yb->s) * (float)m;
-
-            /* Q4_K byte offset: groups 0,1 use bytes 0-31, groups 2,3 use 32-63, etc */
-            const uint8_t* qs = xb->qs + (j / 2) * 32;  /* 32 bytes per pair of groups */
-            int use_high = j & 1;  /* Even groups use low nibbles, odd use high */
-
-            /* NEON: process 32 bytes to get 32 values (from either low or high nibbles) */
-            uint8x16_t xq0 = vld1q_u8(qs);       /* bytes 0-15 */
-            uint8x16_t xq1 = vld1q_u8(qs + 16);  /* bytes 16-31 */
-
-            int8x16_t x0, x1;
-            if (use_high) {
-                /* High nibbles for odd groups (1,3,5,7) */
-                x0 = vreinterpretq_s8_u8(vshrq_n_u8(xq0, 4));
-                x1 = vreinterpretq_s8_u8(vshrq_n_u8(xq1, 4));
-            } else {
-                /* Low nibbles for even groups (0,2,4,6) */
-                x0 = vreinterpretq_s8_u8(vandq_u8(xq0, vdupq_n_u8(0xF)));
-                x1 = vreinterpretq_s8_u8(vandq_u8(xq1, vdupq_n_u8(0xF)));
-            }
-
-            /* Load 32 Q8 values */
-            int8x16_t yq0 = vld1q_s8(yb->qs);       /* Q8 values 0-15 */
-            int8x16_t yq1 = vld1q_s8(yb->qs + 16);  /* Q8 values 16-31 */
-
-            /* Multiply and accumulate: x0*yq0 + x1*yq1 */
-            int16x8_t prod0_lo = vmull_s8(vget_low_s8(x0), vget_low_s8(yq0));
-            int16x8_t prod0_hi = vmull_s8(vget_high_s8(x0), vget_high_s8(yq0));
-            int16x8_t prod1_lo = vmull_s8(vget_low_s8(x1), vget_low_s8(yq1));
-            int16x8_t prod1_hi = vmull_s8(vget_high_s8(x1), vget_high_s8(yq1));
-
-            /* Sum all products */
-            int32x4_t sum32 = vpaddlq_s16(prod0_lo);
-            sum32 = vpadalq_s16(sum32, prod0_hi);
-            sum32 = vpadalq_s16(sum32, prod1_lo);
-            sum32 = vpadalq_s16(sum32, prod1_hi);
-
-            int32_t group_sum = vaddvq_s32(sum32);
-
-            /* Apply scales: sc * yd * group_sum */
-            sumi += (float)sc * yd * (float)group_sum;
-        }
-
-        /* Final: xd * sumi - xdmin * summs */
-        sumf += xd * sumi - xdmin * summs;
-    }
-
-    return sumf;
-}
-#else
-/* Scalar fallback for Q4_K x Q8_1
- * Same Q4_K layout as NEON version:
- * - Groups 0,1: bytes 0-31 (low/high nibbles)
- * - Groups 2,3: bytes 32-63, etc */
-static float vec_dot_q4_k_q8_1(const block_q4_K* x, const block_q8_1* y, int nb) {
-    float sumf = 0.0f;
-
-    for (int i = 0; i < nb; i++) {
-        const block_q4_K* xb = &x[i];
-        float xd = fp16_to_fp32(xb->d);
-        float xdmin = fp16_to_fp32(xb->dmin);
-
-        float sumi = 0.0f;
-        float summs = 0.0f;
-
-        for (int j = 0; j < QK_K / 32; j++) {
-            const block_q8_1* yb = &y[i * 8 + j];
-            float yd = fp16_to_fp32(yb->d);
-
-            uint8_t sc, m;
-            get_scale_min_k4_fused(j, xb->scales, &sc, &m);
-
-            summs += fp16_to_fp32(yb->s) * (float)m;
-
-            /* Q4_K byte offset: groups 0,1 use bytes 0-31, groups 2,3 use 32-63, etc */
-            const uint8_t* qs = xb->qs + (j / 2) * 32;
-            int use_high = j & 1;
-
-            int32_t group_sum = 0;
-            for (int k = 0; k < 32; k++) {
-                int x_val = use_high ? (qs[k] >> 4) : (qs[k] & 0xF);
-                group_sum += x_val * yb->qs[k];
-            }
-
-            sumi += (float)sc * yd * (float)group_sum;
-        }
-
-        sumf += xd * sumi - xdmin * summs;
-    }
-
-    return sumf;
-}
-#endif
+/* Fused Q4_K x Q8_1 dot product: implementations moved to
+ * kernel/ai/simd_kernels_scalar.c (scalar/NEON) and
+ * kernel/ai/simd_kernels_avx2.c (AVX2). Calls go through the runtime
+ * dispatch pointer g_vec_dot_q4_k_q8_1 (simd_dispatch.c). */
 
 /* Fused Q4_K matrix-vector multiply
  * Quantizes input on-the-fly, then uses integer SIMD for matmul
@@ -818,7 +547,47 @@ static void matmul_q4_k_fused(float* out, const void* w_q4_k, const float* x,
     /* Compute each output row */
     for (int r = 0; r < rows; r++) {
         const block_q4_K* row_weights = &weights[r * nb_cols];
-        out[r] = vec_dot_q4_k_q8_1(row_weights, g_input_q8, nb_cols);
+        out[r] = g_vec_dot_q4_k_q8_1(row_weights, g_input_q8, nb_cols);
+    }
+}
+
+/* Fused Q5_0 matrix-vector multiply (dominant format in SmolLM Q4_K_M:
+ * attn q/k/out + ffn gate/up are Q5_0 there) */
+static void matmul_q5_0_fused(float* out, const void* w_q5_0, const float* x,
+                              int rows, int cols) {
+    const int nb_cols = cols / QK8_0;   /* 32 elements per Q5_0/Q8_1 block */
+    const block_q5_0* weights = (const block_q5_0*)w_q5_0;
+
+    if (nb_cols > g_input_q8_size) {
+        console_printf("Error: matmul_q5_0_fused buffer overflow\n");
+        return;
+    }
+
+    quantize_row_q8_1(x, g_input_q8, cols);
+
+    for (int r = 0; r < rows; r++) {
+        const block_q5_0* row_weights = &weights[r * nb_cols];
+        out[r] = g_vec_dot_q5_0_q8_1(row_weights, g_input_q8, nb_cols);
+    }
+}
+
+/* Fused Q6_K matrix-vector multiply (ffn_down in SmolLM Q4_K_M) */
+static void matmul_q6_k_fused(float* out, const void* w_q6_k, const float* x,
+                              int rows, int cols) {
+    const int nb_cols = cols / QK_K;    /* Q6_K blocks per row (256 elements) */
+    const int nb_q8 = cols / QK8_0;     /* Q8_1 blocks needed (32 elements) */
+    const block_q6_K* weights = (const block_q6_K*)w_q6_k;
+
+    if (nb_q8 > g_input_q8_size) {
+        console_printf("Error: matmul_q6_k_fused buffer overflow\n");
+        return;
+    }
+
+    quantize_row_q8_1(x, g_input_q8, cols);
+
+    for (int r = 0; r < rows; r++) {
+        const block_q6_K* row_weights = &weights[r * nb_cols];
+        out[r] = g_vec_dot_q6_k_q8_1(row_weights, g_input_q8, nb_cols);
     }
 }
 
@@ -1030,6 +799,21 @@ static void stream_dequant_q2_K(const void* src, float* dst, int64_t n) {
     }
 }
 
+/* Q3_K dequantization - ggml-exact port (see kquants_dequant.h) */
+static void stream_dequant_q3_K(const void* src, float* dst, int64_t n) {
+    kquant_dequant_q3_K(src, dst, n);
+}
+
+/* Q5_K dequantization - ggml-exact port (see kquants_dequant.h) */
+static void stream_dequant_q5_K(const void* src, float* dst, int64_t n) {
+    kquant_dequant_q5_K(src, dst, n);
+}
+
+/* IQ4_NL dequantization - ggml-exact port (see kquants_dequant.h) */
+static void stream_dequant_iq4_nl(const void* src, float* dst, int64_t n) {
+    kquant_dequant_iq4_nl(src, dst, n);
+}
+
 /* Q6_K dequantization - matches llama.cpp reference */
 static void stream_dequant_q6_K(const void* src, float* dst, int64_t n) {
     const block_q6_K* blocks = (const block_q6_K*)src;
@@ -1065,13 +849,8 @@ static void stream_dequant_q6_K(const void* src, float* dst, int64_t n) {
     }
 }
 
-/* Q5_0 block structure - 5-bit quantization */
+/* Q5_0 block structure - 5-bit quantization (type in simd_kernels.h) */
 #define QK5_0 32
-typedef struct __attribute__((packed)) {
-    uint16_t d;              /* scale (fp16) */
-    uint8_t qh[4];           /* high bits (1 bit per element, 32 elements = 4 bytes) */
-    uint8_t qs[QK5_0 / 2];   /* low 4 bits (2 elements per byte) */
-} block_q5_0;
 
 /* Q5_0 dequantization - matches llama.cpp reference
  * Each block: scale(fp16) + qh[4](32 high bits) + qs[16](32 4-bit low parts)
@@ -1114,8 +893,11 @@ static void stream_dequant(const void* src, float* dst, int64_t n, int type) {
         case 6:  stream_dequant_q5_0(src, dst, n); break;  /* GGML_TYPE_Q5_0 */
         case 8:  stream_dequant_q8_0(src, dst, n); break;  /* GGML_TYPE_Q8_0 */
         case 10: stream_dequant_q2_K(src, dst, n); break;  /* GGML_TYPE_Q2_K */
+        case 11: stream_dequant_q3_K(src, dst, n); break;  /* GGML_TYPE_Q3_K */
         case 12: stream_dequant_q4_K(src, dst, n); break;  /* GGML_TYPE_Q4_K */
+        case 13: stream_dequant_q5_K(src, dst, n); break;  /* GGML_TYPE_Q5_K */
         case 14: stream_dequant_q6_K(src, dst, n); break;  /* GGML_TYPE_Q6_K */
+        case 20: stream_dequant_iq4_nl(src, dst, n); break; /* GGML_TYPE_IQ4_NL */
         default:
             console_printf("[STREAM] Unknown quant type %d, using F32\n", type);
             stream_dequant_f32(src, dst, n);
@@ -1191,8 +973,11 @@ static void rmsnorm_stream(float* out, const float* x, const void* w_quant,
             case 6:  offset = (i / QK5_0) * 22; break;                       /* Q5_0 */
             case 8:  offset = (i / QK8_0) * sizeof(block_q8_0); break;       /* Q8_0 */
             case 10: offset = (i / QK_K) * sizeof(block_q2_K); break;        /* Q2_K */
+            case 11: offset = (i / QK_K) * sizeof(block_q3_K); break;        /* Q3_K */
             case 12: offset = (i / QK_K) * sizeof(block_q4_K); break;        /* Q4_K */
+            case 13: offset = (i / QK_K) * sizeof(block_q5_K); break;        /* Q5_K */
             case 14: offset = (i / QK_K) * sizeof(block_q6_K); break;        /* Q6_K */
+            case 20: offset = (i / QK4_0) * sizeof(block_iq4_nl); break;     /* IQ4_NL */
             default: offset = i * sizeof(float);
         }
 
@@ -1263,6 +1048,20 @@ static void matmul_stream(float* out, const void* w_quant, int w_type,
         return;
     }
 
+    /* Q5_0 fast path - fused (dominant format in SmolLM Q4_K_M) */
+    if (w_type == 6) {  /* GGML_TYPE_Q5_0 */
+        g_q5_fused_count++;
+        matmul_q5_0_fused(out, w_quant, x, rows, cols);
+        return;
+    }
+
+    /* Q6_K fast path - fused quantized matmul for K-quants */
+    if (w_type == 14) {  /* GGML_TYPE_Q6_K */
+        g_q6k_fused_count++;
+        matmul_q6_k_fused(out, w_quant, x, rows, cols);
+        return;
+    }
+
     g_dequant_count++;
 
     const int chunk_cols = 256;  /* Dequantize 256 columns at a time */
@@ -1287,8 +1086,11 @@ static void matmul_stream(float* out, const void* w_quant, int w_type,
                 case 6:  byte_offset = (row_offset / QK5_0) * 22; break;          /* Q5_0 */
                 case 8:  byte_offset = (row_offset / QK8_0) * sizeof(block_q8_0); break;  /* Q8_0 */
                 case 10: byte_offset = (row_offset / QK_K) * sizeof(block_q2_K); break;   /* Q2_K */
+                case 11: byte_offset = (row_offset / QK_K) * sizeof(block_q3_K); break;   /* Q3_K */
                 case 12: byte_offset = (row_offset / QK_K) * sizeof(block_q4_K); break;   /* Q4_K */
+                case 13: byte_offset = (row_offset / QK_K) * sizeof(block_q5_K); break;   /* Q5_K */
                 case 14: byte_offset = (row_offset / QK_K) * sizeof(block_q6_K); break;   /* Q6_K */
+                case 20: byte_offset = (row_offset / QK4_0) * sizeof(block_iq4_nl); break; /* IQ4_NL */
                 default: byte_offset = row_offset * sizeof(float);
             }
 
@@ -1713,6 +1515,53 @@ static void extract_embedding_q6_k_transposed(const void* src, float* dst,
     }
 }
 
+/* Generic transposed K-quant extraction: dequantize the whole block that
+ * contains the token position from each row. Correct for any 256-element
+ * block-quantized type (Q2_K/Q3_K/Q4_K/Q5_K/Q6_K). */
+static void extract_embedding_kquant_transposed(const void* src, float* dst,
+                                                int dim, int vocab_size, int token,
+                                                int type) {
+    const int blocks_per_row = vocab_size / QK_K;
+    size_t block_bytes;
+    switch (type) {
+        case 10: block_bytes = sizeof(block_q2_K); break;  /* Q2_K */
+        case 11: block_bytes = sizeof(block_q3_K); break;  /* Q3_K */
+        case 12: block_bytes = sizeof(block_q4_K); break;  /* Q4_K */
+        case 13: block_bytes = sizeof(block_q5_K); break;  /* Q5_K */
+        case 14: block_bytes = sizeof(block_q6_K); break;  /* Q6_K */
+        default: block_bytes = sizeof(float); break;
+    }
+    const size_t row_bytes = blocks_per_row * block_bytes;
+    const int block_idx = token / QK_K;
+    const int pos_in_block = token % QK_K;
+    const char* base = (const char*)src;
+
+    float block_buf[QK_K];
+    for (int d = 0; d < dim; d++) {
+        const char* block = base + d * row_bytes + (size_t)block_idx * block_bytes;
+        stream_dequant(block, block_buf, QK_K, type);
+        dst[d] = block_buf[pos_in_block];
+    }
+}
+
+/* Extract token embedding from transposed IQ4_NL table */
+static void extract_embedding_iq4_nl_transposed(const void* src, float* dst,
+                                                int dim, int vocab_size, int token) {
+    const int blocks_per_row = vocab_size / KQUANTS_QK4_NL;
+    const size_t row_bytes = blocks_per_row * sizeof(block_iq4_nl);
+    const int block_idx = token / KQUANTS_QK4_NL;
+    const int pos_in_block = token % KQUANTS_QK4_NL;
+    const block_iq4_nl* base = (const block_iq4_nl*)src;
+
+    for (int d = 0; d < dim; d++) {
+        const block_iq4_nl* block = (const block_iq4_nl*)((const char*)base + d * row_bytes) + block_idx;
+        float d_scale = fp16_to_fp32(block->d);
+        uint8_t byte = block->qs[pos_in_block % 16];
+        int idx = (pos_in_block < 16) ? (byte & 0xF) : (byte >> 4);
+        dst[d] = d_scale * kquant_kvalues_iq4nl[idx];
+    }
+}
+
 /* Dispatcher for transposed embedding extraction */
 static void extract_embedding_transposed(const void* src, float* dst,
                                           int dim, int vocab_size, int token, int type) {
@@ -1726,11 +1575,19 @@ static void extract_embedding_transposed(const void* src, float* dst,
         case 8:  /* Q8_0 */
             extract_embedding_q8_0_transposed(src, dst, dim, vocab_size, token);
             break;
+        case 10: /* Q2_K */
+        case 11: /* Q3_K */
+        case 13: /* Q5_K */
+            extract_embedding_kquant_transposed(src, dst, dim, vocab_size, token, type);
+            break;
         case 12: /* Q4_K */
             extract_embedding_q4_k_transposed(src, dst, dim, vocab_size, token);
             break;
         case 14: /* Q6_K */
             extract_embedding_q6_k_transposed(src, dst, dim, vocab_size, token);
+            break;
+        case 20: /* IQ4_NL */
+            extract_embedding_iq4_nl_transposed(src, dst, dim, vocab_size, token);
             break;
         default:
             console_printf("[EMBD] Unsupported transposed type %d, using F32\n", type);
@@ -1812,17 +1669,27 @@ static void matmul_stream_transposed(float* out, const void* w_quant, int w_type
 
 /* RoPE position encoding - applied per-head with head_dim frequency scaling
  * Following llama.cpp: theta_i = theta_base * theta_scale^i where theta_scale = theta^(-2/head_dim)
+ *
+ * n_rot enables partial rotary (GLM chatglm/glm4): only the first n_rot
+ * components of each head are rotated (pairs (i, i+1), GPT-J/llama-NORM
+ * interleaved order - same convention llama.cpp uses for CHATGLM/GLM4),
+ * the remaining [n_rot, head_dim) components pass through unchanged.
+ * Frequencies are scaled by n_rot, not head_dim:
+ *   freq_i = theta^(-2i / n_rot), i in [0, n_rot/2)
+ * n_rot <= 0 or n_rot >= head_dim means full rotary (llama/qwen default).
  */
 static void rope(float* q, float* k, int pos, int dim, int head_dim,
-                 int kv_dim, float theta) {
+                 int kv_dim, float theta, int n_rot) {
     int n_heads = dim / head_dim;
     int n_kv_heads = kv_dim / head_dim;
 
+    if (n_rot <= 0 || n_rot > head_dim) n_rot = head_dim;
+
     /* Apply RoPE to each query head */
     for (int h = 0; h < n_heads; h++) {
-        for (int i = 0; i < head_dim; i += 2) {
-            /* Frequency based on position within head, using head_dim for scaling */
-            float freq = 1.0f / powf(theta, (float)i / (float)head_dim);
+        for (int i = 0; i < n_rot; i += 2) {
+            /* Frequency based on position within head, using n_rot for scaling */
+            float freq = 1.0f / powf(theta, (float)i / (float)n_rot);
             float val = (float)pos * freq;
             float cos_val = cosf(val);
             float sin_val = sinf(val);
@@ -1837,8 +1704,8 @@ static void rope(float* q, float* k, int pos, int dim, int head_dim,
 
     /* Apply RoPE to each key head */
     for (int h = 0; h < n_kv_heads; h++) {
-        for (int i = 0; i < head_dim; i += 2) {
-            float freq = 1.0f / powf(theta, (float)i / (float)head_dim);
+        for (int i = 0; i < n_rot; i += 2) {
+            float freq = 1.0f / powf(theta, (float)i / (float)n_rot);
             float val = (float)pos * freq;
             float cos_val = cosf(val);
             float sin_val = sinf(val);
@@ -1856,7 +1723,48 @@ static void rope(float* q, float* k, int pos, int dim, int head_dim,
  * Transformer Layer - Streaming Version
  * ============================================================================ */
 
-static void transformer_forward_stream(int token, int pos, int layer) {
+/* Embed a token into `out` (g_cfg.dim float32 elements).
+ * Handles both standard [vocab_size, dim] and transposed [dim, vocab_size]
+ * GGUF embedding layouts and all supported quantization types. */
+static void embed_token(int token, float* out) {
+    int type = g_weights.token_embd_type;
+    int dim = g_cfg.dim;
+
+    /* Check if embedding is stored transposed [dim, vocab_size] (GGUF default) */
+    if (g_weights.token_embd_transposed) {
+        /* Use strided column extraction for transposed table */
+        extract_embedding_transposed(g_weights.token_embd, out,
+                                     dim, g_weights.token_embd_vocab_size,
+                                     token, type);
+    } else {
+        /* Standard row-major [vocab_size, dim] layout */
+        size_t offset;
+        switch (type) {
+            case 0:  offset = (size_t)token * dim * sizeof(float); break;        /* F32 */
+            case 1:  offset = (size_t)token * dim * sizeof(uint16_t); break;     /* F16 */
+            case 2:  offset = (size_t)token * (dim / QK4_0) * sizeof(block_q4_0); break;  /* Q4_0 */
+            case 3:  offset = (size_t)token * (dim / QK4_1) * sizeof(block_q4_1); break;  /* Q4_1 */
+            case 6:  offset = (size_t)token * (dim / QK5_0) * 22; break;          /* Q5_0 (22 bytes per block) */
+            case 8:  offset = (size_t)token * (dim / QK8_0) * sizeof(block_q8_0); break;  /* Q8_0 */
+            case 10: offset = (size_t)token * (dim / QK_K) * sizeof(block_q2_K); break;  /* Q2_K */
+            case 11: offset = (size_t)token * (dim / QK_K) * sizeof(block_q3_K); break;  /* Q3_K */
+            case 12: offset = (size_t)token * (dim / QK_K) * sizeof(block_q4_K); break;  /* Q4_K */
+            case 13: offset = (size_t)token * (dim / QK_K) * sizeof(block_q5_K); break;  /* Q5_K */
+            case 14: offset = (size_t)token * (dim / QK_K) * sizeof(block_q6_K); break;  /* Q6_K */
+            case 20: offset = (size_t)token * (dim / QK4_0) * sizeof(block_iq4_nl); break; /* IQ4_NL */
+            default: offset = (size_t)token * dim * sizeof(float); break;
+        }
+
+        stream_dequant((const char*)g_weights.token_embd + offset,
+                       out, dim, type);
+    }
+}
+
+/* Forward a single transformer layer over the hidden state in g_state.x
+ * (updated in place). The layer's KV-cache slice (indexed by absolute layer
+ * number) is written/read at position `pos`, so a partial layer range
+ * [start,end) — an exo shard — only ever touches its own KV region. */
+static void layer_forward_stream(int pos, int layer) {
     PROFILER_START("transformer_forward_stream");
 
     LayerWeights* lw = &g_layer_weights[layer];
@@ -1868,38 +1776,6 @@ static void transformer_forward_stream(int token, int pos, int layer) {
     int kv_mul = g_cfg.kv_mul;
     float eps = g_cfg.rms_norm_eps;
 
-    /* Get token embedding on first layer */
-    if (layer == 0) {
-        int type = g_weights.token_embd_type;
-
-        /* Check if embedding is stored transposed [dim, vocab_size] (GGUF default) */
-        if (g_weights.token_embd_transposed) {
-            /* Use strided column extraction for transposed table */
-            extract_embedding_transposed(g_weights.token_embd, g_state.x,
-                                         dim, g_weights.token_embd_vocab_size,
-                                         token, type);
-        } else {
-            /* Standard row-major [vocab_size, dim] layout */
-            size_t offset;
-            switch (type) {
-                case 0:  offset = (size_t)token * dim * sizeof(float); break;        /* F32 */
-                case 1:  offset = (size_t)token * dim * sizeof(uint16_t); break;     /* F16 */
-                case 2:  offset = (size_t)token * (dim / QK4_0) * sizeof(block_q4_0); break;  /* Q4_0 */
-                case 3:  offset = (size_t)token * (dim / QK4_1) * sizeof(block_q4_1); break;  /* Q4_1 */
-                case 6:  offset = (size_t)token * (dim / QK5_0) * 22; break;          /* Q5_0 (22 bytes per block) */
-                case 8:  offset = (size_t)token * (dim / QK8_0) * sizeof(block_q8_0); break;  /* Q8_0 */
-                case 10: offset = (size_t)token * (dim / QK_K) * sizeof(block_q2_K); break;  /* Q2_K */
-                case 12: offset = (size_t)token * (dim / QK_K) * sizeof(block_q4_K); break;  /* Q4_K */
-                case 14: offset = (size_t)token * (dim / QK_K) * sizeof(block_q6_K); break;  /* Q6_K */
-                default: offset = (size_t)token * dim * sizeof(float); break;
-            }
-
-            stream_dequant((const char*)g_weights.token_embd + offset,
-                           g_state.x, dim, type);
-
-        }
-    }
-
     /* Attention norm */
     rmsnorm_stream(g_state.xb, g_state.x, lw->attn_norm, lw->attn_norm_type, dim, eps);
 
@@ -1908,8 +1784,20 @@ static void transformer_forward_stream(int token, int pos, int layer) {
     matmul_stream(g_state.k, lw->attn_k, lw->attn_k_type, g_state.xb, kv_dim, dim);
     matmul_stream(g_state.v, lw->attn_v, lw->attn_v_type, g_state.xb, kv_dim, dim);
 
-    /* RoPE */
-    rope(g_state.q, g_state.k, pos, dim, head_dim, kv_dim, g_cfg.rope_theta);
+    /* Optional QKV biases (Qwen2/GLM-4); absent bias = no-op */
+    if (lw->attn_q_bias) {
+        for (int i = 0; i < dim; i++) g_state.q[i] += lw->attn_q_bias[i];
+    }
+    if (lw->attn_k_bias) {
+        for (int i = 0; i < kv_dim; i++) g_state.k[i] += lw->attn_k_bias[i];
+    }
+    if (lw->attn_v_bias) {
+        for (int i = 0; i < kv_dim; i++) g_state.v[i] += lw->attn_v_bias[i];
+    }
+
+    /* RoPE (partial rotary when model sets rope.dimension_count, e.g. GLM) */
+    rope(g_state.q, g_state.k, pos, dim, head_dim, kv_dim, g_cfg.rope_theta,
+         g_cfg.rope_n_dims);
 
     /* Update KV cache */
     size_t cache_offset = (size_t)layer * g_cfg.seq_len * kv_dim + pos * kv_dim;
@@ -1982,6 +1870,12 @@ static void transformer_forward_stream(int token, int pos, int layer) {
     /* Output projection */
     matmul_stream(g_state.xb2, lw->attn_output, lw->attn_output_type, g_state.xb, dim, dim);
 
+    /* glm4: post-attention RMSNorm inside the residual branch (before add) */
+    if (g_cfg.has_post_norms && lw->attn_post_norm) {
+        rmsnorm_stream(g_state.xb2, g_state.xb2, lw->attn_post_norm,
+                       lw->attn_post_norm_type, dim, eps);
+    }
+
     /* Residual - SIMD optimized (8-16x faster) */
     elem_add_inplace_simd(g_state.x, g_state.xb2, dim);
 
@@ -2004,10 +1898,51 @@ static void transformer_forward_stream(int token, int pos, int layer) {
 
     matmul_stream(g_state.xb, lw->ffn_down, lw->ffn_down_type, g_state.hb, dim, hidden_dim);
 
+    /* glm4: post-MLP RMSNorm inside the residual branch (before add) */
+    if (g_cfg.has_post_norms && lw->ffn_post_norm) {
+        rmsnorm_stream(g_state.xb, g_state.xb, lw->ffn_post_norm,
+                       lw->ffn_post_norm_type, dim, eps);
+    }
+
     /* Residual - SIMD optimized (8-16x faster) */
     elem_add_inplace_simd(g_state.x, g_state.xb, dim);
 
     PROFILER_STOP();
+}
+
+/* Back-compat wrapper: full per-token step where layer 0 also performs the
+ * embedding lookup. Kept for streaming_inference_debug_logits() and
+ * streaming_inference_generate_timed(). */
+static void transformer_forward_stream(int token, int pos, int layer) {
+    /* Get token embedding on first layer */
+    if (layer == 0)
+        embed_token(token, g_state.x);
+    layer_forward_stream(pos, layer);
+}
+
+/* Final RMSNorm + output projection over a hidden state -> g_state.logits.
+ * `hidden` must hold g_cfg.dim floats and may alias g_state.x. */
+static void logits_from_hidden(const float* hidden) {
+    if (hidden != g_state.x)
+        memcpy(g_state.x, hidden, g_cfg.dim * sizeof(float));
+
+    rmsnorm_stream(g_state.x, g_state.x, g_weights.output_norm,
+                   g_weights.output_norm_type, g_cfg.dim, g_cfg.rms_norm_eps);
+
+    /* Output logits */
+    const void* output_weights = g_weights.output ? g_weights.output : g_weights.token_embd;
+    int output_type = g_weights.output ? g_weights.output_type : g_weights.token_embd_type;
+
+    /* Check if we need transposed matmul (when using transposed token_embd as output) */
+    if (!g_weights.output && g_weights.token_embd_transposed) {
+        /* token_embd is [dim, vocab_size], use transposed matmul */
+        matmul_stream_transposed(g_state.logits, output_weights, output_type,
+                                 g_state.x, g_cfg.dim, g_cfg.vocab_size);
+    } else {
+        /* Standard matmul for [vocab_size, dim] output weights */
+        matmul_stream(g_state.logits, output_weights, output_type,
+                      g_state.x, g_cfg.vocab_size, g_cfg.dim);
+    }
 }
 
 /* ============================================================================
@@ -2029,6 +1964,29 @@ size_t streaming_calc_memory(int dim, int hidden_dim, int n_layers,
     runtime += hidden_dim * sizeof(float);           /* layer dequant buffer */
 
     return runtime;
+}
+
+/* Byte offset of row `row` inside a 2D GGUF tensor laid out row-major
+ * ([rows, cols] with `cols` contiguous elements per row). Used to carve
+ * sub-matrices (Q/K/V, gate/up) out of fused chatglm tensors without
+ * copying: quantized rows stay block-aligned as long as cols % block == 0. */
+static size_t tensor_row_byte_offset(int type, int cols, int row) {
+    size_t elems = (size_t)row * (size_t)cols;
+    switch (type) {
+        case 0:  return elems * sizeof(float);                    /* F32 */
+        case 1:  return elems * sizeof(uint16_t);                 /* F16 */
+        case 2:  return (elems / QK4_0) * sizeof(block_q4_0);     /* Q4_0 */
+        case 3:  return (elems / QK4_1) * sizeof(block_q4_1);     /* Q4_1 */
+        case 6:  return (elems / QK5_0) * 22;                     /* Q5_0 */
+        case 8:  return (elems / QK8_0) * sizeof(block_q8_0);     /* Q8_0 */
+        case 10: return (elems / QK_K)  * sizeof(block_q2_K);     /* Q2_K */
+        case 11: return (elems / QK_K)  * sizeof(block_q3_K);     /* Q3_K */
+        case 12: return (elems / QK_K)  * sizeof(block_q4_K);     /* Q4_K */
+        case 13: return (elems / QK_K)  * sizeof(block_q5_K);     /* Q5_K */
+        case 14: return (elems / QK_K)  * sizeof(block_q6_K);     /* Q6_K */
+        case 20: return (elems / QK4_0) * sizeof(block_iq4_nl);   /* IQ4_NL */
+        default: return elems * sizeof(float);
+    }
 }
 
 /* Initialize streaming inference from GGUF
@@ -2078,20 +2036,52 @@ int streaming_inference_init(bool preallocate) {
     g_cfg.rms_norm_eps = arch->attention_layer_norm_rms_epsilon > 0.0f ?
                          arch->attention_layer_norm_rms_epsilon : 1e-5f;
 
+    /* Partial rotary (GLM): rope.dimension_count < head_dim rotates only the
+     * first n_rot components of each head. 0/absent = full rotary. */
+    g_cfg.rope_n_dims = 0;
+    if (arch->rope_dimension_count > 0 &&
+        arch->rope_dimension_count < (uint32_t)g_cfg.head_dim) {
+        g_cfg.rope_n_dims = (int)arch->rope_dimension_count;
+    }
+
+    /* Architecture-specific tensor layouts */
+    g_cfg.fused_qkv = 0;
+    g_cfg.fused_ffn_up = 0;
+    g_cfg.has_post_norms = 0;
+    if (strncmp(arch->general_architecture, "chatglm", 7) == 0) {
+        /* ChatGLM2/3, GLM-4-9B-Chat, GLM-Edge: fused QKV+bias, fused ffn_up */
+        g_cfg.fused_qkv = 1;
+        g_cfg.fused_ffn_up = 1;
+    } else if (strncmp(arch->general_architecture, "glm4", 4) == 0) {
+        /* GLM-4-0414: separate q/k/v (optional bias), fused ffn_up,
+         * post-attention and post-MLP RMSNorms inside residual branches */
+        g_cfg.fused_ffn_up = 1;
+        g_cfg.has_post_norms = 1;
+    }
+
     /* Get special token IDs */
     g_cfg.eos_token_id = (int)arch->eos_token_id;
     g_cfg.bos_token_id = (int)arch->bos_token_id;
+    g_cfg.n_stop_tokens = 0;
+    for (int i = 0; i < 4; i++) g_cfg.stop_token_ids[i] = -1;
+
+    /* Copy architecture name (before arch debug print) */
+    {
+        int i;
+        for (i = 0; i < 63 && arch->general_architecture[i]; i++) {
+            g_cfg.arch_name[i] = arch->general_architecture[i];
+        }
+        g_cfg.arch_name[i] = '\0';
+    }
 
     /* Debug: Print loaded config (use int cast for floats since printf is limited) */
     console_printf("[STREAM] Config: dim=%d hidden=%d layers=%d heads=%d kv_heads=%d\n",
         g_cfg.dim, g_cfg.hidden_dim, g_cfg.n_layers, g_cfg.n_heads, g_cfg.n_kv_heads);
     console_printf("[STREAM] rope_theta=%d rms_eps=%d(x1e-7) vocab=%d seq_len=%d\n",
         (int)g_cfg.rope_theta, (int)(g_cfg.rms_norm_eps * 10000000.0f), g_cfg.vocab_size, g_cfg.seq_len);
-
-    /* Copy architecture name */
-    for (int i = 0; i < 63 && arch->general_architecture[i]; i++) {
-        g_cfg.arch_name[i] = arch->general_architecture[i];
-    }
+    console_printf("[STREAM] arch=%s rope_n_dims=%d fused_qkv=%d fused_ffn_up=%d post_norms=%d\n",
+        g_cfg.arch_name, g_cfg.rope_n_dims, g_cfg.fused_qkv,
+        g_cfg.fused_ffn_up, g_cfg.has_post_norms);
 
     /* Allocate runtime buffers at init time (deterministic mode)
      * TODO: Use preallocate flag to control allocation timing (for now, always allocate)
@@ -2156,6 +2146,9 @@ int streaming_inference_init(bool preallocate) {
         PROFILER_STOP();
         return -1;
     }
+    /* heap_alloc does not zero - clear so absent optional tensors (biases) stay NULL */
+    memset(g_layer_weights, 0, g_cfg.n_layers * sizeof(LayerWeights));
+    g_has_qkv_bias = false;
 
     /* Get tensor data pointers (quantized, not dequantized) */
     const struct gguf_tensor_info* tensor;
@@ -2263,6 +2256,109 @@ int streaming_inference_init(bool preallocate) {
 
         #undef MAP_LAYER_TENSOR
 
+        /* Optional QKV biases (Qwen2/GLM-4). Dequantize once into per-layer
+         * float buffers; missing bias tensors leave the pointer NULL (no-op). */
+        #define MAP_LAYER_BIAS(field, suffix, count) do { \
+            build_layer_name(name_buf, sizeof(name_buf), "blk.", l, suffix); \
+            tensor = gguf_parser_get_tensor_by_name(name_buf); \
+            if (tensor) { \
+                const void* bias_src = gguf_parser_get_tensor_data_ptr(tensor); \
+                float* bias_dst = (float*)heap_alloc((count) * sizeof(float)); \
+                if (bias_src && bias_dst) { \
+                    stream_dequant(bias_src, bias_dst, (count), tensor->type); \
+                    lw->field = bias_dst; \
+                    g_has_qkv_bias = true; \
+                } \
+            } \
+        } while(0)
+
+        MAP_LAYER_BIAS(attn_q_bias, ".attn_q.bias", g_cfg.dim);
+        MAP_LAYER_BIAS(attn_k_bias, ".attn_k.bias", g_cfg.kv_dim);
+        MAP_LAYER_BIAS(attn_v_bias, ".attn_v.bias", g_cfg.kv_dim);
+
+        #undef MAP_LAYER_BIAS
+
+        /* chatglm: fused blk.N.attn_qkv.weight [dim, dim + 2*kv_dim]
+         * (GGML dims: dims[0]=dim input, dims[1]=dim+2*kv_dim output rows).
+         * Carve Q/K/V as row-ranges of the fused tensor - quantized rows stay
+         * block-aligned because the input dim is a multiple of block size.
+         * Row order (HF query_key_value): Q rows [0, dim), K [dim, dim+kv),
+         * V [dim+kv, dim+2*kv). */
+        if (!lw->attn_q) {
+            build_layer_name(name_buf, sizeof(name_buf), "blk.", l, ".attn_qkv.weight");
+            tensor = gguf_parser_get_tensor_by_name(name_buf);
+            if (tensor) {
+                const char* qkv_base = (const char*)gguf_parser_get_tensor_data_ptr(tensor);
+                int qt = tensor->type;
+                lw->attn_q = qkv_base;
+                lw->attn_q_type = qt;
+                lw->attn_k = qkv_base + tensor_row_byte_offset(qt, g_cfg.dim, g_cfg.dim);
+                lw->attn_k_type = qt;
+                lw->attn_v = qkv_base + tensor_row_byte_offset(qt, g_cfg.dim, g_cfg.dim + g_cfg.kv_dim);
+                lw->attn_v_type = qt;
+                if (l == 0) {
+                    console_printf("[STREAM] Fused attn_qkv (chatglm) type=%d rows=%d\n",
+                                   qt, g_cfg.dim + 2 * g_cfg.kv_dim);
+                }
+            }
+        }
+
+        /* chatglm: fused blk.N.attn_qkv.bias [dim + 2*kv_dim] (F32).
+         * Slice into q/k/v bias buffers. */
+        if (!lw->attn_q_bias) {
+            build_layer_name(name_buf, sizeof(name_buf), "blk.", l, ".attn_qkv.bias");
+            tensor = gguf_parser_get_tensor_by_name(name_buf);
+            if (tensor) {
+                const void* bias_src = gguf_parser_get_tensor_data_ptr(tensor);
+                int total = g_cfg.dim + 2 * g_cfg.kv_dim;
+                float* bias_all = (float*)heap_alloc(total * sizeof(float));
+                if (bias_src && bias_all) {
+                    stream_dequant(bias_src, bias_all, total, tensor->type);
+                    lw->attn_q_bias = bias_all;
+                    lw->attn_k_bias = bias_all + g_cfg.dim;
+                    lw->attn_v_bias = bias_all + g_cfg.dim + g_cfg.kv_dim;
+                    g_has_qkv_bias = true;
+                    if (l == 0) {
+                        console_printf("[STREAM] Fused attn_qkv.bias (chatglm)\n");
+                    }
+                }
+            }
+        }
+
+        /* chatglm/glm4: fused blk.N.ffn_up.weight [dim, 2*hidden]
+         * SwiGLU seq-split: gate = rows [0, hidden), up = rows [hidden, 2*hidden). */
+        if (!lw->ffn_gate && lw->ffn_up) {
+            int ut = lw->ffn_up_type;
+            lw->ffn_gate = lw->ffn_up;
+            lw->ffn_gate_type = ut;
+            lw->ffn_up = (const char*)lw->ffn_up +
+                         tensor_row_byte_offset(ut, g_cfg.dim, g_cfg.hidden_dim);
+            if (l == 0) {
+                console_printf("[STREAM] Fused ffn_up (SwiGLU seq-split, GLM) type=%d\n", ut);
+            }
+        }
+
+        /* glm4: optional post-norms inside residual branches */
+        build_layer_name(name_buf, sizeof(name_buf), "blk.", l, ".attn_post_norm.weight");
+        tensor = gguf_parser_get_tensor_by_name(name_buf);
+        if (tensor) {
+            lw->attn_post_norm = gguf_parser_get_tensor_data_ptr(tensor);
+            lw->attn_post_norm_type = tensor->type;
+        }
+        build_layer_name(name_buf, sizeof(name_buf), "blk.", l, ".ffn_post_norm.weight");
+        tensor = gguf_parser_get_tensor_by_name(name_buf);
+        if (tensor) {
+            lw->ffn_post_norm = gguf_parser_get_tensor_data_ptr(tensor);
+            lw->ffn_post_norm_type = tensor->type;
+        }
+        if (l == 0 && lw->attn_post_norm && lw->ffn_post_norm) {
+            console_printf("[STREAM] Post-norms found (glm4 style)\n");
+        }
+
+        if (l == 0 && lw->attn_q_bias) {
+            console_printf("[STREAM] QKV biases found (Qwen2/GLM style)\n");
+        }
+
         /* Print layer 0 quantization types */
         if (l == 0) {
             console_printf("[STREAM] Layer0 types: norm=%d q=%d k=%d v=%d out=%d\n",
@@ -2271,14 +2367,25 @@ int streaming_inference_init(bool preallocate) {
             console_printf("[STREAM] Layer0 ffn: norm=%d gate=%d up=%d down=%d\n",
                 lw->ffn_norm_type, lw->ffn_gate_type, lw->ffn_up_type, lw->ffn_down_type);
         }
+
+        /* UX: engine init progress (redraws only when the percent changes) */
+        ui_progress("Preparing layers", (uint32_t)l + 1, (uint32_t)g_cfg.n_layers);
     }
 
 #if PARALLEL_INFERENCE_ENABLED
-    /* Initialize parallel inference */
+    /* Initialize parallel inference.
+     * Clamp thread count to online CPUs: worker tasks spin-wait on
+     * atomics and there is no preemption, so spawning more workers than
+     * CPUs deadlocks the whole system on a 1-vCPU QEMU guest. */
     int num_threads = PARALLEL_NUM_THREADS;
+    uint32_t online_cpus = smp_get_num_online();
+    if (online_cpus < 1) online_cpus = 1;
+    if (num_threads > (int)online_cpus) num_threads = (int)online_cpus;
     if (num_threads > 1) {
         parallel_init(num_threads);
         console_printf("[STREAM] Parallel inference enabled with %d threads\n", num_threads);
+    } else {
+        console_printf("[STREAM] Single-threaded inference (%u CPU online)\n", online_cpus);
     }
 #endif
 
@@ -2287,9 +2394,246 @@ int streaming_inference_init(bool preallocate) {
     return 0;
 }
 
-/* Generate tokens */
+/* ============================================================================
+ * Sampling: temperature + top-p (nucleus)
+ * ============================================================================
+ * Default temperature = 0.0 -> greedy argmax (bit-compatible with the
+ * HF-reference greedy decoding). temperature > 0 enables stochastic
+ * sampling with nucleus (top-p) filtering over at most NUCLEUS_CAP
+ * candidates. g_state.logits is never modified (sampling works on a
+ * scratch copy of the top candidates only).
+ */
+
+#define NUCLEUS_CAP 128
+
+static float g_temperature = 0.0f;  /* 0 = greedy */
+static float g_top_p = 1.0f;        /* 1 = no nucleus filtering */
+static uint64_t g_rng_state = 0;
+
+/* Read CPU timestamp counter for RNG seeding */
+static inline uint64_t rng_tsc(void) {
+#if defined(__x86_64__)
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+#elif defined(__aarch64__)
+    uint64_t val;
+    __asm__ volatile ("mrs %0, cntvct_el0" : "=r"(val));
+    return val;
+#else
+    static uint64_t fallback = 0x2545F4914F6CDD1DULL;
+    return fallback++;
+#endif
+}
+
+/* xorshift64 PRNG (seeded from rdtsc on first use) */
+static uint64_t xorshift64(void) {
+    uint64_t x = g_rng_state;
+    if (x == 0) {
+        x = rng_tsc() ^ 0x9E3779B97F4A7C15ULL;
+        if (x == 0) x = 0x123456789ABCDEFULL;
+    }
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    g_rng_state = x;
+    return x;
+}
+
+/* Uniform float in [0, 1) */
+static float rand_uniform(void) {
+    return (float)(xorshift64() >> 11) * (1.0f / 9007199254740992.0f);
+}
+
+void streaming_inference_set_temperature(float temp) {
+    if (temp < 0.0f) temp = 0.0f;
+    if (temp > 2.0f) temp = 2.0f;
+    g_temperature = temp;
+}
+
+float streaming_inference_get_temperature(void) {
+    return g_temperature;
+}
+
+void streaming_inference_set_top_p(float p) {
+    if (p < 0.0f) p = 0.0f;
+    if (p > 1.0f) p = 1.0f;
+    g_top_p = p;
+}
+
+float streaming_inference_get_top_p(void) {
+    return g_top_p;
+}
+
+/* Greedy argmax over logits */
+static int sample_greedy(void) {
+    int max_idx = 0;
+    float max_val = g_state.logits[0];
+    for (int i = 1; i < g_cfg.vocab_size; i++) {
+        if (g_state.logits[i] > max_val) {
+            max_val = g_state.logits[i];
+            max_idx = i;
+        }
+    }
+    return max_idx;
+}
+
+/* Temperature + nucleus (top-p) sampling over top-NUCLEUS_CAP candidates.
+ * Operates on a scratch copy; g_state.logits is left untouched. */
+static int sample_temperature_topp(void) {
+    static float cand_val[NUCLEUS_CAP];
+    static int   cand_idx[NUCLEUS_CAP];
+    int cnt = 0;
+    float inv_temp = 1.0f / g_temperature;
+    int vocab = g_cfg.vocab_size;
+
+    /* Select top-NUCLEUS_CAP scaled logits (kept sorted descending) */
+    for (int i = 0; i < vocab; i++) {
+        float v = g_state.logits[i] * inv_temp;
+        if (cnt < NUCLEUS_CAP) {
+            int j = cnt++;
+            while (j > 0 && cand_val[j - 1] < v) {
+                cand_val[j] = cand_val[j - 1];
+                cand_idx[j] = cand_idx[j - 1];
+                j--;
+            }
+            cand_val[j] = v;
+            cand_idx[j] = i;
+        } else if (v > cand_val[NUCLEUS_CAP - 1]) {
+            int j = NUCLEUS_CAP - 1;
+            while (j > 0 && cand_val[j - 1] < v) {
+                cand_val[j] = cand_val[j - 1];
+                cand_idx[j] = cand_idx[j - 1];
+                j--;
+            }
+            cand_val[j] = v;
+            cand_idx[j] = i;
+        }
+    }
+
+    /* Softmax over candidates (numerically stable) */
+    float max_v = cand_val[0];
+    float sum = 0.0f;
+    for (int j = 0; j < cnt; j++) {
+        cand_val[j] = expf(cand_val[j] - max_v);
+        sum += cand_val[j];
+    }
+    if (sum <= 0.0f) return cand_idx[0];  /* degenerate fallback */
+
+    /* Nucleus cutoff: smallest set with cumulative probability >= top_p */
+    float cum = 0.0f;
+    int cutoff = cnt;
+    for (int j = 0; j < cnt; j++) {
+        cum += cand_val[j] / sum;
+        if (cum >= g_top_p) {
+            cutoff = j + 1;
+            break;
+        }
+    }
+
+    /* Renormalize over truncated set and draw a uniform sample */
+    float cut_sum = 0.0f;
+    for (int j = 0; j < cutoff; j++) cut_sum += cand_val[j];
+
+    float r = rand_uniform() * cut_sum;
+    float acc = 0.0f;
+    for (int j = 0; j < cutoff; j++) {
+        acc += cand_val[j];
+        if (r < acc) return cand_idx[j];
+    }
+    return cand_idx[0];
+}
+
+/* Pick next token from g_state.logits according to sampling config */
+static int sample_next_token(void) {
+    if (g_temperature <= 0.05f) {
+        return sample_greedy();
+    }
+    return sample_temperature_topp();
+}
+
+/* ============================================================================
+ * Layer-range API (exo distributed inference)
+ * ============================================================================
+ * These entry points split the monolithic generate() step into stages that
+ * the exo ring orchestrator can distribute across nodes:
+ *
+ *   node ring[0]:        streaming_inference_embed(token, hidden)
+ *   every node:          streaming_inference_forward_layers(hidden, pos, s, e)
+ *   node ring[last]:     streaming_inference_sample_token(hidden)
+ *
+ * The KV cache is indexed by absolute layer number and position, so each
+ * node only touches the KV region of its own shard — no KV ever travels
+ * the ring, only the hidden vector (dim floats per token per hop).
+ */
+
+int streaming_inference_embed(int token, float* out) {
+    if (!g_initialized || !out) return -1;
+    if (token < 0 || token >= g_weights.token_embd_vocab_size) return -1;
+    embed_token(token, out);
+    return 0;
+}
+
+int streaming_inference_forward_layers(float* hidden, int pos,
+                                       int start_layer, int end_layer) {
+    if (!g_initialized || !hidden) return -1;
+    if (start_layer < 0) start_layer = 0;
+    if (end_layer > g_cfg.n_layers) end_layer = g_cfg.n_layers;
+    if (start_layer >= end_layer) return -1;
+    if (pos < 0 || pos >= g_cfg.seq_len) return -1;
+
+    memcpy(g_state.x, hidden, g_cfg.dim * sizeof(float));
+    for (int l = start_layer; l < end_layer; l++) {
+        layer_forward_stream(pos, l);
+    }
+    memcpy(hidden, g_state.x, g_cfg.dim * sizeof(float));
+    return 0;
+}
+
+int streaming_inference_sample_token(const float* hidden_or_logits) {
+    if (!g_initialized) return -1;
+
+    if (hidden_or_logits == NULL) {
+        /* Use the current hidden state in g_state.x */
+        logits_from_hidden(g_state.x);
+    } else if (hidden_or_logits != g_state.logits) {
+        /* Caller-provided hidden state (dim floats) */
+        logits_from_hidden(hidden_or_logits);
+    }
+    /* else: g_state.logits already computed — sample directly */
+
+    return sample_next_token();
+}
+
+bool streaming_inference_is_stop_token(int token_id) {
+    if (token_id < 0) return false;
+    if (token_id == g_cfg.eos_token_id) return true;
+    for (int s = 0; s < g_cfg.n_stop_tokens; s++) {
+        if (token_id == g_cfg.stop_token_ids[s]) return true;
+    }
+    return false;
+}
+
+/* rdtsc-based cycle counter, defined in the timing section below */
+static inline uint64_t get_cycles(void);
+
+/* Generate tokens (non-streaming wrapper: no callback, no phase timing) */
 int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
                                   int* output_tokens, int max_output) {
+    return streaming_inference_generate_cb(prompt_tokens, prompt_len,
+                                           output_tokens, max_output,
+                                           NULL, NULL, NULL, NULL);
+}
+
+/* Generate tokens with optional per-token streaming callback.
+ * Control flow is identical to the historic generate loop; the callback
+ * only observes tokens, it cannot alter generation. Stop/EOS tokens halt
+ * generation and are never delivered to the callback. */
+int streaming_inference_generate_cb(const int* prompt_tokens, int prompt_len,
+                                    int* output_tokens, int max_output,
+                                    stream_token_fn cb, void* cb_ctx,
+                                    uint64_t* prefill_cycles,
+                                    uint64_t* decode_cycles) {
     PROFILER_START("streaming_inference_generate");
 
     if (!g_initialized) {
@@ -2300,17 +2644,25 @@ int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
 
     /* Reset matmul counters */
     g_q8_fused_count = 0;
+    g_q5_fused_count = 0;
+    g_q6k_fused_count = 0;
     g_dequant_count = 0;
 
     int pos = 0;
     int token = prompt_tokens[0];
     int generated = 0;
 
+    uint64_t t_start = get_cycles();
+    uint64_t t_prefill_end = 0;
+
     while (pos < g_cfg.seq_len && generated < max_output) {
+        int streamed_tok = -1;
+
         /* Enter critical section - disable interrupts for deterministic timing */
         critical_section_enter();
 
-        /* Forward pass through all layers */
+        /* Embed current token, then forward through all layers */
+        embed_token(token, g_state.x);
         for (int l = 0; l < g_cfg.n_layers; l++) {
             /* Prefetch next layer's weights (1 layer ahead) */
             if (l + 1 < g_cfg.n_layers) {
@@ -2319,48 +2671,41 @@ int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
                 __builtin_prefetch(next_lw->attn_q, 0, 3);
             }
 
-            transformer_forward_stream(token, pos, l);
+            layer_forward_stream(pos, l);
         }
 
         /* Final norm and output projection */
-        rmsnorm_stream(g_state.x, g_state.x, g_weights.output_norm,
-                       g_weights.output_norm_type, g_cfg.dim, g_cfg.rms_norm_eps);
-
-        /* Output logits */
-        const void* output_weights = g_weights.output ? g_weights.output : g_weights.token_embd;
-        int output_type = g_weights.output ? g_weights.output_type : g_weights.token_embd_type;
-
-        /* Check if we need transposed matmul (when using transposed token_embd as output) */
-        if (!g_weights.output && g_weights.token_embd_transposed) {
-            /* token_embd is [dim, vocab_size], use transposed matmul */
-            matmul_stream_transposed(g_state.logits, output_weights, output_type,
-                                     g_state.x, g_cfg.dim, g_cfg.vocab_size);
-        } else {
-            /* Standard matmul for [vocab_size, dim] output weights */
-            matmul_stream(g_state.logits, output_weights, output_type,
-                          g_state.x, g_cfg.vocab_size, g_cfg.dim);
-        }
+        logits_from_hidden(g_state.x);
 
         /* Get next token */
         int next_token;
         if (pos < prompt_len - 1) {
             next_token = prompt_tokens[pos + 1];
         } else {
-            /* Argmax sampling */
-            int max_idx = 0;
-            float max_val = g_state.logits[0];
-            for (int i = 1; i < g_cfg.vocab_size; i++) {
-                if (g_state.logits[i] > max_val) {
-                    max_val = g_state.logits[i];
-                    max_idx = i;
-                }
-            }
+            if (t_prefill_end == 0)
+                t_prefill_end = get_cycles();  /* prompt eval done -> TTFT */
 
-            next_token = max_idx;
+            /* Sampling (greedy when temperature == 0) */
+            next_token = sample_next_token();
             output_tokens[generated++] = next_token;
 
-            /* EOS check */
-            if (next_token == g_cfg.eos_token_id) break;
+            /* EOS / stop-token check (GLM: <|user|>, <|assistant|>, ...) */
+            if (next_token == g_cfg.eos_token_id) {
+                critical_section_exit();
+                break;
+            }
+            bool is_stop = false;
+            for (int s = 0; s < g_cfg.n_stop_tokens; s++) {
+                if (next_token == g_cfg.stop_token_ids[s]) {
+                    is_stop = true;
+                    break;
+                }
+            }
+            if (is_stop) {
+                pos = g_cfg.seq_len;  /* force loop exit */
+            } else {
+                streamed_tok = next_token;
+            }
         }
 
         token = next_token;
@@ -2368,6 +2713,22 @@ int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
 
         /* Exit critical section - re-enable interrupts */
         critical_section_exit();
+
+        /* Stream the freshly sampled token outside the critical section so
+         * console I/O never stretches the deterministic window. */
+        if (streamed_tok >= 0 && cb) {
+            cb(streamed_tok, cb_ctx);
+        }
+    }
+
+    uint64_t t_end = get_cycles();
+
+    if (prefill_cycles) {
+        *prefill_cycles = (t_prefill_end != 0) ? (t_prefill_end - t_start)
+                                               : (t_end - t_start);
+    }
+    if (decode_cycles) {
+        *decode_cycles = (t_prefill_end != 0) ? (t_end - t_prefill_end) : 0;
     }
 
     PROFILER_STOP();
@@ -2377,6 +2738,88 @@ int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
 /* Check if ready */
 bool streaming_inference_is_ready(void) {
     return g_initialized;
+}
+
+/* Override EOS/stop token (e.g. chat template stop token) */
+void streaming_inference_set_eos(int token_id) {
+    if (token_id >= 0 && token_id < g_cfg.vocab_size) {
+        g_cfg.eos_token_id = token_id;
+    }
+}
+
+/* Get current EOS/stop token */
+int streaming_inference_get_eos(void) {
+    return g_cfg.eos_token_id;
+}
+
+/* Add an extra stop token (e.g. GLM <|user|>/<|assistant|>). Max 4. */
+void streaming_inference_add_stop_token(int token_id) {
+    if (token_id < 0) return;
+    for (int i = 0; i < g_cfg.n_stop_tokens; i++) {
+        if (g_cfg.stop_token_ids[i] == token_id) return;  /* already present */
+    }
+    if (g_cfg.n_stop_tokens < 4) {
+        g_cfg.stop_token_ids[g_cfg.n_stop_tokens++] = token_id;
+    }
+}
+
+/* Run a single forward pass over a prompt and dump the top-k logits.
+ * Debug/verification hook: used to cross-check the kernel forward graph
+ * against a host-side reference (tools/ref_chatglm.py). */
+void streaming_inference_debug_logits(const int* prompt_tokens, int prompt_len, int topk) {
+    if (!g_initialized || prompt_len <= 0) {
+        console_printf("[DBGLOGITS] inference not initialized or empty prompt\n");
+        return;
+    }
+
+    /* Prefill only: run all prompt tokens through the layers */
+    for (int pos = 0; pos < prompt_len; pos++) {
+        for (int l = 0; l < g_cfg.n_layers; l++) {
+            transformer_forward_stream(prompt_tokens[pos], pos, l);
+        }
+    }
+
+    rmsnorm_stream(g_state.x, g_state.x, g_weights.output_norm,
+                   g_weights.output_norm_type, g_cfg.dim, g_cfg.rms_norm_eps);
+
+    const void* output_weights = g_weights.output ? g_weights.output : g_weights.token_embd;
+    int output_type = g_weights.output ? g_weights.output_type : g_weights.token_embd_type;
+    if (!g_weights.output && g_weights.token_embd_transposed) {
+        matmul_stream_transposed(g_state.logits, output_weights, output_type,
+                                 g_state.x, g_cfg.dim, g_cfg.vocab_size);
+    } else {
+        matmul_stream(g_state.logits, output_weights, output_type,
+                      g_state.x, g_cfg.vocab_size, g_cfg.dim);
+    }
+
+    if (topk <= 0) topk = 8;
+    if (topk > 16) topk = 16;
+
+    console_printf("[DBGLOGITS] top-%d logits after %d prompt tokens:\n", topk, prompt_len);
+    /* Simple selection of top-k by repeated argmax (masks g_state.logits,
+     * which is scratch space that is rewritten on the next forward pass) */
+    for (int rank = 0; rank < topk; rank++) {
+        int best = -1;
+        float best_val = -1e30f;
+        for (int i = 0; i < g_cfg.vocab_size; i++) {
+            float v = g_state.logits[i];
+            if (v > best_val) {
+                best_val = v;
+                best = i;
+            }
+        }
+        if (best < 0) break;
+        /* Print with micro precision as fixed-point (console %f is coarse) */
+        {
+            int64_t micro = (int64_t)(best_val * 1000000.0f + (best_val >= 0 ? 0.5f : -0.5f));
+            int64_t ip = micro / 1000000;
+            int64_t fp = micro % 1000000;
+            if (fp < 0) fp = -fp;
+            console_printf("[DBGLOGITS] #%d id=%d logit=%lld.%06lld\n",
+                           rank, best, (long long)ip, (long long)fp);
+        }
+        g_state.logits[best] = -1e30f;  /* mask out for next rank */
+    }
 }
 
 /* Get token text */
@@ -2504,16 +2947,8 @@ int streaming_inference_generate_timed(const int* prompt_tokens, int prompt_len,
                 }
             }
 
-            /* Argmax sampling */
-            int max_idx = 0;
-            float max_val = g_state.logits[0];
-            for (int i = 1; i < g_cfg.vocab_size; i++) {
-                if (g_state.logits[i] > max_val) {
-                    max_val = g_state.logits[i];
-                    max_idx = i;
-                }
-            }
-            next_token = max_idx;
+            /* Sampling (greedy when temperature == 0) */
+            next_token = sample_next_token();
             output_tokens[generated] = next_token;
 
             /* Debug: Print first few logits on first generated token (scaled by 100 as int) */
@@ -2522,7 +2957,7 @@ int streaming_inference_generate_timed(const int* prompt_tokens, int prompt_len,
                     (int)(g_state.logits[0] * 100), (int)(g_state.logits[1] * 100),
                     (int)(g_state.logits[2] * 100), (int)(g_state.logits[3] * 100),
                     (int)(g_state.logits[4] * 100));
-                console_printf("[DEBUG] max_val(x100)=%d max_idx=%d\n", (int)(max_val * 100), max_idx);
+                console_printf("[DEBUG] sampled next_token=%d\n", next_token);
             }
 
             uint64_t token_end = get_cycles();
@@ -2545,8 +2980,14 @@ int streaming_inference_generate_timed(const int* prompt_tokens, int prompt_len,
             last_token_time = token_end;
             generated++;
 
-            /* EOS check */
+            /* EOS / stop-token check */
             if (next_token == g_cfg.eos_token_id) break;
+            for (int s = 0; s < g_cfg.n_stop_tokens; s++) {
+                if (next_token == g_cfg.stop_token_ids[s]) {
+                    pos = g_cfg.seq_len;  /* force loop exit */
+                    break;
+                }
+            }
         }
 
         token = next_token;

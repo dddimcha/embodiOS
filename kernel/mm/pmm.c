@@ -28,7 +28,8 @@ static struct {
     uint8_t* bitmap;
     void* mem_start;
     void* mem_end;
-    size_t total_pages;
+    size_t total_pages;    /* Pages in the managed span (may include holes) */
+    size_t usable_pages;   /* Pages actually backed by RAM */
     size_t free_pages;
     bool initialized;
     /* Simple linear allocator state */
@@ -157,57 +158,114 @@ static void merge_blocks(size_t page, uint32_t order)
     free_list_add(block, order);
 }
 
-/* Initialize physical memory manager */
-void pmm_init(void* start, size_t size)
+/* Check whether page index is usable RAM (bitmap clear) */
+static inline bool page_usable(size_t page)
 {
-    console_printf("PMM: Initializing with %zu MB at %p\n", size / (1024 * 1024), start);
+    return page < pmm_state.total_pages && !bitmap_test(page);
+}
 
-    /* Align start and size */
+/* Initialize physical memory manager from usable RAM regions.
+ * The managed span is [start, top of highest region); pages within the span
+ * that are not covered by any region (holes, e.g. the PCI hole at
+ * 0xC0000000-0xFFFFFFFF) stay marked unavailable and are never allocated. */
+void pmm_init_regions(void* start, const struct pmm_region* regions, size_t num_regions)
+{
+    /* Align start */
     start = (void*)ALIGN_UP((uintptr_t)start, PAGE_SIZE);
-    size = ALIGN_DOWN(size, PAGE_SIZE);
 
-    console_printf("PMM: Aligned start=%p, size=%zu\n", start, size);
+    /* Find top of managed memory */
+    uint64_t top = (uintptr_t)start;
+    for (size_t i = 0; i < num_regions; i++) {
+        uint64_t rend = regions[i].base + regions[i].size;
+        if (rend > top) {
+            top = rend;
+        }
+    }
+    if (top <= (uint64_t)(uintptr_t)start || num_regions == 0) {
+        console_printf("PMM: FATAL - no usable memory regions\n");
+        return;
+    }
 
     pmm_state.mem_start = start;
-    pmm_state.mem_end = (void*)((uintptr_t)start + size);
-    pmm_state.total_pages = size >> PAGE_SHIFT;
+    pmm_state.mem_end = (void*)(uintptr_t)top;
+    pmm_state.total_pages = (top - (uint64_t)(uintptr_t)start) >> PAGE_SHIFT;
     pmm_state.free_pages = 0;
+    pmm_state.usable_pages = 0;
 
-    console_printf("PMM: Total pages=%zu\n", pmm_state.total_pages);
+    console_printf("PMM: Managed span %zu MB at %p (%zu region(s))\n",
+                   (pmm_state.total_pages << PAGE_SHIFT) / (1024 * 1024),
+                   start, num_regions);
 
     /* Allocate bitmap (use first pages of memory) */
     size_t bitmap_pages = ALIGN_UP(pmm_state.total_pages / 8, PAGE_SIZE) >> PAGE_SHIFT;
-    console_printf("PMM: Bitmap pages=%zu\n", bitmap_pages);
 
     pmm_state.bitmap = (uint8_t*)start;
-    console_printf("PMM: Clearing bitmap...\n");
-    memset(pmm_state.bitmap, 0, bitmap_pages << PAGE_SHIFT);
-    console_printf("PMM: Bitmap cleared\n");
-    
-    console_printf("PMM: Marking bitmap pages...\n");
-    /* Mark bitmap pages as used */
-    for (size_t i = 0; i < bitmap_pages; i++) {
-        bitmap_set(i);
+
+    /* Mark ALL pages unavailable first... */
+    memset(pmm_state.bitmap, 0xFF, bitmap_pages << PAGE_SHIFT);
+
+    /* ...then clear bits for pages inside usable RAM regions */
+    for (size_t r = 0; r < num_regions; r++) {
+        uint64_t base = regions[r].base;
+        uint64_t end = base + regions[r].size;
+        if (end <= (uint64_t)(uintptr_t)start) {
+            continue;
+        }
+        if (base < (uint64_t)(uintptr_t)start) {
+            base = (uint64_t)(uintptr_t)start;
+        }
+        size_t first = (base - (uint64_t)(uintptr_t)start) >> PAGE_SHIFT;
+        size_t last = (end - (uint64_t)(uintptr_t)start) >> PAGE_SHIFT;
+        if (last > pmm_state.total_pages) {
+            last = pmm_state.total_pages;
+        }
+        for (size_t i = first; i < last; i++) {
+            bitmap_clear(i);
+        }
+        pmm_state.usable_pages += last - first;
     }
 
-    console_printf("PMM: Initializing free lists...\n");
+    /* Mark bitmap pages themselves as used */
+    uint64_t bitmap_end = (uint64_t)(uintptr_t)start + (bitmap_pages << PAGE_SHIFT);
+    size_t bitmap_last = (bitmap_end - (uint64_t)(uintptr_t)start) >> PAGE_SHIFT;
+    size_t bitmap_usable = 0;
+    for (size_t i = 0; i < bitmap_last; i++) {
+        if (page_usable(i)) {
+            bitmap_set(i);
+            bitmap_usable++;
+        }
+    }
+    pmm_state.usable_pages -= bitmap_usable;
+
     /* Initialize free lists */
     for (int i = 0; i <= MAX_ORDER; i++) {
         pmm_state.free_lists[i].head = NULL;
         pmm_state.free_lists[i].count = 0;
     }
 
-    console_printf("PMM: Setting up linear allocator...\n");
-    /* Simple linear allocator: start allocating after bitmap pages */
-    pmm_state.next_free_page = bitmap_pages;
-    pmm_state.free_pages = pmm_state.total_pages - bitmap_pages;
-    console_printf("PMM: %zu pages available starting at page %zu\n",
-                   pmm_state.free_pages, pmm_state.next_free_page);
+    /* Linear allocator: start at the first usable page */
+    size_t first_free = 0;
+    while (first_free < pmm_state.total_pages && !page_usable(first_free)) {
+        first_free++;
+    }
+    pmm_state.next_free_page = first_free;
+    pmm_state.free_pages = pmm_state.usable_pages;
 
     pmm_state.initialized = true;
-    
-    console_printf("PMM: Initialized with %zu free pages (%zu MB)\n", 
-                   pmm_state.free_pages, (pmm_state.free_pages << PAGE_SHIFT) / (1024 * 1024));
+
+    console_printf("PMM: %zu MB usable RAM (%zu free pages, first at #%zu)\n",
+                   (pmm_state.usable_pages << PAGE_SHIFT) / (1024 * 1024),
+                   pmm_state.free_pages, pmm_state.next_free_page);
+}
+
+/* Initialize physical memory manager (single contiguous region) */
+void pmm_init(void* start, size_t size)
+{
+    struct pmm_region region = {
+        .base = (uint64_t)(uintptr_t)start,
+        .size = ALIGN_DOWN(size, PAGE_SIZE)
+    };
+    pmm_init_regions(start, &region, 1);
 }
 
 /* Allocate a single page */
@@ -216,32 +274,39 @@ void* pmm_alloc_page(void)
     return pmm_alloc_pages(1);
 }
 
-/* Allocate multiple pages - simple linear allocator */
+/* Allocate multiple pages - linear allocator over usable RAM.
+ * Skips pages that are not backed by RAM (holes); the returned range is
+ * always a contiguous run of usable pages. */
 void* pmm_alloc_pages(size_t count)
 {
     if (!pmm_state.initialized || count == 0) {
         return NULL;
     }
 
-    /* Check if we have enough pages */
-    if (pmm_state.next_free_page + count > pmm_state.total_pages) {
-        return NULL;  /* Out of memory */
+    /* Scan forward for a contiguous run of usable pages */
+    size_t i = pmm_state.next_free_page;
+    while (i + count <= pmm_state.total_pages) {
+        if (!page_usable(i)) {
+            i++;
+            continue;
+        }
+        size_t j = 1;
+        while (j < count && page_usable(i + j)) {
+            j++;
+        }
+        if (j == count) {
+            /* Found a usable run */
+            void* addr = page_to_addr(i);
+            pmm_state.next_free_page = i + count;
+            pmm_state.free_pages -= count;
+            /* Skip memset for large allocations - caller can zero if needed */
+            /* This avoids 700MB+ memset which takes forever */
+            return addr;
+        }
+        i += j + 1;  /* skip past the unusable page at i + j */
     }
 
-    /* Allocate consecutive pages */
-    size_t page = pmm_state.next_free_page;
-    void* addr = page_to_addr(page);
-
-    /* Skip bitmap marking for speed - linear allocator doesn't need it */
-
-    /* Advance the allocator */
-    pmm_state.next_free_page += count;
-    pmm_state.free_pages -= count;
-
-    /* Skip memset for large allocations - caller can zero if needed */
-    /* This avoids 700MB+ memset which takes forever */
-
-    return addr;
+    return NULL;  /* Out of memory (or no contiguous run large enough) */
 }
 
 /* Free a single page */
@@ -283,16 +348,16 @@ size_t pmm_available_pages(void)
     return pmm_state.free_pages;
 }
 
-/* Get total pages */
+/* Get total usable pages (RAM-backed, excluding holes) */
 size_t pmm_total_pages(void)
 {
-    return pmm_state.total_pages;
+    return pmm_state.usable_pages;
 }
 
-/* Get total memory in bytes */
+/* Get total usable memory in bytes */
 size_t pmm_total_memory(void)
 {
-    return pmm_state.total_pages * PAGE_SIZE;
+    return pmm_state.usable_pages * PAGE_SIZE;
 }
 
 /* Get available memory in bytes */
@@ -305,7 +370,7 @@ size_t pmm_available_memory(void)
 void pmm_print_stats(void)
 {
     console_printf("Physical Memory Manager:\n");
-    console_printf("  Total memory: %zu MB\n", pmm_state.total_pages * PAGE_SIZE / (1024 * 1024));
+    console_printf("  Total memory: %zu MB\n", pmm_state.usable_pages * PAGE_SIZE / (1024 * 1024));
     console_printf("  Free memory:  %zu MB\n", pmm_state.free_pages * PAGE_SIZE / (1024 * 1024));
-    console_printf("  Used memory:  %zu MB\n", (pmm_state.total_pages - pmm_state.free_pages) * PAGE_SIZE / (1024 * 1024));
+    console_printf("  Used memory:  %zu MB\n", (pmm_state.usable_pages - pmm_state.free_pages) * PAGE_SIZE / (1024 * 1024));
 }

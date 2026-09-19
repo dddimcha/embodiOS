@@ -15,12 +15,25 @@ static inline uint8_t inb(uint16_t port) {
 
 /* Initialize serial port */
 void serial_init(void) {
+    static int already_initialized = 0;
+    if (already_initialized) return;
+    already_initialized = 1;
+    /* NOTE: boot.S has already configured the UART before the boot log.
+     * Re-running the DLAB/divisor/FCR sequence here races with incoming
+     * bytes (drops/corrupts the one being received), so only do a full
+     * re-init when the port looks unconfigured (LCR == 0). */
+    if ((inb(COM1_PORT + 3) & 0x7F) == 0x03) {
+        return;  /* already set to 8N1 by boot.S — leave it alone */
+    }
     outb(COM1_PORT + 1, 0x00);    // Disable interrupts
     outb(COM1_PORT + 3, 0x80);    // Enable DLAB
     outb(COM1_PORT + 0, 0x03);    // Divisor low (38400 baud)
     outb(COM1_PORT + 1, 0x00);    // Divisor high
     outb(COM1_PORT + 3, 0x03);    // 8 bits, no parity, one stop
-    outb(COM1_PORT + 2, 0xC7);    // Enable FIFO
+    /* 0xC1: FIFO on, 14-byte trigger; do NOT use 0xC7 here — its
+       reset bits would drop RX bytes typed during boot (this init
+       runs after boot.S and would race with early user input). */
+    outb(COM1_PORT + 2, 0xC1);    // Enable FIFO (no RX/TX reset)
     outb(COM1_PORT + 4, 0x0B);    // IRQs enabled, RTS/DSR set
 }
 

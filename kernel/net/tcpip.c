@@ -140,6 +140,45 @@ static uint16_t checksum(const void *data, size_t len)
     return (uint16_t)~sum;
 }
 
+/* TCP checksum: pseudo-header + TCP-заголовок + payload.
+ * Побайтовая сумма 16-битных big-endian слов (RFC 1071) — без зависимости
+ * от host endianness и strict-aliasing; возвращает значение, готовое
+ * для записи в поле checksum заголовка (т.е. уже htons()'нутое). */
+static uint16_t tcp_checksum(const ip_header_t *ip, const tcp_header_t *tcp,
+                             size_t tcp_len)
+{
+    uint32_t sum = 0;
+
+    /* Pseudo-header: src/dst IP (уже network order в заголовке) */
+    const uint8_t *ips = (const uint8_t *)&ip->src_ip;
+    const uint8_t *ipd = (const uint8_t *)&ip->dst_ip;
+    for (int i = 0; i < 4; i += 2) {
+        sum += ((uint32_t)ips[i] << 8) | ips[i + 1];
+        sum += ((uint32_t)ipd[i] << 8) | ipd[i + 1];
+    }
+    sum += IP_PROTO_TCP;
+    sum += (uint32_t)tcp_len;  /* 16-битное слово длины (BE) */
+
+    /* TCP-заголовок + payload */
+    const uint8_t *b = (const uint8_t *)tcp;
+    size_t n = tcp_len;
+    while (n > 1) {
+        sum += ((uint32_t)b[0] << 8) | b[1];
+        b += 2;
+        n -= 2;
+    }
+    if (n) {
+        sum += (uint32_t)b[0] << 8;
+    }
+
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    uint16_t res = (uint16_t)~sum;
+    return htons(res);  /* на little-endian байты в памяти = BE на проводе */
+}
+
 /* ============================================================================
  * Random Number Generation
  * ============================================================================ */
@@ -228,6 +267,35 @@ static int arp_request(uint32_t target_ip)
     net_stats.arp_requests++;
 
     return net_send(tx_buffer, sizeof(eth_header_t) + sizeof(arp_header_t));
+}
+
+/* Resolve destination MAC for outgoing IP packet.
+ * Broadcast адреса (255.255.255.255 и подсетевой x.x.x.255) мапятся на
+ * eth FF:FF:FF:FF:FF:FF без ARP (RFC 1122 — ARP для broadcast бессмысленен).
+ * Остальные — через ARP cache; при промахе шлём ARP request и возвращаем
+ * NET_ERR_UNREACHABLE (вызывающий может повторить позже).
+ * Возвращает NET_OK и заполняет mac_out, либо NET_ERR_UNREACHABLE. */
+static int resolve_dst_mac(uint32_t dst_ip, uint8_t mac_out[ETH_ALEN])
+{
+    uint32_t subnet_bcast = net_cfg.ip_addr | ~net_cfg.netmask;
+
+    if (dst_ip == 0xFFFFFFFFu || dst_ip == subnet_bcast) {
+        memset(mac_out, 0xFF, ETH_ALEN);
+        return NET_OK;
+    }
+
+    uint32_t next_hop = dst_ip;
+    if ((dst_ip & net_cfg.netmask) != (net_cfg.ip_addr & net_cfg.netmask)) {
+        next_hop = net_cfg.gateway;
+    }
+
+    arp_entry_t *entry = arp_lookup(next_hop);
+    if (!entry) {
+        arp_request(next_hop);
+        return NET_ERR_UNREACHABLE;
+    }
+    memcpy(mac_out, entry->mac, ETH_ALEN);
+    return NET_OK;
 }
 
 /* ============================================================================
@@ -347,6 +415,20 @@ static void handle_udp(const ip_header_t *ip, const uint8_t *data, size_t len)
                 sockets[i].rx_len += data_len;
                 sockets[i].remote_ip = ntohl(ip->src_ip);
                 sockets[i].remote_port = ntohs(udp->src_port);
+
+                /* Очередь метаданных датаграмм для socket_recvfrom():
+                 * если очередь полна, старейшая датаграмма вытесняется
+                 * (её payload остаётся в rx_buffer, но без метаданных —
+                 * будет слит первой читавшей recvfrom как часть следующей). */
+                if (sockets[i].dgram_count < SOCKET_DGRAM_QUEUE) {
+                    uint8_t tail = (uint8_t)((sockets[i].dgram_head +
+                                              sockets[i].dgram_count) %
+                                             SOCKET_DGRAM_QUEUE);
+                    sockets[i].dgram_src_ip[tail]   = ntohl(ip->src_ip);
+                    sockets[i].dgram_src_port[tail] = ntohs(udp->src_port);
+                    sockets[i].dgram_len[tail]      = (uint16_t)data_len;
+                    sockets[i].dgram_count++;
+                }
             }
             break;
         }
@@ -362,15 +444,38 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
 
     net_stats.tcp_connections++;
 
-    /* Find socket */
-    for (int i = 0; i < MAX_SOCKETS; i++) {
-        if (sockets[i].active && sockets[i].type == SOCK_STREAM &&
-            sockets[i].local_port == dst_port) {
+    /* Find socket: сначала точное совпадение существующего соединения
+     * (local port + remote ip/port), затем listener для нового SYN.
+     * Иначе SYN нового соединения мог попасть в умирающий сокет
+     * (FIN_WAIT/TIME_WAIT) с тем же local_port — и быть проигнорирован. */
+    uint32_t src_ip_h = ntohl(ip->src_ip);
+    uint16_t src_port_h = ntohs(tcp->src_port);
+    int i = -1;
+    for (int j = 0; j < MAX_SOCKETS; j++) {
+        if (sockets[j].active && sockets[j].type == SOCK_STREAM &&
+            sockets[j].local_port == dst_port &&
+            sockets[j].state != TCP_LISTEN &&
+            sockets[j].remote_ip == src_ip_h &&
+            sockets[j].remote_port == src_port_h) {
+            i = j;
+            break;
+        }
+    }
+    if (i < 0) {
+        for (int j = 0; j < MAX_SOCKETS; j++) {
+            if (sockets[j].active && sockets[j].type == SOCK_STREAM &&
+                sockets[j].local_port == dst_port &&
+                sockets[j].state == TCP_LISTEN) {
+                i = j;
+                break;
+            }
+        }
+    }
+    if (i >= 0) {
 
             uint8_t flags = tcp->flags;
             uint32_t seq = ntohl(tcp->seq_num);
             uint32_t ack = ntohl(tcp->ack_num);
-            (void)ack;  /* Used for ACK validation in full implementation */
 
             /* Update activity timestamp */
             sockets[i].last_activity_ms = hal_timer_get_milliseconds();
@@ -386,10 +491,17 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                     sockets[i].seq_num = tcp_generate_isn();
                     sockets[i].state = TCP_SYN_RECEIVED;
                     /* Send SYN+ACK */
-                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                    int sret = tcp_send_packet(sockets[i].remote_ip,
+                                    sockets[i].remote_port,
                                     sockets[i].local_port, sockets[i].seq_num,
                                     sockets[i].ack_num, TCP_SYN | TCP_ACK,
                                     NULL, 0);
+                    sockets[i].seq_num++;  /* SYN consumes one seq number */
+                    if (sret == NET_ERR_UNREACHABLE) {
+                        /* SYN+ACK не ушёл (ARP-промах): остаться в LISTEN —
+                         * ретрансмит SYN от пира повторит попытку */
+                        sockets[i].state = TCP_LISTEN;
+                    }
                 }
                 break;
 
@@ -419,6 +531,20 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                     sockets[i].remote_port = 0;
                     break;
                 }
+                /* Дублированный SYN (ретрансмит пира): переслать SYN+ACK —
+                 * первая попытка могла быть дропнута из-за ARP-промаха.
+                 * seq SYN+ACK = isn = seq_num - 1 (SYN уже "съел" 1). */
+                if (flags & TCP_SYN) {
+                    tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                    sockets[i].local_port, sockets[i].seq_num - 1,
+                                    sockets[i].ack_num, TCP_SYN | TCP_ACK,
+                                    NULL, 0);
+                    break;
+                }
+                /* Финальный ACK рукопожатия: handshake завершён */
+                if ((flags & TCP_ACK) && ack == sockets[i].seq_num) {
+                    sockets[i].state = TCP_ESTABLISHED;
+                }
                 break;
 
             case TCP_ESTABLISHED:
@@ -439,11 +565,22 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                     /* Handle data */
                     size_t header_len = (tcp->data_offset >> 4) * 4;
                     size_t data_len = len - header_len;
-                    if (data_len > 0 && sockets[i].rx_len + data_len <= SOCKET_BUFFER_SIZE) {
-                        memcpy(sockets[i].rx_buffer + sockets[i].rx_len,
-                               data + header_len, data_len);
-                        sockets[i].rx_len += data_len;
-                        sockets[i].ack_num = seq + data_len;
+                    if (data_len > 0) {
+                        /* Принимать только in-order данные; дубликаты
+                         * (ретрансмит из-за потерянного ACK) не добавлять */
+                        if (seq == sockets[i].ack_num &&
+                            sockets[i].rx_len + data_len <= SOCKET_BUFFER_SIZE) {
+                            memcpy(sockets[i].rx_buffer + sockets[i].rx_len,
+                                   data + header_len, data_len);
+                            sockets[i].rx_len += data_len;
+                            sockets[i].ack_num = seq + data_len;
+                        }
+                        /* ACK принятых данных (и дубликатов) — иначе пир
+                         * будет ретрансмитить и засорять rx_buffer */
+                        tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                        sockets[i].local_port, sockets[i].seq_num,
+                                        sockets[i].ack_num, TCP_ACK,
+                                        NULL, 0);
                     }
                 }
                 break;
@@ -545,8 +682,6 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
             default:
                 break;
             }
-            break;
-        }
     }
 }
 
@@ -559,9 +694,12 @@ static void handle_ip(const uint8_t *pkt, size_t len)
     /* Verify IP version */
     if ((ip->version_ihl >> 4) != 4) return;
 
-    /* Check destination */
+    /* Check destination: точный IP, limited broadcast (255.255.255.255)
+     * или подсетевой broadcast (ip | ~netmask, напр. 10.0.2.255) */
     uint32_t dst_ip = ntohl(ip->dst_ip);
-    if (dst_ip != net_cfg.ip_addr && dst_ip != 0xFFFFFFFF) return;
+    uint32_t subnet_bcast = net_cfg.ip_addr | ~net_cfg.netmask;
+    if (dst_ip != net_cfg.ip_addr && dst_ip != 0xFFFFFFFFu &&
+        dst_ip != subnet_bcast) return;
 
     /* Get IP header length and payload */
     size_t ip_hdr_len = (ip->version_ihl & 0x0F) * 4;
@@ -714,17 +852,10 @@ int tcpip_send_udp(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port,
 {
     if (!tcpip_initialized) return NET_ERR_INIT;
 
-    /* Resolve MAC address */
-    uint32_t next_hop = dst_ip;
-    if ((dst_ip & net_cfg.netmask) != (net_cfg.ip_addr & net_cfg.netmask)) {
-        next_hop = net_cfg.gateway;
-    }
-
-    arp_entry_t *entry = arp_lookup(next_hop);
-    if (!entry) {
-        arp_request(next_hop);
-        return NET_ERR_UNREACHABLE;
-    }
+    /* Resolve MAC address (broadcast → FF:FF:FF:FF:FF:FF без ARP) */
+    uint8_t dst_mac[ETH_ALEN];
+    int res = resolve_dst_mac(dst_ip, dst_mac);
+    if (res != NET_OK) return res;
 
     /* Build packet */
     eth_header_t *eth = (eth_header_t *)tx_buffer;
@@ -733,7 +864,7 @@ int tcpip_send_udp(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port,
     uint8_t *payload = tx_buffer + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(udp_header_t);
 
     /* Ethernet */
-    memcpy(eth->dst, entry->mac, ETH_ALEN);
+    memcpy(eth->dst, dst_mac, ETH_ALEN);
     memcpy(eth->src, net_cfg.mac_addr, ETH_ALEN);
     eth->type = htons(ETH_TYPE_IP);
 
@@ -772,23 +903,16 @@ int tcpip_ping(uint32_t dst_ip, uint16_t id, uint16_t seq)
     if (!tcpip_initialized) return NET_ERR_INIT;
 
     /* Resolve MAC */
-    uint32_t next_hop = dst_ip;
-    if ((dst_ip & net_cfg.netmask) != (net_cfg.ip_addr & net_cfg.netmask)) {
-        next_hop = net_cfg.gateway;
-    }
-
-    arp_entry_t *entry = arp_lookup(next_hop);
-    if (!entry) {
-        arp_request(next_hop);
-        return NET_ERR_UNREACHABLE;
-    }
+    uint8_t dst_mac[ETH_ALEN];
+    int res = resolve_dst_mac(dst_ip, dst_mac);
+    if (res != NET_OK) return res;
 
     /* Build ICMP echo request */
     eth_header_t *eth = (eth_header_t *)tx_buffer;
     ip_header_t *ip = (ip_header_t *)(tx_buffer + sizeof(eth_header_t));
     icmp_header_t *icmp = (icmp_header_t *)(tx_buffer + sizeof(eth_header_t) + sizeof(ip_header_t));
 
-    memcpy(eth->dst, entry->mac, ETH_ALEN);
+    memcpy(eth->dst, dst_mac, ETH_ALEN);
     memcpy(eth->src, net_cfg.mac_addr, ETH_ALEN);
     eth->type = htons(ETH_TYPE_IP);
 
@@ -820,17 +944,10 @@ static int tcp_send_packet(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port
 {
     if (!tcpip_initialized) return NET_ERR_INIT;
 
-    /* Resolve MAC address */
-    uint32_t next_hop = dst_ip;
-    if ((dst_ip & net_cfg.netmask) != (net_cfg.ip_addr & net_cfg.netmask)) {
-        next_hop = net_cfg.gateway;
-    }
-
-    arp_entry_t *entry = arp_lookup(next_hop);
-    if (!entry) {
-        arp_request(next_hop);
-        return NET_ERR_UNREACHABLE;
-    }
+    /* Resolve MAC address (broadcast → FF:FF:FF:FF:FF:FF без ARP) */
+    uint8_t dst_mac[ETH_ALEN];
+    int res = resolve_dst_mac(dst_ip, dst_mac);
+    if (res != NET_OK) return res;
 
     /* Build packet */
     eth_header_t *eth = (eth_header_t *)tx_buffer;
@@ -839,7 +956,7 @@ static int tcp_send_packet(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port
     uint8_t *payload = tx_buffer + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(tcp_header_t);
 
     /* Ethernet */
-    memcpy(eth->dst, entry->mac, ETH_ALEN);
+    memcpy(eth->dst, dst_mac, ETH_ALEN);
     memcpy(eth->src, net_cfg.mac_addr, ETH_ALEN);
     eth->type = htons(ETH_TYPE_IP);
 
@@ -872,8 +989,9 @@ static int tcp_send_packet(uint32_t dst_ip, uint16_t dst_port, uint16_t src_port
         memcpy(payload, data, len);
     }
 
-    /* TCP checksum - simplified (set to 0 for now) */
-    /* TODO: Implement proper TCP checksum with pseudo-header */
+    /* TCP checksum (pseudo-header + заголовок + payload) — обязателен:
+     * без него host-стек за slirp/hostfwd молча дропает наши сегменты */
+    tcp->checksum = tcp_checksum(ip, tcp, sizeof(tcp_header_t) + len);
 
     size_t total_len = sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(tcp_header_t) + len;
 
@@ -957,6 +1075,7 @@ int socket_connect(int fd, uint32_t ip, uint16_t port)
     tcp_send_packet(sockets[fd].remote_ip, sockets[fd].remote_port,
                     sockets[fd].local_port, sockets[fd].seq_num,
                     0, TCP_SYN, NULL, 0);
+    sockets[fd].seq_num++;  /* SYN consumes one sequence number */
 
     return NET_OK;
 }
@@ -966,7 +1085,10 @@ int socket_accept(int fd, uint32_t *remote_ip, uint16_t *remote_port)
     if (fd < 0 || fd >= MAX_SOCKETS || !sockets[fd].active)
         return NET_ERR_INVALID;
 
-    if (sockets[fd].state != TCP_SYN_RECEIVED)
+    /* Принять можно сразу после SYN (SYN_RECEIVED) или после завершения
+     * handshake (ESTABLISHED — финальный ACK мог прийти до accept) */
+    if (sockets[fd].state != TCP_SYN_RECEIVED &&
+        sockets[fd].state != TCP_ESTABLISHED)
         return NET_ERR_INVALID;
 
     /* Return connection info */
@@ -1006,10 +1128,59 @@ int socket_send(int fd, const void *data, size_t len)
     return ret;
 }
 
+int socket_recvfrom(int fd, void *buffer, size_t len,
+                    uint32_t *src_ip, uint16_t *src_port)
+{
+    if (fd < 0 || fd >= MAX_SOCKETS || !sockets[fd].active)
+        return NET_ERR_INVALID;
+
+    /* TCP: потоковое чтение, отправитель — remote пира */
+    if (sockets[fd].type != SOCK_DGRAM) {
+        int n = socket_recv(fd, buffer, len);
+        if (n > 0) {
+            if (src_ip)   *src_ip   = sockets[fd].remote_ip;
+            if (src_port) *src_port = sockets[fd].remote_port;
+        }
+        return n;
+    }
+
+    if (sockets[fd].dgram_count == 0) return 0;
+
+    /* Старейшая датаграмма в очереди */
+    uint8_t head = sockets[fd].dgram_head;
+    size_t dg_len = sockets[fd].dgram_len[head];
+    if (dg_len > sockets[fd].rx_len)
+        dg_len = sockets[fd].rx_len;  /* страховка при вытеснении метаданных */
+
+    size_t to_copy = (len < dg_len) ? len : dg_len;
+    memcpy(buffer, sockets[fd].rx_buffer, to_copy);
+
+    if (src_ip)   *src_ip   = sockets[fd].dgram_src_ip[head];
+    if (src_port) *src_port = sockets[fd].dgram_src_port[head];
+
+    /* Убрать датаграмму целиком (лишнее отбрасывается, как recvfrom) */
+    sockets[fd].rx_len -= dg_len;
+    if (sockets[fd].rx_len > 0) {
+        memmove(sockets[fd].rx_buffer, sockets[fd].rx_buffer + dg_len,
+                sockets[fd].rx_len);
+    }
+    sockets[fd].dgram_head = (uint8_t)((head + 1) % SOCKET_DGRAM_QUEUE);
+    sockets[fd].dgram_count--;
+
+    sockets[fd].last_activity_ms = hal_timer_get_milliseconds();
+
+    return (int)to_copy;
+}
+
 int socket_recv(int fd, void *buffer, size_t len)
 {
     if (fd < 0 || fd >= MAX_SOCKETS || !sockets[fd].active)
         return NET_ERR_INVALID;
+
+    /* UDP: датаграммная семантика (pop одной датаграммы), чтобы очередь
+     * метаданных recvfrom не рассинхронизировалась с rx_buffer */
+    if (sockets[fd].type == SOCK_DGRAM)
+        return socket_recvfrom(fd, buffer, len, NULL, NULL);
 
     if (sockets[fd].rx_len == 0) return 0;
 
@@ -1079,6 +1250,20 @@ int socket_close(int fd)
         net_stats.tcp_sockets_leaked = net_stats.tcp_sockets_created - net_stats.tcp_sockets_closed;
     }
 
+    return NET_OK;
+}
+
+int tcpip_get_local_ip(uint32_t *ip_out)
+{
+    if (!tcpip_initialized || !ip_out) return NET_ERR_INVALID;
+    *ip_out = net_cfg.ip_addr;
+    return NET_OK;
+}
+
+int tcpip_get_local_mac(uint8_t mac_out[ETH_ALEN])
+{
+    if (!tcpip_initialized || !mac_out) return NET_ERR_INVALID;
+    memcpy(mac_out, net_cfg.mac_addr, ETH_ALEN);
     return NET_OK;
 }
 

@@ -40,7 +40,28 @@ uint64_t cpu_get_timestamp(void);
 
 /* SMP support */
 uint32_t smp_num_cpus(void);
+uint32_t smp_get_num_online(void);
 uint32_t cpu_count(void);
+
+/* Per-CPU information for the 'cpus' shell command (x86_64 SMP) */
+struct smp_cpu_info {
+    uint32_t cpu_id;        /* Sequential CPU number (0 = BSP) */
+    uint32_t apic_id;       /* Local APIC ID */
+    int online;             /* CPU is online */
+    int bsp;                /* Bootstrap processor */
+    uint64_t work_count;    /* Mailbox work items executed on this CPU */
+    uint64_t work_cycles;   /* TSC cycles spent in mailbox work */
+    uint64_t polls;         /* Mailbox poll iterations (AP liveness) */
+};
+int smp_get_cpu_info(uint32_t cpu, struct smp_cpu_info *out);
+
+/* Cross-CPU work queue: run fn(arg) on an AP's mailbox loop.
+ * smp_work_dispatch posts work (spins if the previous item on that CPU is
+ * still in flight); smp_work_wait blocks until the AP finished it.
+ * CPU 0 (BSP) is not a valid dispatch target - run locally instead. */
+typedef void (*smp_work_fn_t)(void *arg);
+int smp_work_dispatch(uint32_t cpu, smp_work_fn_t fn, void *arg);
+int smp_work_wait(uint32_t cpu);
 
 /* Cache control */
 void cpu_flush_cache(void);

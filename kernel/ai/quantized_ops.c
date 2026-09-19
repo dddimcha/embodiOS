@@ -1,6 +1,10 @@
 /* EMBODIOS Quantized Operations - Pure Integer Math
- * Dequantize Q4_K, Q5_K, Q6_K, and Q8_0 blocks to fixed-point values
+ * Dequantize Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, and Q8_0 blocks to fixed-point
  * NO FLOATING-POINT - Uses Q16.16 fixed-point arithmetic
+ *
+ * Q2_K/Q3_K/Q5_K are ggml-faithful ports (fp16 super-block scales,
+ * llama.cpp ggml-quants.c layout); Q4_K/Q6_K use the legacy Q8.8
+ * fixed-point block scale convention.
  *
  * Supports runtime backend switching: GPU (Vulkan) or CPU fallback
  *
@@ -51,7 +55,74 @@ static const size_t block_elements[] = {
 };
 
 /* ============================================================================
- * Scale Extraction for K-quants
+ * fp16 -> Q16.16 fixed-point conversion (integer-only)
+ *
+ * GGUF K-quant super-block scales (d, dmin) are stored as IEEE-754 fp16.
+ * The ggml-faithful ports below decode them without floating-point ops.
+ * ============================================================================ */
+
+static fixed_t fp16_bits_to_fixed(uint16_t h)
+{
+    uint32_t sign = (h >> 15) & 1;
+    int32_t  exp  = (h >> 10) & 0x1f;
+    uint32_t mant = h & 0x3ff;
+    int64_t  val;
+
+    if (exp == 0) {
+        /* Denormal: value = mant * 2^-24 -> Q16.16: mant >> 8 */
+        val = mant >> 8;
+    } else if (exp == 31) {
+        val = 0x7FFFFFFF;  /* saturate Inf/NaN */
+    } else {
+        /* value = (1024|mant) * 2^(exp-25) -> Q16.16: << (exp - 9) */
+        uint32_t m = 1024 | mant;
+        int32_t e = exp - 9;
+        if (e >= 0) {
+            val = (int64_t)m << e;
+            if (val > 0x7FFFFFFF) val = 0x7FFFFFFF;  /* clamp overflow */
+        } else {
+            val = m >> (-e);
+        }
+    }
+
+    return sign ? -(fixed_t)val : (fixed_t)val;
+}
+
+/* Decode 6-bit scale and min for sub-block j from the packed 12-byte
+ * Q4_K/Q5_K format - matches ggml get_scale_min_k4() */
+static void get_scale_min_k4_fp(int j, const uint8_t* q, uint8_t* d, uint8_t* m)
+{
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
+    }
+}
+
+/* Unpack the 16 signed 6-bit Q3_K scales (biased by 32) - matches ggml */
+static void unpack_q3_k_scales(const uint8_t* packed, int8_t* out)
+{
+    const uint32_t kmask1 = 0x03030303;
+    const uint32_t kmask2 = 0x0f0f0f0f;
+    uint32_t aux[4];
+
+    uint8_t* dst8 = (uint8_t*)aux;
+    for (int i = 0; i < 12; i++) dst8[i] = packed[i];
+
+    uint32_t tmp = aux[2];
+    aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+    aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+    aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+    aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+
+    const int8_t* s = (const int8_t*)aux;
+    for (int i = 0; i < 16; i++) out[i] = s[i];
+}
+
+/* ============================================================================
+ * Scale Extraction for K-quants (legacy Q8.8-convention path for Q4_K/Q6_K)
  *
  * K-quants store 6-bit scales and mins in a packed 12-byte format.
  * Layout: 8 scales + 4 mins in first 6 bytes, then 8 more scales + 4 mins
@@ -114,6 +185,89 @@ static void decode_k_scales(const uint8_t* scales_raw,
 }
 
 /* ============================================================================
+ * Q2_K Dequantization (2-bit K-quant, 256 values per block)
+ *
+ * ggml-faithful port of dequantize_row_q2_K() to fixed-point.
+ * Formula: value = (d * (sc & 0xF)) * q - (dmin * (sc >> 4))
+ * ============================================================================ */
+
+void dequantize_block_q2_k(const struct block_q2_k* block, fixed_t* output)
+{
+    fixed_t d_fixed    = fp16_bits_to_fixed(block->d);
+    fixed_t dmin_fixed = fp16_bits_to_fixed(block->dmin);
+
+    const uint8_t* q = block->qs;
+    fixed_t* y = output;
+
+    int is = 0;
+    for (int nn = 0; nn < QK_K; nn += 128) {
+        int shift = 0;
+        for (int j = 0; j < 4; j++) {
+            /* First 16 elements of this group */
+            uint8_t sc = block->scales[is++];
+            fixed_t dl = d_fixed * (sc & 0xF);    /* Q16.16 * small int */
+            fixed_t ml = dmin_fixed * (sc >> 4);
+            for (int l = 0; l < 16; l++) {
+                *y++ = dl * ((q[l] >> shift) & 3) - ml;
+            }
+
+            /* Next 16 elements */
+            sc = block->scales[is++];
+            dl = d_fixed * (sc & 0xF);
+            ml = dmin_fixed * (sc >> 4);
+            for (int l = 0; l < 16; l++) {
+                *y++ = dl * ((q[l + 16] >> shift) & 3) - ml;
+            }
+
+            shift += 2;
+        }
+        q += 32;
+    }
+}
+
+/* ============================================================================
+ * Q3_K Dequantization (3-bit K-quant, 256 values per block)
+ *
+ * ggml-faithful port of dequantize_row_q3_K() to fixed-point.
+ * Signed quantization without mins: value = d * (sc - 32) * (q - (h ? 0 : 4))
+ * ============================================================================ */
+
+void dequantize_block_q3_k(const struct block_q3_k* block, fixed_t* output)
+{
+    fixed_t d_fixed = fp16_bits_to_fixed(block->d);
+
+    int8_t scales[16];
+    unpack_q3_k_scales(block->scales, scales);
+
+    const uint8_t* q = block->qs;
+    const uint8_t* hm = block->hmask;
+    uint8_t m = 1;
+    fixed_t* y = output;
+
+    int is = 0;
+    for (int nn = 0; nn < QK_K; nn += 128) {
+        int shift = 0;
+        for (int j = 0; j < 4; j++) {
+            fixed_t dl = d_fixed * ((int32_t)scales[is++] - 32);
+            for (int l = 0; l < 16; l++) {
+                int32_t q3 = ((q[l + 0] >> shift) & 3) - ((hm[l + 0] & m) ? 0 : 4);
+                *y++ = dl * q3;
+            }
+
+            dl = d_fixed * ((int32_t)scales[is++] - 32);
+            for (int l = 0; l < 16; l++) {
+                int32_t q3 = ((q[l + 16] >> shift) & 3) - ((hm[l + 16] & m) ? 0 : 4);
+                *y++ = dl * q3;
+            }
+
+            shift += 2;
+            m <<= 1;
+        }
+        q += 32;
+    }
+}
+
+/* ============================================================================
  * Q4_K Dequantization (4-bit K-quant, 256 values per block)
  * ============================================================================ */
 
@@ -166,44 +320,42 @@ void dequantize_block_q4_k(const struct block_q4_k* block, fixed_t* output)
  * @block: Pointer to quantized Q5_K block (256 values, 5-bit each)
  * @output: Output buffer for 256 fixed-point values
  *
- * Extracts 6-bit scales and mins, combines low 4-bits with high bit from qh,
- * then dequantizes each 5-bit value using: value = scale * q - min
+ * ggml-faithful port of dequantize_row_q5_K() to fixed-point.
+ * Extracts 6-bit scales/mins via get_scale_min_k4 layout, combines low
+ * 4-bits from qs with the high bit from qh (per-32-group bit planes),
+ * then dequantizes using: value = (d*sc) * q - (dmin*m)
  */
 void dequantize_block_q5_k(const struct block_q5_k* block, fixed_t* output)
 {
-    int16_t scales[16];
-    int16_t mins[16];
+    fixed_t d_fixed    = fp16_bits_to_fixed(block->d);
+    fixed_t dmin_fixed = fp16_bits_to_fixed(block->dmin);
 
-    decode_k_scales(block->scales, scales, mins);
+    const uint8_t* ql = block->qs;
+    const uint8_t* qh = block->qh;
+    fixed_t* y = output;
 
-    fixed_t d_fixed = FIXED8_TO_FIXED16(block->d);
-    fixed_t dmin_fixed = FIXED8_TO_FIXED16(block->dmin);
+    int is = 0;
+    uint8_t sc, m;
+    uint8_t u1 = 1, u2 = 2;
+    for (int j = 0; j < QK_K; j += 64) {
+        get_scale_min_k4_fp(is + 0, block->scales, &sc, &m);
+        fixed_t d1 = d_fixed * sc;
+        fixed_t m1 = dmin_fixed * m;
+        get_scale_min_k4_fp(is + 1, block->scales, &sc, &m);
+        fixed_t d2 = d_fixed * sc;
+        fixed_t m2 = dmin_fixed * m;
 
-    /* Process 16 groups of 16 values each */
-    for (int group = 0; group < 16; group++) {
-        fixed_t sc = (d_fixed * scales[group]) >> 6;
-        fixed_t mn = (dmin_fixed * mins[group]) >> 6;
-
-        for (int j = 0; j < 16; j++) {
-            int idx = group * 16 + j;
-            int byte_idx = idx / 2;
-            int nibble_shift = (idx % 2) * 4;
-
-            /* Extract low 4 bits */
-            uint8_t q_low = (block->qs[byte_idx] >> nibble_shift) & 0x0F;
-
-            /* Extract high bit from qh array */
-            /* qh is packed: 8 high bits per byte */
-            int qh_byte = idx / 8;
-            int qh_bit = idx % 8;
-            uint8_t q_high = (block->qh[qh_byte] >> qh_bit) & 0x01;
-
-            /* Combine to 5-bit value (0-31) */
-            uint8_t q = q_low | (q_high << 4);
-
-            /* Dequantize: value = sc * q - mn */
-            output[idx] = ((sc * (int32_t)q) >> 5) - mn;
+        for (int l = 0; l < 32; l++) {
+            *y++ = d1 * ((ql[l] & 0xF) + ((qh[l] & u1) ? 16 : 0)) - m1;
         }
+        for (int l = 0; l < 32; l++) {
+            *y++ = d2 * ((ql[l] >> 4) + ((qh[l] & u2) ? 16 : 0)) - m2;
+        }
+
+        ql += 32;
+        is += 2;
+        u1 <<= 2;
+        u2 <<= 2;
     }
 }
 
@@ -277,6 +429,66 @@ void dequantize_block_q8_0(const struct block_q8_0* block, fixed_t* output)
 /* ============================================================================
  * Tensor Dequantization Functions
  * ============================================================================ */
+
+/**
+ * dequantize_q2_k - Dequantize a Q2_K tensor to fixed-point
+ *
+ * Returns: 0 on success, -1 if quantized_size is too small
+ */
+int dequantize_q2_k(const void* quantized_data, size_t quantized_size,
+                    fixed_t* output, size_t n_values)
+{
+    const struct block_q2_k* blocks = (const struct block_q2_k*)quantized_data;
+    size_t n_blocks = (n_values + QK_K - 1) / QK_K;
+
+    if (quantized_size < n_blocks * sizeof(struct block_q2_k)) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < n_blocks; i++) {
+        size_t values_in_block = (i == n_blocks - 1) ?
+                                 (n_values - i * QK_K) : QK_K;
+
+        fixed_t temp[QK_K];
+        dequantize_block_q2_k(&blocks[i], temp);
+
+        for (size_t j = 0; j < values_in_block; j++) {
+            output[i * QK_K + j] = temp[j];
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * dequantize_q3_k - Dequantize a Q3_K tensor to fixed-point
+ *
+ * Returns: 0 on success, -1 if quantized_size is too small
+ */
+int dequantize_q3_k(const void* quantized_data, size_t quantized_size,
+                    fixed_t* output, size_t n_values)
+{
+    const struct block_q3_k* blocks = (const struct block_q3_k*)quantized_data;
+    size_t n_blocks = (n_values + QK_K - 1) / QK_K;
+
+    if (quantized_size < n_blocks * sizeof(struct block_q3_k)) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < n_blocks; i++) {
+        size_t values_in_block = (i == n_blocks - 1) ?
+                                 (n_values - i * QK_K) : QK_K;
+
+        fixed_t temp[QK_K];
+        dequantize_block_q3_k(&blocks[i], temp);
+
+        for (size_t j = 0; j < values_in_block; j++) {
+            output[i * QK_K + j] = temp[j];
+        }
+    }
+
+    return 0;
+}
 
 /**
  * dequantize_q4_k - Dequantize a Q4_K tensor to fixed-point
@@ -420,7 +632,7 @@ int dequantize_q8_0(const void* quantized_data, size_t quantized_size,
 
 /**
  * dequantize_tensor - Unified dequantization dispatcher
- * @type: Quantization type (Q4_K, Q5_K, Q6_K, or Q8_0)
+ * @type: Quantization type (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, or Q8_0)
  * @quantized_data: Pointer to quantized tensor data
  * @quantized_size: Size of quantized data in bytes
  * @output: Output buffer for fixed-point values
@@ -432,6 +644,10 @@ int dequantize_tensor(quant_type_t type, const void* quantized_data,
                       size_t quantized_size, fixed_t* output, size_t n_values)
 {
     switch (type) {
+        case QUANT_TYPE_Q2_K:
+            return dequantize_q2_k(quantized_data, quantized_size, output, n_values);
+        case QUANT_TYPE_Q3_K:
+            return dequantize_q3_k(quantized_data, quantized_size, output, n_values);
         case QUANT_TYPE_Q4_K:
             return dequantize_q4_k(quantized_data, quantized_size, output, n_values);
         case QUANT_TYPE_Q5_K:
@@ -522,6 +738,80 @@ extern int ggml_backend_vk_matmul_q6_k(const void* A_quantized, size_t A_quant_s
 extern int ggml_backend_vk_matmul_q8_0(const void* A_quantized, size_t A_quant_size,
                                         const fixed_t* x, fixed_t* y, size_t m, size_t n);
 #endif
+
+/**
+ * matmul_q2_k - Matrix-vector multiply with Q2_K quantized matrix
+ *
+ * Computes y = A * x where A is Q2_K quantized. CPU integer-only path.
+ * Returns: 0 on success
+ */
+int matmul_q2_k(const void* A_quantized, size_t A_quant_size,
+                const fixed_t* x, fixed_t* y,
+                size_t m, size_t n)
+{
+    const struct block_q2_k* A_blocks = (const struct block_q2_k*)A_quantized;
+    size_t blocks_per_row = (n + QK_K - 1) / QK_K;
+
+    (void)A_quant_size;
+
+    for (size_t i = 0; i < m; i++) {
+        fixed_t sum = 0;
+
+        for (size_t block_idx = 0; block_idx < blocks_per_row; block_idx++) {
+            const struct block_q2_k* block = &A_blocks[i * blocks_per_row + block_idx];
+
+            fixed_t block_values[QK_K];
+            dequantize_block_q2_k(block, block_values);
+
+            size_t values_in_block = (block_idx == blocks_per_row - 1) ?
+                                     (n - block_idx * QK_K) : QK_K;
+
+            size_t x_offset = block_idx * QK_K;
+            sum += vec_dot_neon(block_values, &x[x_offset], values_in_block);
+        }
+
+        y[i] = sum;
+    }
+
+    return 0;
+}
+
+/**
+ * matmul_q3_k - Matrix-vector multiply with Q3_K quantized matrix
+ *
+ * Computes y = A * x where A is Q3_K quantized. CPU integer-only path.
+ * Returns: 0 on success
+ */
+int matmul_q3_k(const void* A_quantized, size_t A_quant_size,
+                const fixed_t* x, fixed_t* y,
+                size_t m, size_t n)
+{
+    const struct block_q3_k* A_blocks = (const struct block_q3_k*)A_quantized;
+    size_t blocks_per_row = (n + QK_K - 1) / QK_K;
+
+    (void)A_quant_size;
+
+    for (size_t i = 0; i < m; i++) {
+        fixed_t sum = 0;
+
+        for (size_t block_idx = 0; block_idx < blocks_per_row; block_idx++) {
+            const struct block_q3_k* block = &A_blocks[i * blocks_per_row + block_idx];
+
+            fixed_t block_values[QK_K];
+            dequantize_block_q3_k(block, block_values);
+
+            size_t values_in_block = (block_idx == blocks_per_row - 1) ?
+                                     (n - block_idx * QK_K) : QK_K;
+
+            size_t x_offset = block_idx * QK_K;
+            sum += vec_dot_neon(block_values, &x[x_offset], values_in_block);
+        }
+
+        y[i] = sum;
+    }
+
+    return 0;
+}
 
 /**
  * matmul_q4_k - Matrix-vector multiply with Q4_K quantized matrix
@@ -759,6 +1049,10 @@ int matmul_quantized(quant_type_t type, const void* A_quantized, size_t A_quant_
 {
     /* Dispatch to type-specific matmul (each handles GPU/CPU backend selection) */
     switch (type) {
+        case QUANT_TYPE_Q2_K:
+            return matmul_q2_k(A_quantized, A_quant_size, x, y, m, n);
+        case QUANT_TYPE_Q3_K:
+            return matmul_q3_k(A_quantized, A_quant_size, x, y, m, n);
         case QUANT_TYPE_Q4_K:
             return matmul_q4_k(A_quantized, A_quant_size, x, y, m, n);
         case QUANT_TYPE_Q5_K:

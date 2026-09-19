@@ -623,6 +623,9 @@ static void benchmark_matmul(void)
  * GGUF Parser Tensor Info Tests
  * ============================================================================ */
 
+/* ggml_type_name(), ggml_type_block_size() and ggml_type_block_elements()
+ * are provided by ai/gguf_parser.c (GGML library itself is not built). */
+
 static void test_ggml_type_info(void)
 {
     console_printf("[Test] GGML type info functions\n");

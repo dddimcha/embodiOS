@@ -1,5 +1,24 @@
 {
   "models": {
+    "smollm": {
+      "name": "SmolLM-135M-Instruct",
+      "version": "Q4_K_M",
+      "default": true,
+      "files": {
+        "gguf": {
+          "filename": "smollm-135m-instruct-q4_k_m.gguf",
+          "size": 105453984,
+          "sha256": "4e5042ffdf8aa6edb75f2b13177c124a01f411bc7289f9aa14be16b47acac5bb",
+          "url": "https://huggingface.co/mjdousti/SmolLM-135M-Instruct-Q4_K_M-GGUF/resolve/main/smollm-135m-instruct-q4_k_m.gguf",
+          "mirror_url": "https://hf-mirror.com/mjdousti/SmolLM-135M-Instruct-Q4_K_M-GGUF/resolve/main/smollm-135m-instruct-q4_k_m.gguf"
+        }
+      },
+      "source": "mjdousti/SmolLM-135M-Instruct-Q4_K_M-GGUF",
+      "quantization": "Q4_K_M",
+      "license": "Apache-2.0",
+      "status": "verified",
+      "notes": "Default embedded model. Verified end-to-end in QEMU (chat, benchmark, validate) with the built-in streaming inference engine."
+    },
     "tinyllama": {
       "name": "TinyLlama-1.1B-Chat-v1.0",
       "version": "v1.0-Q4_K_M",
@@ -9,35 +28,16 @@
           "filename": "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
           "size": 668788096,
           "sha256": "9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0",
-          "url": "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+          "url": "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+          "mirror_url": "https://hf-mirror.com/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
         }
       },
       "source": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
       "quantization": "Q4_K_M",
       "license": "Apache-2.0",
-      "last_updated": "2024-01-15",
-      "last_update_time": null,
-      "update_source": "initial",
-      "previous_version": null
-    },
-    "phi-2": {
-      "name": "Phi-2",
-      "version": "2.0-Q4_K_M",
-      "revision": "834565c23f9b28b96ccbeabe614dd906b6db551a",
-      "files": {
-        "gguf": {
-          "filename": "phi-2.Q4_K_M.gguf",
-          "size": 1606000000,
-          "url": "https://huggingface.co/TheBloke/phi-2-GGUF/resolve/main/phi-2.Q4_K_M.gguf"
-        }
-      },
-      "source": "TheBloke/phi-2-GGUF",
-      "quantization": "Q4_K_M",
-      "license": "MIT",
-      "last_updated": "2024-12-15",
-      "last_update_time": null,
-      "update_source": "initial",
-      "previous_version": null
+      "status": "runtime-supported",
+      "notes": "Runtime-supported (llama arch, no QKV bias). Requires >1GB RAM mapping for embedding; use loadmodel or loadext.",
+      "last_updated": "2024-01-15"
     }
   },
   "schema_version": "1.0"
