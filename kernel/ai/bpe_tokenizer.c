@@ -11,6 +11,7 @@
  * 3. Otherwise: greedy longest-match fallback with byte fallback
  */
 
+#include <embodios/bpe_tokenizer.h>
 #include <embodios/console.h>
 #include <embodios/gguf_parser.h>
 #include <embodios/kernel.h>
@@ -787,6 +788,91 @@ int bpe_tokenizer_decode(const int *tokens, int n_tokens, char *text, int max_le
     }
 
     text[pos] = '\0';
+    return pos;
+}
+
+/**
+ * bpe_stream_decoder_init - Reset streaming decoder state
+ */
+void bpe_stream_decoder_init(bpe_stream_decoder_t *st)
+{
+    if (st) st->emitted = 0;
+}
+
+/**
+ * bpe_stream_decode_token - Incrementally decode a single token
+ *
+ * Applies exactly the same per-token transformations as
+ * bpe_tokenizer_decode() (▁/Ġ/Ċ handling, BOS/EOS skip). The only state
+ * carried between tokens is the total number of emitted bytes, which the
+ * SentencePiece branch needs for its "drop leading space marker" rule
+ * (in the batch decoder that is the running `pos > 0` condition).
+ */
+int bpe_stream_decode_token(bpe_stream_decoder_t *st, int token_id,
+                            char *out, int max_len)
+{
+    if (!g_bpe.initialized || !st || !out || max_len <= 0) {
+        return -1;
+    }
+
+    /* Skip special tokens (same as batch decode) */
+    if (token_id == (int)g_bpe.bos_token || token_id == (int)g_bpe.eos_token) {
+        return 0;
+    }
+
+    int pos = 0;
+
+    if (token_id >= 0 && token_id < (int)g_bpe.vocab_size) {
+        const char *token_text = g_bpe.id_to_text[token_id];
+        if (token_text) {
+            size_t len = strlen(token_text);
+
+            /* Handle SentencePiece space marker (▁) */
+            if (len >= 3 && (uint8_t)token_text[0] == 0xE2 && (uint8_t)token_text[1] == 0x96 &&
+                (uint8_t)token_text[2] == 0x81) {
+                /* Replace ▁ with space (dropped at the very start of the
+                 * answer, mirroring the batch decoder's pos > 0 rule) */
+                if (st->emitted > 0 && pos < max_len - 1) {
+                    out[pos++] = ' ';
+                }
+                for (size_t j = 3; j < len && pos < max_len - 1; j++) {
+                    out[pos++] = token_text[j];
+                }
+            } else if (len >= 2 && (uint8_t)token_text[0] == 0xC4 && (uint8_t)token_text[1] == 0xA0) {
+                /* Handle GPT-2 space marker (Ġ = U+0120) */
+                if (pos < max_len - 1) {
+                    out[pos++] = ' ';
+                }
+                for (size_t j = 2; j < len && pos < max_len - 1; j++) {
+                    out[pos++] = token_text[j];
+                }
+            } else {
+                /* Copy token text, converting GPT-2 special chars:
+                 * Ġ (U+0120 = 0xC4 0xA0) -> space
+                 * Ċ (U+010A = 0xC4 0x8A) -> newline
+                 */
+                for (size_t j = 0; j < len && pos < max_len - 1; j++) {
+                    uint8_t c = (uint8_t)token_text[j];
+                    if (c == 0xC4 && j + 1 < len) {
+                        uint8_t c2 = (uint8_t)token_text[j + 1];
+                        if (c2 == 0xA0) {
+                            out[pos++] = ' ';
+                            j++;
+                            continue;
+                        } else if (c2 == 0x8A) {
+                            out[pos++] = '\n';
+                            j++;
+                            continue;
+                        }
+                    }
+                    out[pos++] = token_text[j];
+                }
+            }
+        }
+    }
+
+    out[pos] = '\0';
+    st->emitted += pos;
     return pos;
 }
 

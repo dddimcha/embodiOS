@@ -8,7 +8,7 @@ Boot it as a kernel, an ISO, or a USB stick, and you land in a chat session
 with a transformer running on raw hardware. No Linux. No libc. No userspace.
 No dependencies.
 
-![version](https://img.shields.io/badge/version-0.4.0-blue)
+![version](https://img.shields.io/badge/version-0.4.1-blue)
 ![build](https://img.shields.io/badge/build-passing-brightgreen)
 ![license](https://img.shields.io/badge/license-Apache--2.0-orange)
 ![platform](https://img.shields.io/badge/platform-x86__64-lightgrey)

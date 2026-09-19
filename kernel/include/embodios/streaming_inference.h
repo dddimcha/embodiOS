@@ -39,6 +39,26 @@ int streaming_inference_init(bool preallocate);
 int streaming_inference_generate(const int* prompt_tokens, int prompt_len,
                                   int* output_tokens, int max_output);
 
+/* Per-token streaming callback: invoked once per generated token,
+ * immediately after sampling. EOS/stop tokens are never delivered
+ * (generation halts on them exactly like the non-callback path). */
+typedef void (*stream_token_fn)(int token_id, void* ctx);
+
+/* Generate tokens with per-token streaming and phase timing.
+ * Same generation semantics as streaming_inference_generate(); additionally:
+ *   cb:               if non-NULL, called with each non-stop generated token
+ *   cb_ctx:           opaque pointer passed to cb
+ *   prefill_cycles:   if non-NULL, receives TSC cycles spent in prompt eval
+ *                     (TTFT; 0 when no token was generated)
+ *   decode_cycles:    if non-NULL, receives TSC cycles spent after prefill
+ * Returns number of tokens generated, or -1 on error
+ */
+int streaming_inference_generate_cb(const int* prompt_tokens, int prompt_len,
+                                    int* output_tokens, int max_output,
+                                    stream_token_fn cb, void* cb_ctx,
+                                    uint64_t* prefill_cycles,
+                                    uint64_t* decode_cycles);
+
 /* Check if inference engine is ready */
 bool streaming_inference_is_ready(void);
 

@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- SIMD runtime dispatch for quantized inference kernels ("Figaro" release,
+  branch `simd`): boot-time probe (CPUID + live xgetbv XCR0 verification in
+  `arch/x86_64/cpu.c` — AVX2 is only advertised when the OS actually enabled
+  XMM+YMM state) selects AVX2 vs SSE2/scalar/NEON per quantized vec_dot
+  format; boot log prints "SIMD: AVX2 enabled" or "SIMD: scalar fallback".
+  AVX2 kernels (Q8_0, Q4_K, Q5_0, Q6_K) live in a dedicated `-mavx2`
+  translation unit (`ai/simd_kernels_avx2.c`) and are bit-identical to the
+  scalar references (exact integer reductions, identical FP accumulation
+  order) — greedy argmax cannot diverge between dispatch paths.
+- Fused Q5_0 and Q6_K matmul paths in `streaming_inference.c` (both used
+  dequantize+float-dot on v0.4.0). Q5_0 is the dominant format of the
+  SmolLM-135M Q4_K_M model (58% of weight elements; Q8_0 22%, Q4_K 10.5%,
+  Q6_K 9%).
+- Host-side correctness + microbenchmark harness
+  `tools/host_test_simd_kernels.c`: 1000 random trials per format —
+  scalar-vs-AVX2 bit-identical, vs double-precision dequant reference
+  max rel err ≤ 1.0e-4 (float32 accumulation noise only).
+
+### Performance
+- Kernel `benchmark` (20 tokens, QEMU TCG): 161.1 s → 60.5 s (2.66x) from
+  the fused scalar Q5_0/Q6_K paths alone; chat output unchanged
+  ("The capital of France is Paris."), `make test` 6/6 PASS.
+- Host microbench (2M iters, 1536-wide row, scalar vs AVX2): Q8_0 1.5x,
+  Q4_K 1.9x, Q5_0 4.6x, Q6_K 5.8x — expected additional speedup on real
+  hardware/KVM where the AVX2 dispatch activates (TCG does not emulate AVX).
+
+### Added
 - exo live distributed inference (feat/exo-live): `exo_forward_shard` runs
   the node's real layer range — the passthrough stub is gone. Ring protocol
   PROMPT→TENSOR→RESULT works end-to-end: the orchestrator (ring head)
