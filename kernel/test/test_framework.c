@@ -20,7 +20,8 @@ static inline void outw(uint16_t port, uint16_t val) {
 #define MAX_SNAPSHOT_SIZE (1024 * 1024)  /* 1MB snapshot buffer */
 
 /* QEMU shutdown ports */
-#define QEMU_EXIT_PORT    0x604
+#define QEMU_EXIT_PORT    0x501  /* isa-debug-exit default iobase
+                                    (0x604 is claimed by i440fx ACPI PM1a_CNT) */
 #define QEMU_EXIT_SUCCESS 0x10  /* Exit code 0 */
 #define QEMU_EXIT_FAILURE 0x11  /* Exit code 1 */
 
@@ -69,17 +70,18 @@ static void kernel_shutdown(int exit_code)
     console_printf("\n[INFO] Shutting down kernel...\n");
 
 #ifdef __x86_64__
-    /* QEMU ISA debug exit device
-     * Port 0x604: Exit status = (value >> 1)
-     * Value 0x10 -> exit code 0 (success)
-     * Value 0x11 -> exit code 1 (failure)
+    /* QEMU ISA debug exit device (started with -device isa-debug-exit)
+     * Port 0x501 (default iobase): QEMU exit status = (value << 1) | 1
+     * Value 0x10 -> exit code 0x21 (tests passed)
+     * Value 0x11 -> exit code 0x23 (tests failed)
      */
     uint16_t qemu_exit_code = (exit_code == 0) ? QEMU_EXIT_SUCCESS : QEMU_EXIT_FAILURE;
     outw(QEMU_EXIT_PORT, qemu_exit_code);
 
-    /* If QEMU debug exit didn't work, try ACPI shutdown (PM1a control block)
-     * Most QEMU configurations use port 0x604, but some use 0xB004
+    /* Fallback: ACPI poweroff via PM1a_CNT SLP_EN
+     * i440fx PM IO base 0x600 -> PM1a_CNT at 0x604; old PIIX4 used 0xB004.
      */
+    outw(0x604, 0x2000);
     outw(0xB004, 0x2000);
 
 #elif defined(__aarch64__)

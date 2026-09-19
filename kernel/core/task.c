@@ -18,13 +18,38 @@
 #include "embodios/kernel.h"
 #include "embodios/console.h"
 #include "embodios/mm.h"
+#include "embodios/task.h"
 
 /* ============================================================================
  * Configuration
  * ============================================================================ */
 
 #define MAX_TASKS 16            /* Maximum number of concurrent tasks */
-#define TASK_STACK_SIZE 8192    /* Stack size per task (8KB) */
+#define TASK_STACK_SIZE 16384   /* Stack size per task (16KB: console_printf
+                                 * + one nested IRQ frame must fit) */
+
+/* Default priority for the boot/main context and demo tasks */
+#define BOOT_TASK_PRIORITY 16
+
+/* Low-level context switch (arch/x86_64/interrupt.S) */
+extern void context_switch(void **prev_sp, void *next_sp);
+extern void task_entry_trampoline(void);
+
+/* Interrupt-safe critical section helpers: schedule/queue manipulation can
+ * run both from IRQ0 context and from task context, so guard against a
+ * timer tick hitting mid-queue-update. rflags save/restore keeps IF as it
+ * was on entry (off inside the IRQ handler, on in task context). */
+static inline uint64_t irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile("pushfq; cli; popq %0" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+static inline void irq_restore(uint64_t flags)
+{
+    __asm__ volatile("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
+}
 
 /* ============================================================================
  * Task State Machine
@@ -125,6 +150,7 @@ static struct {
     uint32_t preemption_disable_count; /* Nested preemption disable counter */
     bool preemption_pending;    /* Preemption requested while disabled */
     uint64_t priority_inversions; /* Total priority inversions detected */
+    bool started;               /* True once the boot context has a TCB */
 } sched_state = {
     .current_task = NULL,
     .task_list = NULL,
@@ -137,8 +163,14 @@ static struct {
     .preemptions = 0,
     .preemption_disable_count = 0,
     .preemption_pending = false,
-    .priority_inversions = 0
+    .priority_inversions = 0,
+    .started = false
 };
+
+/* TCB for the boot/main context (kernel_loop). Its stack_pointer is filled
+ * by the first context_switch away from it; stack_base stays NULL since the
+ * boot stack lives in .bss (kernel_stack, 64KB). */
+static task_t boot_task;
 
 /* ============================================================================
  * Forward Declarations
@@ -183,6 +215,45 @@ void scheduler_init(void)
 
     sched_state.initialized = true;
     console_printf("Scheduler: Initialized with %d task slots\n", MAX_TASKS);
+}
+
+/**
+ * scheduler_start - Adopt the boot context as task "main"
+ *
+ * Must be called once after scheduler_init(), before interrupts/ticks can
+ * fire. Gives the kernel_main/kernel_loop execution context a TCB so the
+ * preemptive scheduler can suspend and later resume it like any other task.
+ */
+void scheduler_start(void)
+{
+    uint64_t flags = irq_save();
+
+    boot_task.tid = 0;
+    strncpy(boot_task.name, "main", sizeof(boot_task.name) - 1);
+    boot_task.state = TASK_RUNNING;
+    boot_task.stack_base = NULL;      /* boot stack in .bss */
+    boot_task.stack_pointer = NULL;   /* saved on first switch away */
+    boot_task.entry = NULL;
+    boot_task.priority = BOOT_TASK_PRIORITY;
+    boot_task.deadline = 0;
+    boot_task.next = NULL;
+    boot_task.next_deadline = NULL;
+    boot_task.cpu_id = 0;
+    boot_task.cpu_affinity = CPU_AFFINITY_ANY;
+    boot_task.original_priority = BOOT_TASK_PRIORITY;
+    boot_task.blocked_on = NULL;
+    boot_task.waiting_tasks = NULL;
+
+    /* Put the boot task at the head of the global task list */
+    boot_task.next = sched_state.task_list;
+    sched_state.task_list = &boot_task;
+
+    sched_state.current_task = &boot_task;
+    sched_state.ticks_remaining = 10;
+    sched_state.started = true;
+
+    irq_restore(flags);
+    console_printf("Scheduler: Boot context adopted as task 'main' (preemptive)\n");
 }
 
 /**
@@ -268,8 +339,25 @@ task_t* task_create(const char *name, void (*entry)(void), uint8_t priority)
         return NULL;
     }
 
-    /* Set up initial stack */
-    task->stack_pointer = (uint8_t*)task->stack_base + TASK_STACK_SIZE;
+    /* Set up initial stack: a context_switch frame whose return address is
+     * task_entry_trampoline and whose rbx slot carries the entry point.
+     * rflags starts with IF=1 so fresh tasks run interruptible even when
+     * first scheduled from IRQ context. */
+    {
+        uintptr_t top = ((uintptr_t)task->stack_base + TASK_STACK_SIZE) & ~(uintptr_t)0xF;
+        uint64_t *sp = (uint64_t*)top;
+        *--sp = (uint64_t)task_entry_trampoline; /* ret target of context_switch */
+        *--sp = 0;                               /* rbp */
+        *--sp = (uint64_t)entry;                 /* rbx -> entry (trampoline) */
+        *--sp = 0;                               /* r12 */
+        *--sp = 0;                               /* r13 */
+        *--sp = 0;                               /* r14 */
+        *--sp = 0;                               /* r15 */
+        *--sp = 0x202;                           /* rflags: IF=1 */
+        task->stack_pointer = sp;
+    }
+
+    uint64_t flags = irq_save();
 
     /* Add to task list */
     task->next = sched_state.task_list;
@@ -277,6 +365,8 @@ task_t* task_create(const char *name, void (*entry)(void), uint8_t priority)
 
     /* Add to ready queue */
     ready_queue_insert(task);
+
+    irq_restore(flags);
 
     console_printf("Scheduler: Created task '%s' (TID=%u, priority=%u)\n", name, task->tid, priority);
     return task;
@@ -700,30 +790,34 @@ void schedule(void)
         return;
     }
 
+    /* Critical section: a timer tick must not re-enter the scheduler while
+     * we manipulate the queues (IF is restored to its entry state). */
+    uint64_t flags = irq_save();
+
     /* Check deadlines and boost priority for tasks approaching deadline */
     check_deadlines();
 
+    task_t *prev = sched_state.current_task;
+
     /* If current task is still running, make it ready and re-queue */
-    if (sched_state.current_task && sched_state.current_task->state == TASK_RUNNING) {
-        sched_state.current_task->state = TASK_READY;
-        ready_queue_insert(sched_state.current_task);
+    if (prev && prev->state == TASK_RUNNING) {
+        prev->state = TASK_READY;
+        ready_queue_insert(prev);
     }
 
     /* Get highest priority ready task (head of ready queue) */
     task_t *next = sched_state.ready_queue;
     if (!next) {
-        /* No ready tasks */
+        /* No ready tasks: only reachable when the current task just died.
+         * Stay on this stack; the caller parks in task_entry_trampoline's
+         * hlt loop and the next timer tick finds work again. */
         sched_state.current_task = NULL;
+        irq_restore(flags);
         return;
     }
 
     /* Remove from ready queue and switch to it */
     ready_queue_remove(next);
-
-    /* Track context switch */
-    if (sched_state.current_task != next) {
-        sched_state.context_switches++;
-    }
 
     sched_state.current_task = next;
     next->state = TASK_RUNNING;
@@ -731,8 +825,20 @@ void schedule(void)
     /* Reset time quantum for new task (10 ticks = 100ms at 100Hz) */
     sched_state.ticks_remaining = 10;
 
-    /* In a real implementation, we would context switch here */
-    /* For now, we'll just run tasks cooperatively */
+    /* Real context switch: once scheduler_start() gave the boot context a
+     * TCB, any change of current task swaps stacks. Uniform callee-saved
+     * switch; in IRQ context the full interrupt frame stays on the
+     * preempted task's stack and unwinds when it resumes. */
+    if (next != prev) {
+        sched_state.context_switches++;
+        if (sched_state.started) {
+            context_switch(prev ? &prev->stack_pointer : NULL,
+                           next->stack_pointer);
+            /* We get here again when THIS context is rescheduled later. */
+        }
+    }
+
+    irq_restore(flags);
 }
 
 /**
@@ -794,6 +900,12 @@ void scheduler_tick(void)
         if (sched_state.ready_queue) {
             /* Check if there's a task with same or higher priority ready */
             if (sched_state.ready_queue->priority <= sched_state.current_task->priority) {
+                /* Timer-driven round-robin preemption. The queue head is
+                 * another task (current is RUNNING, not queued), so this
+                 * schedule() always switches. Count BEFORE the call: the
+                 * tail of this function only runs again when this context
+                 * is later resumed. */
+                sched_state.preemptions++;
                 schedule();
                 return;
             }
@@ -838,6 +950,7 @@ void task_yield(void)
 void task_exit(void)
 {
     if (sched_state.current_task) {
+        uint64_t flags = irq_save();
         task_t *task = sched_state.current_task;
         task->state = TASK_DEAD;
 
@@ -846,7 +959,10 @@ void task_exit(void)
 
         /* Remove from deadline list if present */
         deadline_list_remove(task);
+        irq_restore(flags);
 
+        /* Switch away to the next task; this context is never resumed
+         * (not in any queue; slot reuse re-initializes the stack frame). */
         schedule();
     }
 }
@@ -1093,6 +1209,71 @@ void scheduler_stats(void)
 
     console_printf("  Task states: %u ready, %u running, %u blocked, %u dead\n",
                    ready_count, running_count, blocked_count, dead_count);
+}
+
+/* ============================================================================
+ * Preemption Demo (shell 'tasktest' command)
+ * ============================================================================ */
+
+/* Completion counter: tasks bump it right before task_exit() */
+static volatile uint32_t tasktest_done;
+
+static void tasktest_worker(char letter, uint32_t iters, uint32_t delay_ms)
+{
+    extern void timer_sleep(uint32_t ms);
+    for (uint32_t i = 0; i < iters; i++) {
+        console_putchar(letter);
+        console_flush();
+        /* Sleep shorter than the 100ms round-robin quantum so equal
+         * priority tasks interleave several times per quantum. */
+        timer_sleep(delay_ms);
+    }
+    tasktest_done++;
+    /* Return into task_entry_trampoline -> task_exit() */
+}
+
+static void tasktest_a(void) { tasktest_worker('A', 25, 30); }
+static void tasktest_b(void) { tasktest_worker('B', 25, 30); }
+
+/**
+ * scheduler_tasktest - Spawn two demo tasks printing A/B with delays
+ *
+ * Both tasks run at the same priority as the boot 'main' task, so the
+ * 100Hz round-robin quantum preempts between them and the shell: the
+ * interleaved A/B output is visible proof of preemptive multitasking.
+ * Blocks until both tasks exit.
+ */
+void scheduler_tasktest(void)
+{
+    if (!sched_state.started) {
+        console_printf("tasktest: scheduler not started\n");
+        return;
+    }
+
+    tasktest_done = 0;
+
+    console_printf("tasktest: spawning tasks A and B (same priority, preempted by PIT tick)\n");
+    task_t *a = task_create("demo-A", tasktest_a, BOOT_TASK_PRIORITY);
+    task_t *b = task_create("demo-B", tasktest_b, BOOT_TASK_PRIORITY);
+    if (!a || !b) {
+        console_printf("tasktest: failed to create tasks\n");
+        return;
+    }
+
+    /* Run until both demo tasks are done. We are the boot task: schedule()
+     * round-robins us with A and B; the hlt keeps us from busy-spinning
+     * (timer IRQ wakes us; in poll mode timer_sleep spins anyway). */
+    extern bool kernel_interrupts_enabled(void);
+    bool irq_on = kernel_interrupts_enabled();
+    while (tasktest_done < 2) {
+        schedule();
+        if (irq_on) {
+            __asm__ volatile("hlt");
+        }
+    }
+
+    console_printf("\ntasktest: done (context switches so far: %llu)\n",
+                   sched_state.context_switches);
 }
 
 /* ============================================================================

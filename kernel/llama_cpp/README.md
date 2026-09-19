@@ -1,5 +1,16 @@
 # llama.cpp Kernel Integration
 
+> **STATUS (build): EXCLUDED FROM THE BUILD.** The files in this directory are an
+> unmodified upstream snapshot that is **not compiled** (see `kernel/Makefile`:
+> `LLAMA_CPP_SOURCES` and `GGML_C_SOURCES` are empty). Reasons:
+> - `ggml/ggml.c` requires host OS headers (`<syscall.h>`, `sys/*.h`) that do not
+>   exist in the freestanding kernel environment, and conflicts with
+>   `include/compat/*`.
+> - No compute backend was ever wired up (`ggml-cpu` is not built), and none of
+>   the live code (`ai/streaming_inference.c`) uses the GGML API.
+> The directory is kept for reference. To re-enable, fix the compat header
+> conflicts first, then populate `GGML_C_SOURCES`/`LLAMA_CPP_SOURCES` again.
+
 This directory contains llama.cpp integrated directly into the EMBODIOS kernel.
 
 ## Architecture

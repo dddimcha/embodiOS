@@ -39,6 +39,35 @@ The kernel implements an RTOS-style priority scheduler designed for mixed-critic
 - **Round-Robin**: Tasks with equal priority use round-robin scheduling (10-tick time quantum)
 - **Timer-Based**: Preemption occurs on timer interrupts (10ms tick rate)
 
+Interrupts are enabled at the end of `kernel_main()` once the heap, console,
+model runtime and scheduler are up: the 8259 PIC is remapped to INT 0x20-0x2F,
+PIT IRQ0 drives the system tick (100 Hz) and `scheduler_tick()`, and `sti`
+sets IF. The boot context is adopted as task `main`, so the shell itself is
+preemptible. Boot with `poll` on the kernel cmdline to keep the legacy
+polling mode (no interrupts). Kernel test mode (`-append test`) runs before
+the interrupt-enable point, so tests always execute in polling mode. Try
+`tasktest` in the shell for a live preemption demo and `uptime`/`tasks` for
+tick and scheduler statistics.
+
+### Power Management
+
+`kernel_loop` sleeps with `hlt` whenever the shell is idle and interrupts
+are enabled (wakes on the next PIT tick, 100 Hz quantum) — host CPU usage
+drops from ~100% (busy polling) to ~2% in QEMU. Shell commands (see
+`core/cmd_power.c`):
+
+- `shutdown` / `poweroff` / `halt` — ACPI S5 poweroff via PM1a_CNT
+  (`SLP_TYP|SLP_EN`); the southbridge (PIIX4 on i440fx, ICH9 on Q35) is
+  probed through PCI config space (PMBASE @ 0x40), QEMU default 0x600 is
+  the fallback. QEMU exits with status 0.
+- `reboot` / `reset` — PCI reset control (port 0xCF9), then 8042 keyboard
+  controller pulse, then a deliberate triple fault as last resort.
+- `power` — power status: uptime, idle `hlt` loop count (rough idle % of
+  ticks), interrupt state (IF flag).
+
+The kernel test framework keeps using `isa-debug-exit` (port 0x501) for its
+own shutdown; it runs before interrupts are enabled and is unaffected.
+
 #### Deadline Support
 - Tasks can specify absolute deadlines (in timer ticks)
 - Deadline-aware scheduling automatically boosts priority for tasks approaching deadlines (<10 ticks)

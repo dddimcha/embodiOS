@@ -11,6 +11,11 @@ void console_putchar(char c);
 void console_puts(const char* str);
 void console_printf(const char* fmt, ...);
 
+/* Unbuffered raw write (pending printf bytes are flushed first).
+ * Use for per-token streaming where the printf newline-batching
+ * would delay output. */
+void console_write(const char* buf, size_t len);
+
 /* Console input */
 int console_getchar(void);
 size_t console_readline(char* buffer, size_t max_len);
@@ -18,6 +23,9 @@ size_t console_readline(char* buffer, size_t max_len);
 /* Console control */
 void console_flush(void);
 void console_clear(void);
+
+/* Force-release the SMP console lock (kernel_panic path only) */
+void console_force_unlock(void);
 void console_set_color(uint8_t fg, uint8_t bg);
 
 /* Color codes */

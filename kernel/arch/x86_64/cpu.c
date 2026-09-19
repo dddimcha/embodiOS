@@ -26,9 +26,16 @@ static inline void cpu_debug_char(char c) {
 #define CPUID_FEAT_ECX_SSSE3    (1 << 9)
 #define CPUID_FEAT_ECX_SSE41    (1 << 19)
 #define CPUID_FEAT_ECX_SSE42    (1 << 20)
+#define CPUID_FEAT_ECX_XSAVE    (1 << 26)
+#define CPUID_FEAT_ECX_OSXSAVE  (1 << 27)
 #define CPUID_FEAT_ECX_AVX      (1 << 28)
 #define CPUID_FEAT7_EBX_AVX2    (1 << 5)
 #define CPUID_FEAT7_EBX_AVX512F (1 << 16)
+
+/* XCR0 state component bits */
+#define XCR0_X87                (1 << 0)
+#define XCR0_SSE                (1 << 1)
+#define XCR0_YMM                (1 << 2)
 
 static struct cpu_info cpu_info;
 
@@ -51,6 +58,15 @@ uint64_t cpu_get_timestamp(void)
     uint32_t low, high;
     __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
     return ((uint64_t)high << 32) | low;
+}
+
+/* Read extended control register (XCR0). Only execute when CPUID reports
+ * OSXSAVE support, otherwise the instruction raises #UD. */
+static inline uint64_t cpu_xgetbv(uint32_t index)
+{
+    uint32_t eax, edx;
+    __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(index));
+    return ((uint64_t)edx << 32) | eax;
 }
 
 /* Get CPU ID (APIC ID) */
@@ -104,12 +120,24 @@ void cpu_init(void)
         cpu_info.features |= CPU_FEATURE_SSE41;
     if (ecx & CPUID_FEAT_ECX_SSE42)
         cpu_info.features |= CPU_FEATURE_SSE42;
-    if (ecx & CPUID_FEAT_ECX_AVX)
+    /* AVX usability requires more than the CPUID feature bit: the OS must
+     * have enabled XMM+YMM state saving via XCR0 (boot.S enable_cpu_features
+     * sets OSXSAVE + xsetbv XMM|YMM). Verify with a live xgetbv so that AVX
+     * kernels are never selected when the state is not actually enabled
+     * (executing AVX instructions then would raise #UD). */
+    int os_avx_ready = 0;
+    if ((ecx & CPUID_FEAT_ECX_OSXSAVE) && (ecx & CPUID_FEAT_ECX_AVX)) {
+        uint64_t xcr0 = cpu_xgetbv(0);
+        if ((xcr0 & (XCR0_SSE | XCR0_YMM)) == (XCR0_SSE | XCR0_YMM)) {
+            os_avx_ready = 1;
+        }
+    }
+    if (os_avx_ready)
         cpu_info.features |= CPU_FEATURE_AVX;
 
     /* Check extended features */
     cpuid(7, &eax, &ebx, &ecx, &edx);
-    if (ebx & CPUID_FEAT7_EBX_AVX2)
+    if (os_avx_ready && (ebx & CPUID_FEAT7_EBX_AVX2))
         cpu_info.features |= CPU_FEATURE_AVX2;
     if (ebx & CPUID_FEAT7_EBX_AVX512F)
         cpu_info.features |= CPU_FEATURE_AVX512;

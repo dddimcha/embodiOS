@@ -41,6 +41,25 @@ _start:
     /* Disable interrupts */
     cli
 
+    /* Zero the BSS section before anything uses it.
+     * The page tables and boot stacks live in .bss and are set up below,
+     * so this must happen first. Preserve multiboot eax/ebx in ebp/esi. */
+    mov %eax, %ebp
+    mov %ebx, %esi
+    mov $_bss_start, %edi
+    mov $_bss_end, %ecx
+    sub %edi, %ecx
+    xor %eax, %eax
+    cld
+    rep stosb
+    mov %ebp, %eax
+    mov %esi, %ebx
+
+    /* Save multiboot info BEFORE initializing the serial port:
+     * the serial init below clobbers the low byte of eax (outb %al). */
+    mov %eax, multiboot_magic
+    mov %ebx, multiboot_info
+
     /* Initialize serial port for early debug output */
     mov $0x3F8+1, %dx
     mov $0x00, %al
@@ -57,16 +76,35 @@ _start:
     mov $0x3F8+3, %dx
     mov $0x03, %al
     outb %al, %dx          /* 8N1 */
+    /* NB: FCR (port +2) intentionally left at its reset value.
+     * Writing FCR (even 0xC1, no reset bits) after QEMU has queued an
+     * early RX byte makes it vanish; polling mode works fine without
+     * the 16550 FIFO. */
     mov $0x3F8+2, %dx
-    mov $0xC7, %al
-    outb %al, %dx          /* FIFO */
+    xor %al, %al
+    inb %dx, %al           /* IIR read: harmless, documents intent */
     mov $0x3F8+4, %dx
     mov $0x0B, %al
     outb %al, %dx          /* RTS/DSR set */
 
-    /* Save multiboot info */
-    mov %eax, multiboot_magic
-    mov %ebx, multiboot_info
+    /* DBG: report RX data-ready at boot (before paging) */
+    mov $0x3F8+5, %dx
+    inb %dx, %al
+    mov %al, %bl
+    mov $0x3F8+5, %dx
+1:  inb %dx, %al
+    test $0x20, %al
+    jz 1b
+    mov $0x3F8, %dx
+    mov %bl, %al
+    outb %al, %dx      /* print raw LSR byte (may be nonprintable) */
+    mov $0x3F8+5, %dx
+2:  inb %dx, %al
+    test $0x20, %al
+    jz 2b
+    mov $0x3F8, %dx
+    mov $0x21, %al     /* '!' marker */
+    outb %al, %dx
 
     /* Set up temporary stack */
     mov $boot_stack_top, %esp
@@ -236,8 +274,10 @@ print_error_32:
     popa
     ret
 
-/* Enable CPU features */
+/* Enable CPU features (also called by the AP trampoline for each secondary
+ * CPU: smp_trampoline.S -> smp_ap_boot_entry) */
 .code64
+.globl enable_cpu_features
 enable_cpu_features:
     /* Enable SSE */
     mov %cr0, %rax
@@ -280,6 +320,9 @@ gdt64:
     .quad 0x00AF92000000FFFF       /* Data segment */
 gdt64_end:
 
+/* gdt64_descriptor is also referenced by the AP trampoline
+ * (smp_trampoline.S) when secondary CPUs switch to the kernel GDT. */
+.globl gdt64_descriptor
 gdt64_descriptor:
     .word gdt64_end - gdt64 - 1
     .quad gdt64
@@ -291,6 +334,9 @@ no_long_mode_msg:   .asciz "ERROR: 64-bit mode not supported"
 /* BSS section */
 .section .bss
 .align 4096
+.global pml4_table
+.global pdpt_table
+.global pdt_table
 pml4_table:     .space 4096
 pdpt_table:     .space 4096
 pdt_table:      .space 4096
@@ -315,3 +361,6 @@ kernel_stack_top:
 .global multiboot_info
 multiboot_magic:    .long 0
 multiboot_info:     .long 0
+
+/* Mark stack as non-executable */
+.section .note.GNU-stack,"",@progbits

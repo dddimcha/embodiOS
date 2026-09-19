@@ -13,10 +13,12 @@ TEST_NAME="${1:-}"
 echo "=== Kernel Unit Test Runner ==="
 echo ""
 
-# Check if kernel binary exists
+# Sync kernel binary from kernel/ (always, so we never test a stale copy)
+if [ -f "kernel/embodios.elf" ]; then
+    cp -u kernel/embodios.elf embodios.elf
+fi
 if [ ! -f "embodios.elf" ]; then
-    echo "ERROR: embodios.elf not found"
-    echo "Building kernel..."
+    echo "embodios.elf not found, building kernel..."
     (cd kernel && make)
     # Copy binary to working directory
     if [ -f "kernel/embodios.elf" ]; then
@@ -65,19 +67,24 @@ TEST_OUTPUT=$(mktemp /tmp/kernel_test_output.XXXXXX)
 trap "rm -f $TEST_OUTPUT" EXIT
 
 # Launch QEMU with test mode enabled
-# -append: Pass kernel command line parameter
+# -append: Pass kernel command line parameter (read via PVH hvm_start_info)
+# -device isa-debug-exit: lets the test framework exit QEMU (port 0x604)
 # -serial stdio: Redirect serial output to stdout/stdin
 # -display none: No graphical display
 # -no-reboot: Exit instead of rebooting on triple fault
-# -no-shutdown: Keep QEMU running after guest shutdown for clean exit
-qemu-system-x86_64 \
+# timeout 120: never hang forever if a test wedges the kernel
+timeout 120 qemu-system-x86_64 \
     -kernel embodios.elf \
     -m 2G \
     -append "$KERNEL_CMDLINE" \
+    -device isa-debug-exit,iobase=0x501,iosize=0x02 \
     -serial stdio \
     -display none \
-    -no-reboot \
-    -no-shutdown 2>&1 | tee "$TEST_OUTPUT"
+    -no-reboot 2>&1 | tee "$TEST_OUTPUT"
+QEMU_RC=${PIPESTATUS[0]}
+if [ "$QEMU_RC" = "124" ]; then
+    echo "ERROR: QEMU timed out after 120s (kernel did not exit)"
+fi
 
 echo ""
 echo "=== Parsing Test Results ==="

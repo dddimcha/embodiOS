@@ -16,7 +16,16 @@
 #define PAGE_DIRTY      (1 << 4)
 
 /* Physical memory management */
+struct pmm_region {
+    uint64_t base;
+    uint64_t size;
+};
 void pmm_init(void* start, size_t size);
+/* Initialize PMM from a set of usable RAM regions (may be non-contiguous,
+ * e.g. RAM split by the PCI hole below 4GB). 'start' must lie inside one of
+ * the regions; the management bitmap is placed there. Pages not covered by
+ * any region are never handed out. */
+void pmm_init_regions(void* start, const struct pmm_region* regions, size_t num_regions);
 void* pmm_alloc_page(void);
 void* pmm_alloc_pages(size_t count);
 void pmm_free_page(void* page);

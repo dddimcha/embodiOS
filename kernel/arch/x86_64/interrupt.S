@@ -120,6 +120,59 @@ isr_common_stub:
     /* Return from interrupt */
     iretq
 
+/* ---------------------------------------------------------------------------
+ * void context_switch(void **prev_sp, void *next_sp)
+ *
+ * Callee-saved register context switch (Linux __switch_to style). Uniform
+ * for both call sites:
+ *  - task context (task_yield / task_exit / kernel_loop schedule())
+ *  - IRQ0 context (scheduler_tick -> schedule): the full interrupt frame
+ *    saved by isr_common_stub stays on the preempted task's stack below
+ *    this callee-saved frame and is unwound when the task resumes later.
+ *
+ * prev_sp may be NULL (dead/exiting context) - then the current rsp is not
+ * saved. rflags is part of the frame so each task keeps its own IF state.
+ * ------------------------------------------------------------------------- */
+.global context_switch
+context_switch:
+    pushq %rbp
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    pushfq
+    testq %rdi, %rdi
+    je 1f
+    movq %rsp, (%rdi)           /* save prev rsp */
+1:
+    movq %rsi, %rsp             /* load next rsp */
+    popfq
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbx
+    popq %rbp
+    ret
+
+/* ---------------------------------------------------------------------------
+ * task_entry_trampoline - first-run entry for new tasks
+ *
+ * task_create() builds an initial context_switch frame whose rbx slot holds
+ * the task entry point. After the entry function returns, terminate the
+ * task; if no other task is runnable, park in hlt until a tick reschedules.
+ * ------------------------------------------------------------------------- */
+.global task_entry_trampoline
+.extern task_exit
+task_entry_trampoline:
+    sub $8, %rsp                /* align stack for the call (entry rsp%16==8) */
+    call *%rbx
+    call task_exit
+2:
+    hlt
+    jmp 2b
+
 /* Interrupt stub table for IDT setup */
 .section .data
 interrupt_stub_table:
@@ -129,3 +182,6 @@ interrupt_stub_table:
     .quad isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
     .quad isr32, isr33, isr34, isr35, isr36, isr37, isr38, isr39
     .quad isr40, isr41, isr42, isr43, isr44, isr45, isr46, isr47
+
+/* Mark stack as non-executable */
+.section .note.GNU-stack,"",@progbits

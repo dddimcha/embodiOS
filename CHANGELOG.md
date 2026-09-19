@@ -8,54 +8,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Python-to-Native Compiler for bare-metal execution
-- Compiler transforms Python AI code to C/Assembly
-- Support for GGUF and SafeTensors model formats
-- Hardware abstraction layer (HAL) generation in C
-- Natural language processor transpilation
-- Model weight embedding in assembly
-- ARM64 and x86-64 boot code generation
-- Makefile and CMake build system generation
-- Works without external dependencies (no NumPy/TVM/Cython required)
-- TVM Runtime integration for optimized model inference on bare metal
+- SIMD runtime dispatch for quantized inference kernels ("Figaro" release,
+  branch `simd`): boot-time probe (CPUID + live xgetbv XCR0 verification in
+  `arch/x86_64/cpu.c` — AVX2 is only advertised when the OS actually enabled
+  XMM+YMM state) selects AVX2 vs SSE2/scalar/NEON per quantized vec_dot
+  format; boot log prints "SIMD: AVX2 enabled" or "SIMD: scalar fallback".
+  AVX2 kernels (Q8_0, Q4_K, Q5_0, Q6_K) live in a dedicated `-mavx2`
+  translation unit (`ai/simd_kernels_avx2.c`) and are bit-identical to the
+  scalar references (exact integer reductions, identical FP accumulation
+  order) — greedy argmax cannot diverge between dispatch paths.
+- Fused Q5_0 and Q6_K matmul paths in `streaming_inference.c` (both used
+  dequantize+float-dot on v0.4.0). Q5_0 is the dominant format of the
+  SmolLM-135M Q4_K_M model (58% of weight elements; Q8_0 22%, Q4_K 10.5%,
+  Q6_K 9%).
+- Host-side correctness + microbenchmark harness
+  `tools/host_test_simd_kernels.c`: 1000 random trials per format —
+  scalar-vs-AVX2 bit-identical, vs double-precision dequant reference
+  max rel err ≤ 1.0e-4 (float32 accumulation noise only).
 
-### Changed
-- Updated README with compiler information
-- Reorganized project structure documentation
-- Enhanced compiler module documentation
-
-### Fixed
-- Fixed compiler to work without NumPy dependency
-- Fixed assembly generation for ARM64 architecture
-- Fixed C code generation with proper headers
-
-## [0.2.0] - 2025-07-30
+### Performance
+- Kernel `benchmark` (20 tokens, QEMU TCG): 161.1 s → 60.5 s (2.66x) from
+  the fused scalar Q5_0/Q6_K paths alone; chat output unchanged
+  ("The capital of France is Paris."), `make test` 6/6 PASS.
+- Host microbench (2M iters, 1536-wide row, scalar vs AVX2): Q8_0 1.5x,
+  Q4_K 1.9x, Q5_0 4.6x, Q6_K 5.8x — expected additional speedup on real
+  hardware/KVM where the AVX2 dispatch activates (TCG does not emulate AVX).
 
 ### Added
-- Real AI model testing with TinyLlama integration
-- Model management system without storing models in git
-- `embodi pull` CLI command for downloading models from HuggingFace
-- Model manifest with version tracking and SHA256 verification
-- Comprehensive real model inference tests
-- Download scripts for automated model fetching
-- Interactive test mode with real model support
+- exo live distributed inference (feat/exo-live): `exo_forward_shard` runs
+  the node's real layer range — the passthrough stub is gone. Ring protocol
+  PROMPT→TENSOR→RESULT works end-to-end: the orchestrator (ring head)
+  embeds and forwards the hidden vector, the ring tail applies final norm +
+  lm_head and samples (temperature/top-p honored); RESULT doubles as the
+  lockstep barrier. Single node = full inference through the exo path.
+- Layer-range API in `streaming_inference.c`: `streaming_inference_embed`,
+  `streaming_inference_forward_layers` (per-shard local KV cache), 
+  `streaming_inference_sample_token`, `streaming_inference_is_stop_token`;
+  `streaming_inference_generate` reuses the new helpers (regression-tested:
+  `chat` → "The capital of France is Paris.")
+- OpenAI API (`exoserve`) returns real model output: chat template applied,
+  `max_tokens` honored (default 64), BPE-decoded text, stop token stripped;
+  fixed POST /v1/chat/completions routing (25-char prefix was compared
+  with length 26 and never matched → 404)
+- Static peers for broadcast-less transports: `exopeer` shell command +
+  `exo_discovery_add_peer` (pinned peers never expire); `setip` command;
+  `exoshard <model> <n> even` for deterministic splits. Two-node QEMU test
+  topology: user-net hostfwd mesh (10.0.2.2:<hostport> reaches the peer)
 
-### Changed
-- Replaced simulated performance data with real model benchmarks
-- Updated performance documentation with actual measurements:
-  - AI-OS: 361ms average response time (165 tokens/sec)
-  - Ollama: 1,809ms average response time (133 tokens/sec)
-  - 5x faster response time with 24% higher throughput
-- Improved .gitignore to support model metadata while excluding model files
+### Added (previous waves)
+- Full K-quants coverage: Q2_K, Q3_K and Q5_K dequantization ported
+  byte-exactly from llama.cpp ggml-quants.c (pure C, no SIMD intrinsics),
+  shared via `kernel/include/embodios/kquants_dequant.h` and wired into
+  every type switch (streaming inference, gguf inference, integer loader)
+- Integer-only Q16.16 fixed-point dequant for Q2_K/Q3_K/Q5_K in
+  `quantized_ops.c` (+ Q5_K rewritten to the exact ggml layout); new
+  `dequantize_q2_k/q3_k`, `matmul_q2_k/q3_k` and dispatcher entries
+- IQ4_NL (type 20) dequantization — required by modern llama.cpp K-quant
+  mixes (real SmolLM-135M Q3_K_S files use it for attention/FFN tensors)
+- `tools/verify_kquants.py` + `tools/host_test_kquants.c`: host-side
+  accuracy verification compiling the real kernel code against a numpy
+  reference; float paths are bit-exact (max abs error 0.0 over 256 random
+  blocks per format) and cross-validated against the official `gguf`
+  Python package on real tensor data
+- E2E: SmolLM-135M Q3_K_S (QuantFactory) boots and chats in QEMU with
+  Q3_K + IQ4_NL tensors
+
+## [0.2.0] - 2026-09-18
+
+First release where the kernel builds cleanly, boots in QEMU, and runs a
+real embedded GGUF LLM (SmolLM-135M-Instruct Q4_K_M) end-to-end with output
+verified against the HuggingFace reference pipeline.
+
+### Added
+- Working LLM chat in QEMU with embedded SmolLM-135M-Instruct Q4_K_M
+  (greedy output cross-checked with the HF reference)
+- Chat template autodetection (ChatML / llama2 / GLM) with `chatformat`
+  command and proper stop-token handling
+- Temperature + top-p (nucleus) sampling in the streaming inference engine
+  (xorshift64 PRNG seeded from rdtsc, nucleus capped at 128 candidates);
+  new `temp [0..2]` and `topp [0..1]` shell commands, shown in `status`;
+  `temp 0` (default) stays bit-compatible greedy argmax
+- Optional QKV bias support (`blk.N.attn_q/k/v.bias`) in both inference
+  engines — required for Qwen2/Qwen2.5 and GLM-4 GGUF models
+- exo-style distributed inference skeleton (`kernel/exo/`: discovery, node,
+  shard, transport, server) plus GLM-4/exo porting guide
+  (`docs/PORTING_GLM_EXO.md`)
+- `scripts/download-models.sh` + real `embodi pull <model>` CLI command
+  with size + sha256 verification (hf-mirror.com primary, huggingface.co
+  fallback); `models/manifest.json` now covers smollm (default) and
+  tinyllama with verified hashes
+- GLM architecture support (`chatglm` + `glm4` GGUF archs) in the
+  streaming inference engine: fused `blk.N.attn_qkv.weight/.bias` carving
+  (chatglm), fused `blk.N.ffn_up` SwiGLU seq-split (both), partial rotary
+  via `rope.dimension_count` (interleaved NORM pairing, matching llama.cpp
+  CHATGLM/GLM4 rope type), `glm4` post-attention/post-MLP RMSNorms inside
+  residual branches, multi stop-token support (`<|user|>`, `<|assistant|>`
+  besides EOS), GLM chat template fixed to `[gMASK]<sop><|user|>..`; new
+  `dbglogits` shell command dumps top-k logits for verification.
+  Verified in QEMU against a numpy reference forward on synthetic
+  2-layer models (tools/gen_tiny_chatglm.py + tools/ref_chatglm.py):
+  top-8 logits match for chatglm and glm4, F32 and Q8_0
+- True merge-order BPE tokenizer driven by `tokenizer.ggml.merges`
+  (~49k rules for SmolLM), replacing greedy longest-match when merges are
+  present — tokenization now matches the HuggingFace tokenizers output
+  (e.g. "assistant" -> [ass, istant], "Hello world" -> [Hello, Ġworld]);
+  greedy longest-match remains as fallback for models without merges
+- Restored `ai/benchmark.c` (benchmark/benchgguf/validate/timingtest
+  commands work again; `validate` passes 5/5 on the embedded model)
 
 ### Fixed
-- Removed duplicate `pull` command in CLI
-- Fixed model loading and inference pipeline
-- Corrected SHA256 checksums for model verification
+- Build: separate flag-object rules (parallel `make -jN` race), restored
+  missing benchmark.c, dropped broken GGML snapshot from the build, fixed
+  the `_Bool`/`bool` typedef conflict, default GGUF model is now the
+  actually-downloadable SmolLM Q4_K_M
+- Boot: `create_iso.sh` now emits `multiboot2` (matching the kernel header),
+  BSS is zeroed on boot, model init chain wired in `kernel_main`
+- Tokenizer: special tokens (`<|im_start|>`, `[INST]`, ...) are split out
+  of raw text before BPE matching; GPT-2 preprocessing maps `\n` to `Ċ`
+  with no stray `Ġ` prefix after newlines
+- Inference: GGUF geometry/alignment read from metadata (TinyLlama
+  hardcode removed); parallel inference thread count clamped to online
+  CPUs (deadlock on 1-vCPU QEMU); RoPE kept at the verified interleaved
+  GPT-J pairing (a half-split variant was tried and reverted after failing
+  the HF reference check)
 
-### Removed
-- Cleaned up test-embodi-package directory (1.9GB)
-- Removed simulated benchmark data
+### Known issues / TODO
+- RAM is limited to 1 GB (boot page tables), so models >~0.5 GB cannot be
+  embedded yet
+- `benchgguf`/`benchmark` targets (85 tok/s) are not met under QEMU TCG
+  (~0.1 tok/s is expected there)
 
 ## [0.1.0] - 2025-07-29
 

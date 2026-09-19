@@ -16,6 +16,7 @@
 #include <embodios/atomic.h>
 #include <embodios/spinlock.h>
 #include <embodios/task.h>
+#include <embodios/cpu.h>
 #include <embodios/benchmark.h>
 #include <embodios/parallel_inference.h>
 
@@ -80,6 +81,9 @@ typedef struct {
 typedef struct {
     int num_threads;            /* Number of worker threads */
     volatile int shutdown;      /* Shutdown flag */
+    int use_smp;                /* 1 = workers run on APs via SMP mailboxes
+                                 * (no kernel worker tasks); 0 = legacy
+                                 * task-based workers timesharing the BSP */
 
     /* Current work */
     parallel_work_t* current_work;
@@ -142,6 +146,72 @@ static void barrier_wait(int num_threads) {
  * Parallel Work Distribution
  * ============================================================================ */
 
+/* Process the currently published work item as the given thread.
+ * Shared by the legacy kernel-task workers (worker_thread_entry) and the
+ * SMP AP mailbox workers (parallel_ap_worker). */
+static void parallel_worker_run(int thread_id) {
+    parallel_work_t* work = g_pool.current_work;
+    if (!work) {
+        return;
+    }
+
+    /* Memory barrier to ensure we see the work descriptor */
+    smp_rmb();
+
+    /* Track work time and items */
+    uint64_t work_start = rdtsc();
+    uint64_t items_processed = 0;
+    g_per_core_stats[thread_id].invocations++;
+
+    /* Check if this is deterministic mode (chunk_size == -1 is the marker) */
+    if (work->chunk_size == -1) {
+        /* Deterministic mode: each thread gets a fixed range */
+        int items_per_thread = work->total_items / g_pool.num_threads;
+        int remainder = work->total_items % g_pool.num_threads;
+
+        /* Calculate this thread's assigned range */
+        int start = thread_id * items_per_thread + (thread_id < remainder ? thread_id : remainder);
+        int end = start + items_per_thread + (thread_id < remainder ? 1 : 0);
+
+        /* Execute only assigned work - no stealing */
+        work->func(work->arg, thread_id, start, end);
+        atomic_add(end - start, &work->completed);
+        items_processed = (end - start);
+    } else {
+        /* Work-stealing loop - same pattern as main thread */
+        while (1) {
+            int start = atomic_add_return(work->chunk_size, &work->next_item) - work->chunk_size;
+            if (start >= work->total_items) break;
+
+            int end = start + work->chunk_size;
+            if (end > work->total_items) end = work->total_items;
+
+            /* Execute work chunk */
+            work->func(work->arg, thread_id, start, end);
+
+            atomic_add(end - start, &work->completed);
+            items_processed += (end - start);
+        }
+    }
+
+    uint64_t work_end = rdtsc();
+    g_per_core_stats[thread_id].total_cycles += (work_end - work_start);
+    g_per_core_stats[thread_id].work_items += items_processed;
+
+    /* Signal this worker is done */
+    atomic_inc(&g_pool.workers_done);
+    smp_mb();
+}
+
+/* SMP AP worker: executed by an Application Processor's mailbox loop
+ * (smp_work_dispatch). thread_id i runs on CPU i. Runs outside IRQ context
+ * on the AP, so SSE/FPU math is safe (enabled during AP bring-up). */
+static void parallel_ap_worker(void* arg) {
+    int thread_id = (int)(uintptr_t)arg;
+    g_per_core_stats[thread_id].core_id = (uint32_t)thread_id;  /* cpu == thread */
+    parallel_worker_run(thread_id);
+}
+
 /* Worker thread entry point - runs work-stealing loop */
 static void worker_thread_entry(void) {
     task_t* self = get_current_task();
@@ -190,58 +260,12 @@ static void worker_thread_entry(void) {
             continue;
         }
 
-        parallel_work_t* work = g_pool.current_work;
-        if (!work) {
+        if (!g_pool.current_work) {
             task_yield();
             continue;
         }
 
-        /* Memory barrier to ensure we see the work descriptor */
-        smp_rmb();
-
-        /* Track work time and items */
-        uint64_t work_start = rdtsc();
-        uint64_t items_processed = 0;
-        g_per_core_stats[thread_id].invocations++;
-
-        /* Check if this is deterministic mode (chunk_size == -1 is the marker) */
-        if (work->chunk_size == -1) {
-            /* Deterministic mode: each thread gets a fixed range */
-            int items_per_thread = work->total_items / g_pool.num_threads;
-            int remainder = work->total_items % g_pool.num_threads;
-
-            /* Calculate this thread's assigned range */
-            int start = thread_id * items_per_thread + (thread_id < remainder ? thread_id : remainder);
-            int end = start + items_per_thread + (thread_id < remainder ? 1 : 0);
-
-            /* Execute only assigned work - no stealing */
-            work->func(work->arg, thread_id, start, end);
-            atomic_add(end - start, &work->completed);
-            items_processed = (end - start);
-        } else {
-            /* Work-stealing loop - same pattern as main thread */
-            while (1) {
-                int start = atomic_add_return(work->chunk_size, &work->next_item) - work->chunk_size;
-                if (start >= work->total_items) break;
-
-                int end = start + work->chunk_size;
-                if (end > work->total_items) end = work->total_items;
-
-                /* Execute work chunk */
-                work->func(work->arg, thread_id, start, end);
-
-                atomic_add(end - start, &work->completed);
-                items_processed += (end - start);
-            }
-        }
-
-        uint64_t work_end = rdtsc();
-        g_per_core_stats[thread_id].total_cycles += (work_end - work_start);
-        g_per_core_stats[thread_id].work_items += items_processed;
-
-        /* Signal this worker is done */
-        atomic_inc(&g_pool.workers_done);
-        smp_mb();
+        parallel_worker_run(thread_id);
 
         /* Wait for work to be cleared before starting next iteration */
         while (atomic_read(&g_pool.work_available) && !g_pool.shutdown) {
@@ -262,13 +286,44 @@ int parallel_init(int num_threads) {
     if (num_threads < 1) num_threads = 1;
     if (num_threads > PARALLEL_MAX_THREADS) num_threads = PARALLEL_MAX_THREADS;
 
-    g_pool.num_threads = num_threads;
     g_pool.shutdown = 0;
+    g_pool.use_smp = 0;
     g_pool.current_work = NULL;
     atomic_set(&g_pool.work_available, 0);
     atomic_set(&g_pool.workers_done, 0);
     atomic_set(&g_pool.barrier_count, 0);
     atomic_set(&g_pool.barrier_phase, 0);
+
+    /* SMP mode: when APs are online, workers run on real cores via the
+     * per-CPU mailbox work queue (smp_work_dispatch) instead of kernel
+     * tasks timesharing the BSP. thread i <-> CPU i, thread 0 = BSP. */
+    uint32_t online_cpus = smp_get_num_online();
+    if (online_cpus > 1) {
+        if (num_threads > (int)online_cpus) num_threads = (int)online_cpus;
+        g_pool.num_threads = num_threads;
+        g_pool.use_smp = 1;
+
+        for (int i = 0; i < PARALLEL_MAX_THREADS; i++) {
+            g_core_affinity[i] = -1;
+            g_per_core_stats[i].total_cycles = 0;
+            g_per_core_stats[i].work_items = 0;
+            g_per_core_stats[i].idle_cycles = 0;
+            g_per_core_stats[i].core_id = i;
+            g_per_core_stats[i].invocations = 0;
+        }
+
+        for (int i = 1; i < num_threads; i++) {
+            g_core_affinity[i] = i;
+            console_printf("[PARALLEL] Worker %d -> CPU %d (AP mailbox)\n", i, i);
+        }
+
+        g_pool_initialized = 1;
+        console_printf("[PARALLEL] SMP mode: %d threads on %u CPUs\n",
+                       g_pool.num_threads, online_cpus);
+        return 0;
+    }
+
+    g_pool.num_threads = num_threads;
 
     /* Initialize core affinity tracking */
     for (int i = 0; i < PARALLEL_MAX_THREADS; i++) {
@@ -354,6 +409,17 @@ void parallel_for(work_func_t func, void* arg, int total_items, int chunk_size) 
         atomic_set(&g_pool.work_available, 1);
         smp_mb();  /* Ensure work_available is visible to all CPUs */
 
+        /* In SMP mode, wake the AP mailbox workers on their real cores */
+        int dispatched = 0;
+        if (g_pool.use_smp) {
+            for (int i = 1; i < g_pool.num_threads; i++) {
+                if (smp_work_dispatch((uint32_t)i, parallel_ap_worker,
+                                      (void*)(uintptr_t)i) == 0) {
+                    dispatched++;
+                }
+            }
+        }
+
         /* Calculate fixed ranges for each thread */
         int items_per_thread = total_items / g_pool.num_threads;
         int remainder = total_items % g_pool.num_threads;
@@ -381,7 +447,7 @@ void parallel_for(work_func_t func, void* arg, int total_items, int chunk_size) 
         }
 
         /* Wait for all worker threads to finish and acknowledge */
-        int expected_workers = g_pool.num_threads - 1;
+        int expected_workers = g_pool.use_smp ? dispatched : g_pool.num_threads - 1;
         while (atomic_read(&g_pool.workers_done) < expected_workers) {
             cpu_relax();
         }
@@ -391,6 +457,14 @@ void parallel_for(work_func_t func, void* arg, int total_items, int chunk_size) 
         smp_wmb();
         g_pool.current_work = NULL;
         smp_mb();
+
+        /* Make sure APs have fully left the worker before returning (their
+         * mailboxes must be idle before the next parallel_for posts work) */
+        if (g_pool.use_smp) {
+            for (int i = 1; i < g_pool.num_threads; i++) {
+                smp_work_wait((uint32_t)i);
+            }
+        }
         return;
     }
 
@@ -415,6 +489,19 @@ void parallel_for(work_func_t func, void* arg, int total_items, int chunk_size) 
     /* Wake up worker threads */
     atomic_set(&g_pool.work_available, 1);
     smp_mb();  /* Ensure work_available is visible to all CPUs */
+
+    /* In SMP mode, wake the AP mailbox workers on their real cores.
+     * dispatched counts successful wakeups: if a dispatch fails the main
+     * thread simply steals that share of the work itself. */
+    int dispatched = 0;
+    if (g_pool.use_smp) {
+        for (int i = 1; i < g_pool.num_threads; i++) {
+            if (smp_work_dispatch((uint32_t)i, parallel_ap_worker,
+                                  (void*)(uintptr_t)i) == 0) {
+                dispatched++;
+            }
+        }
+    }
 
     /* Main thread also participates as worker 0 */
     int thread_id = 0;
@@ -449,7 +536,7 @@ void parallel_for(work_func_t func, void* arg, int total_items, int chunk_size) 
     }
 
     /* Wait for all worker threads to finish and acknowledge */
-    int expected_workers = g_pool.num_threads - 1;  /* Exclude main thread */
+    int expected_workers = g_pool.use_smp ? dispatched : g_pool.num_threads - 1;
     while (atomic_read(&g_pool.workers_done) < expected_workers) {
         cpu_relax();
     }
@@ -459,6 +546,14 @@ void parallel_for(work_func_t func, void* arg, int total_items, int chunk_size) 
     smp_wmb();  /* Ensure work_available=0 is visible before clearing work */
     g_pool.current_work = NULL;
     smp_mb();
+
+    /* Make sure APs have fully left the worker before returning (their
+     * mailboxes must be idle before the next parallel_for posts work) */
+    if (g_pool.use_smp) {
+        for (int i = 1; i < g_pool.num_threads; i++) {
+            smp_work_wait((uint32_t)i);
+        }
+    }
 }
 
 /* ============================================================================
