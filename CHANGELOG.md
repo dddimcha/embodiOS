@@ -5,7 +5,64 @@ All notable changes to EMBODIOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-09-20 — codename Tesla
+
+Product-level hardening: real-time tick, closed-loop control demo, GPU compute
+backend, and 1B-class model support.
+
+### Added
+- **LAPIC timer @1 kHz** (HPET-calibrated, PIT fallback): `lapic_timer_probe()`
+  + `lapic_timer_init(1000)` at `hal_timer_enable()` switches the system tick
+  from PIT IRQ0 @100 Hz to a calibrated LAPIC LVT periodic interrupt on the same
+  legacy vector (0x20); PIT is masked off. Boot log: `TICK: LAPIC timer @1000 Hz
+  (calibrated vs HPET)` or `TICK: PIT @100 Hz (fallback)`. Calibration: 10 ms
+  window against the HPET main counter (fallback: PIT channel 2 one-shot);
+  implausible values fail over to the legacy PIT path. The legacy 100 Hz chain
+  (scheduler quantum, uptime, hal_timer semantics) is decimated from the 1 kHz
+  tick, so preemption behavior is unchanged. EOI is routed to the LAPIC when
+  active. `-append poll` and SMP boot are unaffected.
+- **rt_timer**: periodic IRQ-context callbacks (8 slots) driven by the tick;
+  `fxsave/fxrstor` around every callback so float users (PID) cannot corrupt
+  in-flight inference.
+- **`motor` closed-loop control demo** (`cmd_motor.c`): float PID with
+  anti-windup and 8-bit saturation, 2nd-order DC motor plant (dc=speed /
+  servo=position), actuator byte to IO port 0xE9 (QEMU isa-debugcon) every
+  tick, rdtsc jitter ring (8192 samples) with count/mean/stddev/min/max/p99
+  report, and an asynchronous LLM policy hook that adjusts the setpoint from
+  task context while the IRQ loop keeps firing. Commands: `motor run <ms>
+  [hz]`, `motor jitter`, `motor llm on|off`, `motor plant dc|servo`,
+  `motor pid <kp> <ki> <kd>`. Docs: `docs/motor-demo.md`.
+- **Vulkan compute backend** (`ai/vk_device.c`, `ai/vk_shaders.h`,
+  `tools/spirv_gen.py`, `tools/host_test_vulkan.c`): hand-assembled SPIR-V
+  matmul shaders (f32, Q8_0 with in-shader dequant) — no shader compiler
+  exists in-tree, so `spirv_gen.py` emits the words directly. Kernel-side
+  Vulkan device layer with PCI probe; inference dispatches Q8_0 matmul to GPU
+  only when `gpu_backend_probe() > 0`, otherwise silently falls back to the
+  SIMD path (zero regression without GPU). Under TCG: `GPU: none (no
+  Vulkan-capable PCI device)`. Host validation on lavapipe: 8/8 shape tests
+  **bit-exact** vs CPU reference (max_abs_err = 0) for both shaders; the
+  embedded words are the same ones compiled into the kernel. Docs:
+  `docs/gpu-backend.md` (validated vs not-validated, Venus/passthrough
+  activation paths, 4-byte SSBO tail-padding contract).
+- **Llama-3 chat template** (`CHAT_FORMAT_LLAMA3`, `chatformat llama3`):
+  auto-detected from `<|start_header_id|>`/`<|eot_id|>` vocab markers; stop on
+  `<|eot_id|>`.
+- **1B-class model support verified**: Llama-3.2-1B-Instruct Q4_K_M (GGUF v3,
+  147 tensors, vocab 128256, GQA 32/8 heads, rope theta 500000, tied
+  embeddings) boots and chats on bare metal — answer "The capital of France
+  is Paris." verbatim with clean `<|eot_id|>` stop. QEMU TCG (2-core host,
+  single vCPU): model load 80 s, prompt 312.6 s, gen 136.9 s (8 tokens).
+
+### Notes
+- SMP sizing: under TCG, more vCPUs than host cores hurts (same 1B model:
+  prompt 759.4 s @ `-smp 4` vs 312.6 s @ `-smp 1` on a 2-core host). Size
+  `-smp` to the host.
+- TCG time base: rdtsc drifts ~2.3x vs LAPIC/HPET wall time under TCG, so
+  motor-demo jitter absolutes (~1.3 ms mean lateness, p99 ≈ 1.5x mean, zero
+  lost ticks) are emulation-bound; see `docs/motor-demo.md` for the honest
+  analysis and the qualitative PREEMPT_RT comparison.
+
+## [0.4.1] - 2026-09-19 — codename Figaro
 
 ### Added
 - SIMD runtime dispatch for quantized inference kernels ("Figaro" release,

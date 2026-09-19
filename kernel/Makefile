@@ -196,6 +196,8 @@ KERNEL_C_SOURCES = \
     core/cmd_storage.c \
     core/cmd_smp.c \
     core/cmd_power.c \
+    core/rt_timer.c \
+    core/cmd_motor.c \
     fs/embfs.c \
     drivers/pci/pci.c \
     drivers/block/virtio_blk.c \
@@ -314,6 +316,7 @@ ifeq ($(ARCH),x86_64)
         $(ARCH_DIR)/tsc.c \
         $(ARCH_DIR)/hpet.c \
         $(ARCH_DIR)/hal_timer.c \
+        $(ARCH_DIR)/lapic_timer.c \
         $(ARCH_DIR)/smp.c
 endif
 
@@ -393,6 +396,29 @@ ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS) $(LLAMA_CPP_OBJS) $(GGM
 
 # Targets
 all: embodios.elf embodios.bin
+
+# ----------------------------------------------------------------------------
+# GPU section (WS-GPU, v0.5.0 "Tesla") — Vulkan compute backend
+# ----------------------------------------------------------------------------
+# vk_device.c is the kernel-side Vulkan compute device layer (PCI probe +
+# driver skeleton; see kernel/include/embodios/vk_device.h). The compute
+# shaders are hand-assembled by tools/spirv_gen.py into ai/vk_shaders.h
+# (no GLSL compiler exists in the build environment) and validated
+# end-to-end on lavapipe by tools/host_test_vulkan.c.
+GPU_OBJS = ai/vk_device.o
+
+# Generate the embedded SPIR-V shaders. Regenerate manually with:
+#     python3 ../tools/spirv_gen.py
+ai/vk_shaders.h: ../tools/spirv_gen.py
+	python3 ../tools/spirv_gen.py $@
+
+ai/vk_device.o: ai/vk_device.c ai/vk_shaders.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+ai/vulkan_test.o: ai/vulkan_test.c ai/vk_shaders.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+ALL_OBJS += $(GPU_OBJS)
 
 embodios.elf: $(ALL_OBJS) $(ARCH_DIR)/kernel.ld
 ifeq ($(ARCH),aarch64)

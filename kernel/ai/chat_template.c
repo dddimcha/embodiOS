@@ -44,6 +44,7 @@ const char* chat_template_format_name(chat_format_t fmt)
         case CHAT_FORMAT_CHATML: return "chatml";
         case CHAT_FORMAT_LLAMA2: return "llama2";
         case CHAT_FORMAT_GLM:    return "glm";
+        case CHAT_FORMAT_LLAMA3: return "llama3";
         default:                 return "unknown";
     }
 }
@@ -55,6 +56,7 @@ int chat_template_parse_name(const char* name)
     if (strcmp(name, "chatml") == 0) return CHAT_FORMAT_CHATML;
     if (strcmp(name, "llama2") == 0) return CHAT_FORMAT_LLAMA2;
     if (strcmp(name, "glm") == 0)    return CHAT_FORMAT_GLM;
+    if (strcmp(name, "llama3") == 0) return CHAT_FORMAT_LLAMA3;
     return -1;
 }
 
@@ -80,6 +82,10 @@ static chat_format_t detect_format(void)
     if (chat_template_find_token("<|im_start|>") >= 0 &&
         chat_template_find_token("<|im_end|>") >= 0) {
         return CHAT_FORMAT_CHATML;
+    }
+    if (chat_template_find_token("<|start_header_id|>") >= 0 &&
+        chat_template_find_token("<|eot_id|>") >= 0) {
+        return CHAT_FORMAT_LLAMA3;
     }
     if (chat_template_find_token("[INST]") >= 0 &&
         chat_template_find_token("[/INST]") >= 0) {
@@ -127,6 +133,16 @@ int chat_template_wrap(const char* user_prompt, char* out, size_t out_size)
                            "[gMASK]<sop><|user|>\n%s<|assistant|>",
                            user_prompt);
             break;
+        case CHAT_FORMAT_LLAMA3:
+            /* Llama-3.x chat format (BOS is prepended by the tokenizer):
+             * <|start_header_id|>user<|end_header_id|>\n\n{q}<|eot_id|>
+             * <|start_header_id|>assistant<|end_header_id|>\n\n */
+            len = snprintf(out, out_size,
+                           "<|start_header_id|>user<|end_header_id|>\n\n"
+                           "%s<|eot_id|>"
+                           "<|start_header_id|>assistant<|end_header_id|>\n\n",
+                           user_prompt);
+            break;
         case CHAT_FORMAT_OFF:
         case CHAT_FORMAT_AUTO:
         default:
@@ -151,6 +167,9 @@ int chat_template_stop_token(void)
             /* GLM-4 chat actually stops on <|user|> (id 151336 upstream);
              * <|endoftext|> (151329) stays as metadata EOS */
             return chat_template_find_token("<|user|>");
+        case CHAT_FORMAT_LLAMA3:
+            /* Llama-3.x instruct turns end with <|eot_id|> (128009) */
+            return chat_template_find_token("<|eot_id|>");
         case CHAT_FORMAT_LLAMA2:
         default:
             return -1;  /* Keep model default EOS from metadata */

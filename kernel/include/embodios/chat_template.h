@@ -1,8 +1,8 @@
 /* Chat Template Support for EMBODIOS
  *
  * Wraps user prompts in the chat format the loaded model was trained with
- * (ChatML, LLaMA-2 [INST], GLM). Format is autodetected from vocabulary
- * marker tokens or can be forced with the 'chatformat' command.
+ * (ChatML, LLaMA-2 [INST], LLaMA-3 header-id, GLM). Format is autodetected
+ * from vocabulary marker tokens or can be forced with 'chatformat'.
  */
 
 #ifndef _EMBODIOS_CHAT_TEMPLATE_H
@@ -20,6 +20,7 @@ typedef enum {
     CHAT_FORMAT_CHATML,     /* <|im_start|>user ... <|im_end|> (SmolLM, Qwen) */
     CHAT_FORMAT_LLAMA2,     /* [INST] ... [/INST] */
     CHAT_FORMAT_GLM,        /* [gMASK]<sop><|user|> ... <|assistant|> */
+    CHAT_FORMAT_LLAMA3,     /* <|start_header_id|>user<|end_header_id|> ... (Llama-3.x) */
 } chat_format_t;
 
 /* Configure format (chatformat command). CHAT_FORMAT_AUTO = autodetect. */
