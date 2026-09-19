@@ -1252,7 +1252,7 @@ void scheduler_tasktest(void)
 
     tasktest_done = 0;
 
-    console_printf("tasktest: spawning tasks A and B (same priority, preempted by PIT tick)\n");
+    console_printf("tasktest: spawning tasks A and B (same priority, preempted by the 100 Hz tick chain)\n");
     task_t *a = task_create("demo-A", tasktest_a, BOOT_TASK_PRIORITY);
     task_t *b = task_create("demo-B", tasktest_b, BOOT_TASK_PRIORITY);
     if (!a || !b) {

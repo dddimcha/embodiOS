@@ -10,6 +10,9 @@
 #include "embodios/hal_timer.h"
 #include "embodios/tsc.h"
 #include "embodios/hpet.h"
+#include "embodios/lapic_timer.h"
+#include "embodios/rt_timer.h"
+#include "embodios/console.h"
 
 /* Timer frequency (100 Hz = 10ms tick) */
 #define TIMER_FREQUENCY 100
@@ -99,6 +102,19 @@ static void x86_64_timer_init(void)
 static void x86_64_timer_enable(void)
 {
     timer_state.enabled = true;
+
+    /* Tick source decision (runs before sti): try to move the scheduling
+     * tick from the 100 Hz PIT to a calibrated LAPIC timer at 1 kHz.
+     * On success the PIT line stays masked (pic.c) and the legacy 100 Hz
+     * tick chain is decimated from the fast tick (idt.c), so scheduler,
+     * uptime and hal_timer semantics are unchanged. On any failure the
+     * PIT path continues as before. */
+    if (lapic_timer_probe() && lapic_timer_init(1000) == 0) {
+        console_printf("TICK: LAPIC timer @%u Hz (calibrated vs %s)\n",
+                       lapic_timer_hz(), lapic_timer_calib_source());
+    } else {
+        console_printf("TICK: PIT @%d Hz (fallback)\n", TIMER_FREQUENCY);
+    }
 }
 
 /* HAL timer disable */
@@ -280,5 +296,11 @@ void timer_tick(void)
 {
     if (timer_state.enabled) {
         timer_state.ticks++;
+        /* PIT-fallback mode: the rt_timer callback layer polls at the
+         * legacy 100 Hz rate. In LAPIC mode the poll runs at the full
+         * fast-tick rate from lapic_timer_tick() instead. */
+        if (!lapic_timer_active()) {
+            rt_timer_poll(timer_state.ticks);
+        }
     }
 }

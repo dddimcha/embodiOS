@@ -30,7 +30,7 @@
 /* Kernel version info */
 /* Single source of truth for the kernel version. create_iso.sh
    extracts this via grep to keep the ISO manifest in sync. */
-const char* kernel_version = "v0.4.1";
+const char* kernel_version = "v0.5.0";
 const char* kernel_build = __DATE__ " " __TIME__;
 
 /* External symbols from linker script */
@@ -508,9 +508,13 @@ void kernel_main(void)
             extern void hal_timer_enable(void);
             hal_timer_enable();        /* ungate PIT tick counting */
             scheduler_register_timer();/* scheduler_tick on every IRQ0 */
-            arch_enable_interrupts();  /* unmask IRQ0 + sti */
+            arch_enable_interrupts();  /* unmask IRQ0 + sti (PIT only if LAPIC inactive) */
             interrupts_enabled = true;
-            console_printf("Interrupts: ENABLED (PIT IRQ0 @ 100 Hz, preemptive scheduling)\n");
+            extern int lapic_timer_active(void);
+            console_printf("Interrupts: ENABLED (%s, preemptive scheduling)\n",
+                           lapic_timer_active()
+                               ? "LAPIC timer tick @ 1000 Hz (legacy chain @ 100 Hz)"
+                               : "PIT IRQ0 @ 100 Hz");
         } else {
             console_printf("Interrupts: DISABLED (cmdline 'poll' -> legacy polling mode)\n");
         }

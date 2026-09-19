@@ -24,6 +24,7 @@
 #include <embodios/profiler.h>
 #include <embodios/cpu.h>
 #include <embodios/ui.h>
+#include <embodios/gpu_backend.h>
 
 /* Enable parallel inference (set to 0 to disable) */
 #ifndef PARALLEL_INFERENCE_ENABLED
@@ -500,6 +501,15 @@ static void matmul_q8_0_fused(float* out, const void* w_q8_0, const float* x,
         console_printf("Error: matmul_q8_0_fused buffer overflow (need %d, have %d)\n",
                       nb_cols, g_input_q8_size);
         return;  /* Fail gracefully - buffer too small */
+    }
+
+    /* GPU dispatch (WS-GPU): only when gpu_backend_probe() found a usable
+     * Vulkan compute device; any negative result falls through to the SIMD
+     * CPU path. The probe is cached, so this costs one predictable branch on
+     * GPU-less systems (e.g. QEMU TCG, where the probe is always 0). */
+    if (gpu_backend_probe() > 0 &&
+        gpu_matmul_q8_0(weights, x, out, rows, cols, 1) == 0) {
+        return;
     }
 
     /* Quantize input vector once */
