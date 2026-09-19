@@ -202,13 +202,52 @@ static int ensure_inference_ready(void)
     return 0;
 }
 
-/* Generate a single chat response: applies the chat template, tokenizes,
- * generates, decodes and prints the answer text (no role prefix, no
- * trailing newlines). Returns tokens generated. Updates chat perf stats.
- * Caller must have run ensure_inference_ready() first. */
-static int chat_ask(const char *prompt)
+/* Streaming piece sink: receives decoded answer bytes piece by piece,
+ * as the tokens are sampled. Shell passes a console printer, other
+ * consumers could pass an accumulator. NULL = legacy batch behavior
+ * (decode the full answer after generation and print it at once). */
+typedef void (*chat_piece_fn)(const char *piece, int len, void *ctx);
+
+/* Adapter state: engine delivers token ids, the sink wants text pieces */
+typedef struct {
+    chat_piece_fn on_piece;
+    void *ctx;
+    bpe_stream_decoder_t dec;
+} chat_stream_adapt_t;
+
+static void chat_engine_token_cb(int token_id, void *vctx)
 {
-    extern int streaming_inference_generate(const int *, int, int *, int);
+    chat_stream_adapt_t *a = (chat_stream_adapt_t *)vctx;
+    char piece[BPE_STREAM_PIECE_MAX];
+    int n = bpe_stream_decode_token(&a->dec, token_id, piece, sizeof(piece));
+    if (n > 0) {
+        a->on_piece(piece, n, a->ctx);
+    } else if (n < 0) {
+        /* Tokenizer not initialized: fall back to raw vocab text */
+        const char *tok = streaming_inference_get_token(token_id);
+        if (tok) a->on_piece(tok, (int)strlen(tok), a->ctx);
+    }
+    /* n == 0: BOS/EOS/special — nothing to print */
+}
+
+/* Shell sink: write each piece to the console immediately (bypasses the
+ * console_printf newline batching — this is what makes tokens appear
+ * during generation, not after it). */
+static void shell_stream_piece(const char *piece, int len, void *ctx)
+{
+    (void)ctx;
+    console_write(piece, (size_t)len);
+}
+
+/* Generate a single chat response: applies the chat template, tokenizes,
+ * generates and decodes the answer text (no role prefix, no trailing
+ * newlines). When on_piece is non-NULL each sampled token is decoded and
+ * delivered immediately (real streaming); otherwise the full answer is
+ * printed at the end exactly like before. Stop/EOS tokens are never
+ * emitted. Returns tokens generated. Updates chat perf stats.
+ * Caller must have run ensure_inference_ready() first. */
+static int chat_ask(const char *prompt, chat_piece_fn on_piece, void *piece_ctx)
+{
     extern const char *streaming_inference_get_token(int);
 
     /* Apply chat template (ChatML/[INST]/GLM autodetect) */
@@ -243,33 +282,83 @@ static int chat_ask(const char *prompt)
     uint64_t start = chat_get_cycles();
 
     int output_tokens[128];
-    int generated = streaming_inference_generate(prompt_tokens, prompt_len, output_tokens, 50);
+    int generated;
+    uint64_t prefill_cycles = 0, decode_cycles = 0;
+
+    if (on_piece) {
+        /* Streaming path: role prefix is already out (callers print it
+         * before invoking us) — drain the printf buffer so direct
+         * console_write pieces can't overtake it on the serial line. */
+        console_flush();
+
+        chat_stream_adapt_t adapt;
+        adapt.on_piece = on_piece;
+        adapt.ctx = piece_ctx;
+        bpe_stream_decoder_init(&adapt.dec);
+
+        generated = streaming_inference_generate_cb(
+            prompt_tokens, prompt_len, output_tokens, 50,
+            chat_engine_token_cb, &adapt,
+            &prefill_cycles, &decode_cycles);
+    } else {
+        generated = streaming_inference_generate(prompt_tokens, prompt_len,
+                                                 output_tokens, 50);
+    }
 
     uint64_t end = chat_get_cycles();
     uint64_t elapsed_us = chat_cycles_to_us(end - start);
 
-    /* Decode and print answer text */
-    if (generated > 0) {
-        char decoded[512];
-        int len = bpe_tokenizer_decode(output_tokens, generated, decoded, sizeof(decoded));
-        if (len > 0) {
-            console_printf("%s", decoded);
-        } else {
-            for (int i = 0; i < generated; i++) {
-                const char *tok = streaming_inference_get_token(output_tokens[i]);
-                if (tok) console_printf("%s", tok);
+    /* Batch path only: decode and print the answer text at once */
+    if (!on_piece) {
+        if (generated > 0) {
+            char decoded[512];
+            int len = bpe_tokenizer_decode(output_tokens, generated, decoded, sizeof(decoded));
+            if (len > 0) {
+                console_printf("%s", decoded);
+            } else {
+                for (int i = 0; i < generated; i++) {
+                    const char *tok = streaming_inference_get_token(output_tokens[i]);
+                    if (tok) console_printf("%s", tok);
+                }
             }
+        } else {
+            console_printf("(no response)");
         }
-    } else {
-        console_printf("(no response)");
+    } else if (generated <= 0) {
+        console_write("(no response)", 13);
     }
 
-    /* Update perf stats */
+    /* Update perf stats (prompt eval split from decode => visible TTFT) */
     g_chat_perf.last_prompt_tokens = prompt_len;
     g_chat_perf.last_generated_tokens = generated;
+    g_chat_perf.last_prefill_us = chat_cycles_to_us(prefill_cycles);
+    g_chat_perf.last_decode_us = chat_cycles_to_us(decode_cycles);
     g_chat_perf.last_total_us = elapsed_us;
     g_chat_perf.valid = true;
     return generated;
+}
+
+/* Dim one-line generation stats appended after a chat answer:
+ * proof of time-to-first-token (prompt eval) vs steady-state decode. */
+static void chat_print_stats_line(void)
+{
+    uint64_t prompt_us = g_chat_perf.last_prefill_us;
+    uint64_t decode_us = g_chat_perf.last_decode_us;
+    uint64_t n = (uint64_t)(g_chat_perf.last_generated_tokens > 0 ?
+                            g_chat_perf.last_generated_tokens : 0);
+    /* tok/s with 2 decimals, decode phase only */
+    uint64_t tps100 = (decode_us > 0) ? (n * 100ULL * 1000000ULL) / decode_us : 0;
+
+    console_printf("\n %s(%llu tokens · prompt %llu.%llus · gen %llu.%llus · %llu.%02llu tok/s)%s",
+        ui_c(UI_DIM),
+        (unsigned long long)n,
+        (unsigned long long)(prompt_us / 1000000ULL),
+        (unsigned long long)((prompt_us / 100000ULL) % 10),
+        (unsigned long long)(decode_us / 1000000ULL),
+        (unsigned long long)((decode_us / 100000ULL) % 10),
+        (unsigned long long)(tps100 / 100),
+        (unsigned long long)(tps100 % 100),
+        ui_c(UI_RESET));
 }
 
 /* Enhanced command processing */
@@ -503,10 +592,12 @@ void process_command(const char *command)
         console_printf("   Prompt tokens:     %d\n", g_chat_perf.last_prompt_tokens);
         console_printf("   Generated tokens:  %d\n", g_chat_perf.last_generated_tokens);
         console_printf("   Total time:        %llu ms\n", (unsigned long long)(g_chat_perf.last_total_us / 1000));
+        console_printf("   Prompt eval (TTFT): %llu ms\n", (unsigned long long)(g_chat_perf.last_prefill_us / 1000));
+        console_printf("   Decode:            %llu ms\n", (unsigned long long)(g_chat_perf.last_decode_us / 1000));
 
-        if (g_chat_perf.last_generated_tokens > 0) {
-            uint64_t tokens_per_sec = (g_chat_perf.last_generated_tokens * 1000000ULL) / g_chat_perf.last_total_us;
-            console_printf("   Throughput:        %llu tok/s\n", (unsigned long long)tokens_per_sec);
+        if (g_chat_perf.last_generated_tokens > 0 && g_chat_perf.last_decode_us > 0) {
+            uint64_t tokens_per_sec = (g_chat_perf.last_generated_tokens * 1000000ULL) / g_chat_perf.last_decode_us;
+            console_printf("   Throughput:        %llu tok/s (decode)\n", (unsigned long long)tokens_per_sec);
         }
 
         if (g_chat_perf.session_messages > 1) {
@@ -524,15 +615,6 @@ void process_command(const char *command)
 
     } else if (strcmp(command, "talk") == 0) {
         /* Interactive chat mode */
-        extern int streaming_inference_init(bool preallocate);
-        extern bool streaming_inference_is_ready(void);
-        extern int streaming_inference_generate(const int *, int, int *, int);
-        extern const char *streaming_inference_get_token(int);
-        extern const uint8_t *get_embedded_gguf_model(size_t *out_size);
-        extern int gguf_load_model(void *data, size_t size);
-        extern int gguf_model_embedded(void);
-        extern const struct gguf_model_arch *gguf_parser_get_arch(void);
-
         console_printf("\n");
         console_printf(" ╔════════════════════════════════════════╗\n");
         console_printf(" ║         EMBODIOS Chat Mode             ║\n");
@@ -585,70 +667,18 @@ void process_command(const char *command)
             /* Skip empty input */
             if (input_buf[0] == '\0') continue;
 
-            /* Apply chat template (ChatML/[INST]/GLM autodetect) */
-            char wrapped_input[768];
-            const char *eff_input = input_buf;
-            if (chat_template_wrap(input_buf, wrapped_input, sizeof(wrapped_input)) > 0) {
-                eff_input = wrapped_input;
-                int stop_tok = chat_template_stop_token();
-                if (stop_tok >= 0) {
-                    streaming_inference_set_eos(stop_tok);
-                }
-                /* GLM chat stops on <|user|> (set above) but <|assistant|>
-                 * must also halt generation (upstream eos list: 151329/151336/151338) */
-                if (chat_template_resolve() == CHAT_FORMAT_GLM) {
-                    extern void streaming_inference_add_stop_token(int);
-                    int t = chat_template_find_token("<|assistant|>");
-                    if (t >= 0) streaming_inference_add_stop_token(t);
-                }
-            }
-
-            /* Tokenize */
-            int prompt_tokens[256];
-            int prompt_len = 0;
-            if (bpe_tokenizer_is_initialized()) {
-                prompt_len = bpe_tokenizer_encode(eff_input, prompt_tokens, 256, false, false);
-            }
-            if (prompt_len <= 0) {
-                prompt_tokens[0] = 1;
-                prompt_len = 1;
-            }
-
-            /* Generate with timing */
-            uint64_t start = chat_get_cycles();
-
-            int output_tokens[128];
-            int generated = streaming_inference_generate(prompt_tokens, prompt_len, output_tokens, 50);
-
-            uint64_t end = chat_get_cycles();
-            uint64_t elapsed_us = chat_cycles_to_us(end - start);
-
-            /* Display response (assistant role in green) */
+            /* Stream the response token-by-token (assistant role in green);
+             * chat_ask applies the template, tokenizes, generates and
+             * updates the last-* perf fields. */
             console_printf("\n%sembodios>%s ", ui_c(UI_GREEN), ui_c(UI_RESET));
-            if (generated > 0) {
-                char decoded[512];
-                int len = bpe_tokenizer_decode(output_tokens, generated, decoded, sizeof(decoded));
-                if (len > 0) {
-                    console_printf("%s", decoded);
-                } else {
-                    for (int i = 0; i < generated; i++) {
-                        const char *tok = streaming_inference_get_token(output_tokens[i]);
-                        if (tok) console_printf("%s", tok);
-                    }
-                }
-            } else {
-                console_printf("(no response)");
-            }
+            int generated = chat_ask(input_buf, shell_stream_piece, NULL);
+            chat_print_stats_line();
             console_printf("\n\n");
 
-            /* Update perf stats */
-            g_chat_perf.last_prompt_tokens = prompt_len;
-            g_chat_perf.last_generated_tokens = generated;
-            g_chat_perf.last_total_us = elapsed_us;
+            /* Update session stats */
             g_chat_perf.session_messages++;
             g_chat_perf.session_total_tokens += generated;
-            g_chat_perf.session_total_time_us += elapsed_us;
-            g_chat_perf.valid = true;
+            g_chat_perf.session_total_time_us += g_chat_perf.last_total_us;
         }
 
         /* Show session summary */
@@ -770,15 +800,6 @@ void process_command(const char *command)
 
     } else if (strncmp(command, "chat ", 5) == 0 || strcmp(command, "chat") == 0) {
         /* Single message chat command */
-        extern int streaming_inference_init(bool preallocate);
-        extern bool streaming_inference_is_ready(void);
-        extern int streaming_inference_generate(const int *, int, int *, int);
-        extern const char *streaming_inference_get_token(int);
-        extern const uint8_t *get_embedded_gguf_model(size_t *out_size);
-        extern int gguf_load_model(void *data, size_t size);
-        extern int gguf_model_embedded(void);
-        extern const struct gguf_model_arch *gguf_parser_get_arch(void);
-
         const char *prompt = command + 4;
         while (*prompt == ' ') prompt++;
 
@@ -798,12 +819,14 @@ void process_command(const char *command)
             return;
         }
 
-        /* Display response with colored roles */
+        /* Display response with colored roles; tokens stream out as
+         * they are sampled (real TTFT, like ChatGPT/llama.cpp) */
         console_printf("\n%syou>%s %s%s%s\n",
             ui_c(UI_YELLOW), ui_c(UI_RESET),
             ui_c(UI_DIM), prompt, ui_c(UI_RESET));
         console_printf("%sembodios>%s ", ui_c(UI_GREEN), ui_c(UI_RESET));
-        chat_ask(prompt);
+        chat_ask(prompt, shell_stream_piece, NULL);
+        chat_print_stats_line();
         console_printf("\n\n");
     } else if (strcmp(command, "demo") == 0) {
         /* Built-in demo: a few showcase prompts with pretty framing */
@@ -830,7 +853,7 @@ void process_command(const char *command)
                            demo_prompts[i]);
             console_printf(" %s│%s %sA:%s ", ui_c(UI_DIM), ui_c(UI_RESET),
                            ui_c(UI_GREEN), ui_c(UI_RESET));
-            chat_ask(demo_prompts[i]);
+            chat_ask(demo_prompts[i], shell_stream_piece, NULL);
             console_printf("\n");
             if (i + 1 < demo_count) {
                 console_printf(" %s│%s\n", ui_c(UI_DIM), ui_c(UI_RESET));

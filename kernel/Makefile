@@ -234,6 +234,8 @@ KERNEL_C_SOURCES = \
     ai/tinyllama_integer_inference.c \
     ai/tinystories_inference.c \
     ai/simd_ops.c \
+    ai/simd_kernels_scalar.c \
+    ai/simd_dispatch.c \
     ai/memory_opt.c \
     ai/quantized_matmul_simd.c \
     ai/embeddings.c \
@@ -335,6 +337,15 @@ GGML_C_OBJS = $(GGML_C_SOURCES:.c=.o)
 ARCH_AS_OBJS = $(ARCH_AS_SOURCES:.S=.o)
 ARCH_C_OBJS = $(ARCH_C_SOURCES:.c=.o)
 
+# AVX2 SIMD kernels: built ONLY on x86_64 and ONLY with -mavx2 for this one
+# translation unit (runtime dispatch in ai/simd_dispatch.c guards execution;
+# the rest of the kernel remains baseline SSE2 for the fallback path).
+ifeq ($(ARCH),x86_64)
+    SIMD_AVX2_OBJS = ai/simd_kernels_avx2.o
+else
+    SIMD_AVX2_OBJS =
+endif
+
 # Model embedding support
 # TinyStories model path (relative to kernel directory)
 TINYSTORIES_MODEL = ../models/tinystories-15m.bin
@@ -378,7 +389,7 @@ else
     MODEL_OBJS =
 endif
 
-ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS) $(LLAMA_CPP_OBJS) $(GGML_C_OBJS) $(MODEL_OBJS)
+ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS) $(LLAMA_CPP_OBJS) $(GGML_C_OBJS) $(SIMD_AVX2_OBJS) $(MODEL_OBJS)
 
 # Targets
 all: embodios.elf embodios.bin
@@ -416,6 +427,10 @@ sign-check: embodios.elf.signed
 # Pattern rules
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# AVX2-only translation unit (explicit rule wins over the pattern rule)
+ai/simd_kernels_avx2.o: ai/simd_kernels_avx2.c
+	$(CC) $(CFLAGS) -mavx2 -c $< -o $@
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@

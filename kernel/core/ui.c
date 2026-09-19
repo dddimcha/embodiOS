@@ -52,7 +52,7 @@ void ui_banner(void)
     ui_puts("  ███████╗██║ ╚═╝ ██║██████╔╝╚██████╔╝██████╔╝██║╚██████╔╝███████║\n");
     ui_puts("  ╚══════╝╚═╝     ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝ ╚═════╝ ╚══════╝\n");
     ui_puts(ui_c(UI_RESET));
-    console_printf("  %sEMBODIOS %s%s %s· codename Pragma%s\n",
+    console_printf("  %sEMBODIOS %s%s %s· codename Figaro%s\n",
                    ui_c(UI_BOLD), kernel_version, ui_c(UI_RESET),
                    ui_c(UI_DIM), ui_c(UI_RESET));
     console_printf("  %sOne binary. Any machine. No OS.%s\n\n",

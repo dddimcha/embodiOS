@@ -19,6 +19,7 @@
 #include <embodios/exo.h>
 #include <embodios/hal_timer.h>
 #include <embodios/can.h>
+#include <embodios/simd_kernels.h>
 #include <embodios/model_registry.h>
 #include <embodios/test.h>
 #include <embodios/ui.h>
@@ -29,7 +30,7 @@
 /* Kernel version info */
 /* Single source of truth for the kernel version. create_iso.sh
    extracts this via grep to keep the ISO manifest in sync. */
-const char* kernel_version = "v0.4.0";
+const char* kernel_version = "v0.4.1";
 const char* kernel_build = __DATE__ " " __TIME__;
 
 /* External symbols from linker script */
@@ -300,6 +301,10 @@ void kernel_main(void)
     /* CPU initialization */
     console_printf("Initializing CPU features...\n");
     arch_cpu_init();
+
+    /* SIMD kernel dispatch: probe AVX2 (CPUID + XCR0), install the fastest
+     * safe quantized vec_dot kernels, print the selected backend. */
+    simd_kernels_init();
 
     /* HAL timer (TSC/HPET/PIT): без этого hal_timer_get_milliseconds()
      * всегда 0 — ломаются таймауты и интервалы tcpip/exo (discovery,

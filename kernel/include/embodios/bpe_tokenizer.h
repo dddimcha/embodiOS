@@ -74,6 +74,42 @@ int bpe_tokenizer_decode(const int* tokens, int n_tokens, char* text, int max_le
 const char* bpe_tokenizer_decode_token(int token_id);
 
 /* ============================================================================
+ * Incremental (streaming) decode
+ * ============================================================================
+ * Decodes one token at a time with the exact same transformations as
+ * bpe_tokenizer_decode(), so concatenating the per-token pieces yields
+ * byte-identical text to decoding the whole token array at once.
+ * Token text is appended as raw bytes; a multi-byte UTF-8 sequence split
+ * across BPE tokens is simply emitted as consecutive byte pieces.
+ */
+
+typedef struct {
+    long emitted;   /* total bytes emitted so far (SentencePiece ▁ rule) */
+} bpe_stream_decoder_t;
+
+/* Worst-case bytes one token can decode into (max token text + margin) */
+#define BPE_STREAM_PIECE_MAX 72
+
+/**
+ * bpe_stream_decoder_init - Reset a streaming decoder state
+ */
+void bpe_stream_decoder_init(bpe_stream_decoder_t* st);
+
+/**
+ * bpe_stream_decode_token - Decode one token, appending to the stream
+ *
+ * @st: Decoder state (tracks whether anything was emitted yet)
+ * @token_id: Token to decode
+ * @out: Output buffer for this token's byte piece
+ * @max_len: Size of @out (piece is NUL-terminated)
+ *
+ * Returns: Bytes written (0 for BOS/EOS/special tokens), or -1 if the
+ *          tokenizer is not initialized / bad args
+ */
+int bpe_stream_decode_token(bpe_stream_decoder_t* st, int token_id,
+                            char* out, int max_len);
+
+/* ============================================================================
  * Vocabulary Info
  * ============================================================================ */
 

@@ -120,6 +120,22 @@ void console_puts(const char* str)
     }
 }
 
+/* Unbuffered write of exactly `len` bytes, bypassing the console_printf
+ * batching buffer. Any pending buffered bytes are flushed first so the
+ * output order is preserved. Used for per-token streaming, where waiting
+ * for a newline (the printf flush trigger) would defeat the purpose. */
+void console_write(const char* buf, size_t len)
+{
+    if (!buf || len == 0) return;
+    unsigned long flags = console_lock();
+    if (buffer_pos > 0) {
+        arch_console_write_batch(output_buffer, buffer_pos);
+        buffer_pos = 0;
+    }
+    arch_console_write_batch(buf, len);
+    console_unlock(flags);
+}
+
 /* Flush output buffer */
 static void flush_buffer(void)
 {
@@ -389,6 +405,7 @@ done:
 void console_flush(void)
 {
     if (!console_state.initialized) return;
+    flush_buffer();  /* drain any pending console_printf bytes too */
     arch_console_flush();
 }
 
