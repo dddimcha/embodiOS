@@ -14,6 +14,9 @@
 #include <embodios/console.h>
 #include <embodios/mm.h>
 #include <embodios/kernel.h>
+#if defined(__x86_64__)
+#include <arch/x86_64/paging.h>
+#endif
 
 /* Helper for aligned allocation - uses page-aligned heap allocator */
 static inline void *kmalloc_aligned(size_t size, size_t alignment)
@@ -439,6 +442,18 @@ int e1000e_init(void)
 
     console_printf("e1000e: MMIO at 0x%lx, size %lu KB\n",
             e1000e_dev.mmio_phys, e1000e_dev.mmio_size / 1024);
+
+    /* Map the MMIO BAR into the identity map BEFORE touching it:
+     * PCI BARs live just below 4GB (e.g. 0xFEB80000), way past the
+     * boot-time 1GB identity map, so the first access would #PF. */
+#if defined(__x86_64__)
+    if (!arch_identity_map_mmio(e1000e_dev.mmio_phys, e1000e_dev.mmio_size)) {
+        console_printf("e1000e: Failed to map MMIO range 0x%lx..0x%lx\n",
+                e1000e_dev.mmio_phys,
+                e1000e_dev.mmio_phys + e1000e_dev.mmio_size);
+        return E1000E_ERR_INIT;
+    }
+#endif
 
     /* Enable PCI bus mastering and memory space */
     pci_enable_bus_master(pci_dev);

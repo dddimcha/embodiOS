@@ -19,6 +19,9 @@ void register_irq_handler(int irq, irq_handler_t handler);
 /* Timer functions */
 void timer_interrupt_handler(void);
 uint64_t get_timer_ticks(void);
+uint64_t timer_get_ticks(void);
+uint64_t timer_get_seconds(void);
+uint32_t timer_get_frequency(void);
 void timer_delay(uint64_t ms);
 
 #endif /* _EMBODIOS_INTERRUPT_H */

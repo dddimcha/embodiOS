@@ -329,15 +329,27 @@ void arch_early_init(void)
 /* Initialize interrupt system */
 void arch_interrupt_init(void)
 {
-    /* TODO: Initialize IDT (Interrupt Descriptor Table) */
-    /* TODO: Initialize PIC or APIC */
-    /* For now, just a stub */
+#ifdef __x86_64__
+    extern void idt_init(void);
+    extern void pic_init(void);
+
+    /* IDT: exceptions 0-31 -> panic dump, IRQs 32-47 -> PIC dispatch */
+    idt_init();
+
+    /* Remap the 8259 PIC to INT 0x20-0x2F and mask all IRQ lines.
+     * Lines are unmasked individually (timer in arch_enable_interrupts). */
+    pic_init();
+#endif
 }
 
 /* Enable interrupts */
 void arch_enable_interrupts(void)
 {
 #ifdef __x86_64__
+    extern void pic_unmask_irq(uint8_t irq);
+
+    /* Unmask the PIT timer line, then set IF */
+    pic_unmask_irq(0);
     __asm__ volatile("sti");
 #endif
 }

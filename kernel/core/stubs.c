@@ -3,6 +3,11 @@
 #include "embodios/ai.h"
 #include "embodios/block.h"
 #include "embodios/bpe_tokenizer.h"
+#include "embodios/chat_template.h"
+#include "embodios/cmd_storage.h"
+#include "embodios/cmd_smp.h"
+#include "embodios/cmd_power.h"
+#include "embodios/streaming_inference.h"
 #include "embodios/console.h"
 #include "embodios/cpu.h"
 #include "embodios/dma.h"
@@ -12,6 +17,7 @@
 #include "embodios/mm.h"
 #include "embodios/modbus.h"
 #include "embodios/ethercat.h"
+#include "embodios/exo.h"
 #include "embodios/benchmark.h"
 #include "embodios/model_registry.h"
 #include "embodios/pci.h"
@@ -19,6 +25,7 @@
 #include "embodios/tcpip.h"
 #include "embodios/tvm.h"
 #include "embodios/types.h"
+#include "embodios/ui.h"
 #include "embodios/virtio_blk.h"
 
 /* String function declarations */
@@ -51,6 +58,37 @@ static int parse_int(const char *s)
     }
 
     return result * sign;
+}
+
+/* Parse a non-negative decimal float ("0.8", "1", "1.25").
+ * Returns -1.0f on malformed input. */
+static float parse_simple_float(const char *s)
+{
+    while (*s == ' ') s++;
+    if (*s == '-') return -1.0f;  /* negative not allowed */
+
+    float whole = 0.0f;
+    bool any = false;
+    while (*s >= '0' && *s <= '9') {
+        whole = whole * 10.0f + (float)(*s - '0');
+        s++;
+        any = true;
+    }
+
+    float frac = 0.0f;
+    float scale = 1.0f;
+    if (*s == '.') {
+        s++;
+        while (*s >= '0' && *s <= '9') {
+            frac = frac * 10.0f + (float)(*s - '0');
+            scale *= 10.0f;
+            s++;
+            any = true;
+        }
+    }
+
+    if (!any) return -1.0f;
+    return whole + frac / scale;
 }
 
 /* Performance tracking for chat sessions */
@@ -104,6 +142,136 @@ void command_processor_init(struct embodios_model *model)
     }
 }
 
+/* Ensure the inference engine is up: auto-load the embedded GGUF model
+ * (same flow as the 'chat' command). Returns 0 on success, -1 if no
+ * model could be loaded. */
+static int ensure_inference_ready(void)
+{
+    extern int gguf_load_model(void *data, size_t size);
+    extern int gguf_model_embedded(void);
+    extern const uint8_t *get_embedded_gguf_model(size_t *out_size);
+    extern const struct gguf_model_arch *gguf_parser_get_arch(void);
+    extern int streaming_inference_init(bool preallocate);
+    extern bool streaming_inference_is_ready(void);
+
+    if (streaming_inference_is_ready())
+        return 0;
+
+    uint64_t t0 = chat_get_cycles();
+
+    if (!gguf_parser_get_arch()) {
+        if (!gguf_model_embedded())
+            return -1;
+        size_t gguf_size = 0;
+        const uint8_t *gguf_data = get_embedded_gguf_model(&gguf_size);
+        if (!gguf_data || gguf_size == 0)
+            return -1;
+        ui_info("Loading embedded model (%u MB)...",
+                (unsigned)(gguf_size / (1024*1024)));
+        console_flush();
+        if (gguf_load_model((void *)gguf_data, gguf_size) < 0) {
+            ui_err("Model load failed");
+            return -1;
+        }
+    }
+
+    if (!bpe_tokenizer_is_initialized()) {
+        ui_info("Initializing tokenizer...");
+        console_flush();
+        bpe_tokenizer_init();
+    }
+
+    if (!streaming_inference_is_ready()) {
+        ui_info("Initializing inference engine...");
+        console_flush();
+        if (streaming_inference_init(false) != 0) {
+            ui_err("Inference init failed");
+            return -1;
+        }
+    }
+
+    /* Resolve the chat template now so the "[CHAT] Detected format" line
+     * doesn't land in the middle of the first styled answer line. */
+    chat_template_resolve();
+
+    /* Compact readiness screen: name, quant, layers, vocab, load time */
+    {
+        uint64_t t1 = chat_get_cycles();
+        ui_model_ready(t1 >= t0 ? chat_cycles_to_us(t1 - t0) / 1000 : 0);
+    }
+    return 0;
+}
+
+/* Generate a single chat response: applies the chat template, tokenizes,
+ * generates, decodes and prints the answer text (no role prefix, no
+ * trailing newlines). Returns tokens generated. Updates chat perf stats.
+ * Caller must have run ensure_inference_ready() first. */
+static int chat_ask(const char *prompt)
+{
+    extern int streaming_inference_generate(const int *, int, int *, int);
+    extern const char *streaming_inference_get_token(int);
+
+    /* Apply chat template (ChatML/[INST]/GLM autodetect) */
+    char wrapped_prompt[768];
+    const char *eff_prompt = prompt;
+    if (chat_template_wrap(prompt, wrapped_prompt, sizeof(wrapped_prompt)) > 0) {
+        eff_prompt = wrapped_prompt;
+        int stop_tok = chat_template_stop_token();
+        if (stop_tok >= 0) {
+            streaming_inference_set_eos(stop_tok);
+        }
+        /* GLM chat: <|assistant|> also halts generation */
+        if (chat_template_resolve() == CHAT_FORMAT_GLM) {
+            extern void streaming_inference_add_stop_token(int);
+            int t = chat_template_find_token("<|assistant|>");
+            if (t >= 0) streaming_inference_add_stop_token(t);
+        }
+    }
+
+    /* Tokenize */
+    int prompt_tokens[256];
+    int prompt_len = 0;
+    if (bpe_tokenizer_is_initialized()) {
+        prompt_len = bpe_tokenizer_encode(eff_prompt, prompt_tokens, 256, false, false);
+    }
+    if (prompt_len <= 0) {
+        prompt_tokens[0] = 1;
+        prompt_len = 1;
+    }
+
+    /* Generate with timing */
+    uint64_t start = chat_get_cycles();
+
+    int output_tokens[128];
+    int generated = streaming_inference_generate(prompt_tokens, prompt_len, output_tokens, 50);
+
+    uint64_t end = chat_get_cycles();
+    uint64_t elapsed_us = chat_cycles_to_us(end - start);
+
+    /* Decode and print answer text */
+    if (generated > 0) {
+        char decoded[512];
+        int len = bpe_tokenizer_decode(output_tokens, generated, decoded, sizeof(decoded));
+        if (len > 0) {
+            console_printf("%s", decoded);
+        } else {
+            for (int i = 0; i < generated; i++) {
+                const char *tok = streaming_inference_get_token(output_tokens[i]);
+                if (tok) console_printf("%s", tok);
+            }
+        }
+    } else {
+        console_printf("(no response)");
+    }
+
+    /* Update perf stats */
+    g_chat_perf.last_prompt_tokens = prompt_len;
+    g_chat_perf.last_generated_tokens = generated;
+    g_chat_perf.last_total_us = elapsed_us;
+    g_chat_perf.valid = true;
+    return generated;
+}
+
 /* Enhanced command processing */
 void process_command(const char *command)
 {
@@ -114,30 +282,79 @@ void process_command(const char *command)
 
     /* Basic built-in commands */
     if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
+        extern const char* kernel_version;
         console_printf("\n");
-        console_printf(" ╔════════════════════════════════════════╗\n");
-        console_printf(" ║         EMBODIOS Commands              ║\n");
-        console_printf(" ╚════════════════════════════════════════╝\n");
-        console_printf("\n");
-        console_printf(" [AI Chat]\n");
-        console_printf("   talk             Enter interactive chat mode\n");
-        console_printf("   chat <message>   Single message chat\n");
-        console_printf("   perf             Show last chat performance\n");
-        console_printf("   status           Show AI model status\n");
-        console_printf("\n");
-        console_printf(" [System]\n");
-        console_printf("   mem              Show memory usage\n");
-        console_printf("   lspci            List PCI devices\n");
-        console_printf("   reboot           Reboot system\n");
-        console_printf("\n");
-        console_printf(" Type 'help all' for advanced commands.\n");
-        console_printf(" Type 'help ai' for AI-specific commands.\n");
-        console_printf("\n");
+        char title[64];
+        {
+            /* "EMBODIOS vX.Y.Z — Commands" */
+            const char* v = kernel_version;
+            int i = 0;
+            const char* p = "EMBODIOS ";
+            while (*p && i < 60) title[i++] = *p++;
+            p = v;
+            while (*p && i < 60) title[i++] = *p++;
+            p = " — Commands";
+            while (*p && i < 60) title[i++] = *p++;
+            title[i] = '\0';
+        }
+        ui_box_top(title);
+        console_printf(" %s│%s %s[AI]%s\n", ui_c(UI_DIM), ui_c(UI_RESET),
+                       ui_c(UI_CYAN), ui_c(UI_RESET));
+        console_printf(" %s│%s   %schat <msg>%s   Single message chat\n",
+                       ui_c(UI_DIM), ui_c(UI_RESET), ui_c(UI_BOLD), ui_c(UI_RESET));
+        console_printf(" %s│%s   %stalk%s         Interactive chat session\n",
+                       ui_c(UI_DIM), ui_c(UI_RESET), ui_c(UI_BOLD), ui_c(UI_RESET));
+        console_printf(" %s│%s   %sdemo%s         Built-in demo prompts\n",
+                       ui_c(UI_DIM), ui_c(UI_RESET), ui_c(UI_BOLD), ui_c(UI_RESET));
+        console_printf(" %s│%s   temp / topp    Sampling controls\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   chatformat     Chat template [auto|off|chatml|...]\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   perf / status  Chat stats and AI status\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s %s[System]%s\n", ui_c(UI_DIM), ui_c(UI_RESET),
+                       ui_c(UI_CYAN), ui_c(UI_RESET));
+        console_printf(" %s│%s   version / mem  Build info, memory usage\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   uptime / tasktest  Ticks+seconds, preemption demo\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   color on|off   Toggle ANSI colors\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   lspci / power    Hardware list, power status\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   reboot / shutdown  Reset or ACPI poweroff\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s %s[Network / exo]%s\n", ui_c(UI_DIM), ui_c(UI_RESET),
+                       ui_c(UI_CYAN), ui_c(UI_RESET));
+        console_printf(" %s│%s   exo / exonodes Distributed node + ring table\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   exoshard       Assigned model shard\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   exoserve [p]   OpenAI-compatible API\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s %s[Tests]%s\n", ui_c(UI_DIM), ui_c(UI_RESET),
+                       ui_c(UI_CYAN), ui_c(UI_RESET));
+        console_printf(" %s│%s   memtest / locktest / quanttest / benchmark\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        ui_box_bottom();
+        console_printf(" %sType 'help all' for advanced, 'help ai' for AI details.%s\n\n",
+                       ui_c(UI_DIM), ui_c(UI_RESET));
+    } else if (strcmp(command, "color") == 0 || strncmp(command, "color ", 6) == 0) {
+        /* ANSI color toggle: color [on|off] */
+        const char* arg = command + 5;
+        while (*arg == ' ') arg++;
+
+        if (*arg == '\0') {
+            console_printf(" Color: %s\n Usage: color [on|off]\n\n",
+                           ui_color_enabled ? "on" : "off");
+        } else if (strcmp(arg, "on") == 0) {
+            ui_set_color(1);
+            ui_ok("Color enabled");
+            console_printf("\n");
+        } else if (strcmp(arg, "off") == 0) {
+            ui_set_color(0);
+            ui_ok("Color disabled");
+            console_printf("\n");
+        } else {
+            ui_warn("Unknown value (use: color on|off)");
+            console_printf("\n");
+        }
     } else if (strcmp(command, "help ai") == 0) {
         console_printf("\n");
         console_printf(" [Interactive Chat]\n");
         console_printf("   talk             Enter chat mode (type 'exit' to leave)\n");
         console_printf("   chat <msg>       Single message (for scripting)\n");
+        console_printf("   chatformat       Chat template [auto|off|chatml|llama2|glm]\n");
+        console_printf("   temp [0..2]      Sampling temperature (0 = greedy)\n");
+        console_printf("   topp [0..1]      Nucleus (top-p) sampling threshold\n");
         console_printf("\n");
         console_printf(" [Performance]\n");
         console_printf("   perf             Show last chat timing stats\n");
@@ -183,12 +400,19 @@ void process_command(const char *command)
         console_printf("   blkinfo/blkdevs    Block device info\n");
         console_printf("   blktest/blkperf    Block device tests\n");
         console_printf("   blkread <sec> [n]  Read raw sectors\n");
+        console_printf("   fls/fsave/fload/frm  embfs files (df, fformat, fstest)\n");
         console_printf("   loadmodel          Load model from disk\n");
         console_printf("\n");
         console_printf(" Network:\n");
         console_printf("   net/netinfo        Network configuration\n");
         console_printf("   nettest            Network self-tests\n");
         console_printf("   ping <ip>          Ping remote host\n");
+        console_printf("\n");
+        console_printf(" Distributed inference (exo):\n");
+        console_printf("   exo [id] [port]    Init node + show status\n");
+        console_printf("   exonodes           Discovered ring nodes table\n");
+        console_printf("   exoshard [m] [n]   Show/assign layer shard\n");
+        console_printf("   exoserve [p|stop]  OpenAI API server start/stop\n");
         console_printf("\n");
         console_printf(" Industrial:\n");
         console_printf("   modbustest         Modbus TCP test\n");
@@ -239,6 +463,16 @@ void process_command(const char *command)
             console_printf("   Inference:       Ready\n");
         } else {
             console_printf("   Inference:       Not initialized\n");
+        }
+
+        /* Sampling parameters */
+        {
+            float temp = streaming_inference_get_temperature();
+            float topp = streaming_inference_get_top_p();
+            console_printf("   Sampling:        temp=%d.%02d%s top_p=%d.%02d\n",
+                (int)temp, (int)(temp * 100) % 100,
+                temp <= 0.05f ? " (greedy)" : "",
+                (int)topp, (int)(topp * 100) % 100);
         }
 
         console_printf("\n");
@@ -308,42 +542,11 @@ void process_command(const char *command)
         console_printf(" Commands: 'exit' to leave, 'perf' for stats\n");
         console_printf("\n");
 
-        /* Auto-initialize everything */
-        if (!gguf_parser_get_arch()) {
-            if (!gguf_model_embedded()) {
-                console_printf(" Error: No AI model available.\n\n");
-                return;
-            }
-            size_t gguf_size = 0;
-            const uint8_t *gguf_data = get_embedded_gguf_model(&gguf_size);
-            if (!gguf_data || gguf_size == 0) {
-                console_printf(" Error: Failed to access model data.\n\n");
-                return;
-            }
-            console_printf(" Loading model (%zu MB)...", gguf_size / (1024*1024));
-            console_flush();
-            if (gguf_load_model((void *)gguf_data, gguf_size) < 0) {
-                console_printf(" failed.\n\n");
-                return;
-            }
-            console_printf(" done.\n");
-        }
-
-        if (!bpe_tokenizer_is_initialized()) {
-            console_printf(" Initializing tokenizer...");
-            console_flush();
-            bpe_tokenizer_init();
-            console_printf(" done.\n");
-        }
-
-        if (!streaming_inference_is_ready()) {
-            console_printf(" Initializing inference engine...");
-            console_flush();
-            if (streaming_inference_init(false) != 0) {
-                console_printf(" failed.\n\n");
-                return;
-            }
-            console_printf(" done.\n");
+        /* Auto-initialize everything (model, tokenizer, engine) */
+        if (ensure_inference_ready() != 0) {
+            ui_err("No AI model available.");
+            console_printf("\n");
+            return;
         }
 
         console_printf("\n Ready! Start chatting.\n\n");
@@ -356,7 +559,7 @@ void process_command(const char *command)
         /* Chat loop */
         char input_buf[256];
         while (1) {
-            console_printf("You> ");
+            console_printf("%syou>%s ", ui_c(UI_YELLOW), ui_c(UI_RESET));
             console_readline(input_buf, sizeof(input_buf));
 
             /* Check for exit commands */
@@ -382,11 +585,29 @@ void process_command(const char *command)
             /* Skip empty input */
             if (input_buf[0] == '\0') continue;
 
+            /* Apply chat template (ChatML/[INST]/GLM autodetect) */
+            char wrapped_input[768];
+            const char *eff_input = input_buf;
+            if (chat_template_wrap(input_buf, wrapped_input, sizeof(wrapped_input)) > 0) {
+                eff_input = wrapped_input;
+                int stop_tok = chat_template_stop_token();
+                if (stop_tok >= 0) {
+                    streaming_inference_set_eos(stop_tok);
+                }
+                /* GLM chat stops on <|user|> (set above) but <|assistant|>
+                 * must also halt generation (upstream eos list: 151329/151336/151338) */
+                if (chat_template_resolve() == CHAT_FORMAT_GLM) {
+                    extern void streaming_inference_add_stop_token(int);
+                    int t = chat_template_find_token("<|assistant|>");
+                    if (t >= 0) streaming_inference_add_stop_token(t);
+                }
+            }
+
             /* Tokenize */
             int prompt_tokens[256];
             int prompt_len = 0;
             if (bpe_tokenizer_is_initialized()) {
-                prompt_len = bpe_tokenizer_encode(input_buf, prompt_tokens, 256, false, false);
+                prompt_len = bpe_tokenizer_encode(eff_input, prompt_tokens, 256, false, false);
             }
             if (prompt_len <= 0) {
                 prompt_tokens[0] = 1;
@@ -402,8 +623,8 @@ void process_command(const char *command)
             uint64_t end = chat_get_cycles();
             uint64_t elapsed_us = chat_cycles_to_us(end - start);
 
-            /* Display response */
-            console_printf("\nAI>  ");
+            /* Display response (assistant role in green) */
+            console_printf("\n%sembodios>%s ", ui_c(UI_GREEN), ui_c(UI_RESET));
             if (generated > 0) {
                 char decoded[512];
                 int len = bpe_tokenizer_decode(output_tokens, generated, decoded, sizeof(decoded));
@@ -442,6 +663,111 @@ void process_command(const char *command)
         }
         console_printf(" ────────────────────────────────────────\n\n");
 
+    } else if (strncmp(command, "dbglogits", 9) == 0) {
+        /* Debug: forward pass + top-k logits dump.
+         * Usage: dbglogits [tok0 tok1 ...]  (default: token 1) */
+        extern int gguf_load_model(void *data, size_t size);
+        extern int gguf_model_embedded(void);
+        extern const uint8_t *get_embedded_gguf_model(size_t *out_size);
+        extern const struct gguf_model_arch *gguf_parser_get_arch(void);
+        extern void streaming_inference_debug_logits(const int *, int, int);
+
+        if (ensure_inference_ready() != 0) {
+            console_printf(" Error: No AI model available.\n\n");
+            return;
+        }
+
+        int toks[32];
+        int n = 0;
+        const char *arg = command + 9;
+        while (*arg && n < 32) {
+            while (*arg == ' ') arg++;
+            if (*arg < '0' || *arg > '9') break;
+            int v = 0;
+            while (*arg >= '0' && *arg <= '9') {
+                v = v * 10 + (*arg - '0');
+                arg++;
+            }
+            toks[n++] = v;
+        }
+        if (n == 0) {
+            toks[0] = 1;
+            n = 1;
+        }
+        streaming_inference_debug_logits(toks, n, 8);
+        console_printf("\n");
+
+    } else if (strncmp(command, "chatformat", 10) == 0) {
+        /* Chat template format selection */
+        const char *arg = command + 10;
+        while (*arg == ' ') arg++;
+
+        if (*arg == '\0') {
+            console_printf(" Chat format: %s (active: %s)\n",
+                chat_template_format_name(chat_template_get_config()),
+                chat_template_format_name(chat_template_resolve()));
+            console_printf(" Usage: chatformat [auto|off|chatml|llama2|glm]\n\n");
+        } else {
+            int fmt = chat_template_parse_name(arg);
+            if (fmt < 0) {
+                console_printf(" Unknown format '%s'. Use: auto|off|chatml|llama2|glm\n\n", arg);
+            } else {
+                chat_template_set_format((chat_format_t)fmt);
+                cmd_storage_config_autosave();
+                console_printf(" Chat format set to: %s\n\n",
+                    chat_template_format_name((chat_format_t)fmt));
+            }
+        }
+
+    } else if (strncmp(command, "temp", 4) == 0 &&
+               (command[4] == '\0' || command[4] == ' ')) {
+        /* Sampling temperature control: temp [0.0..2.0], 0 = greedy */
+        const char *arg = command + 4;
+        while (*arg == ' ') arg++;
+
+        if (*arg == '\0') {
+            console_printf(" Temperature: %d.%02d (0 = greedy)\n",
+                (int)streaming_inference_get_temperature(),
+                (int)(streaming_inference_get_temperature() * 100) % 100);
+            console_printf(" Usage: temp [0.0..2.0]\n\n");
+        } else {
+            float t = parse_simple_float(arg);
+            if (t < 0.0f) {
+                console_printf(" Invalid value '%s'. Use: temp [0.0..2.0]\n\n", arg);
+            } else {
+                streaming_inference_set_temperature(t);
+                cmd_storage_config_autosave();
+                console_printf(" Temperature set to: %d.%02d%s\n\n",
+                    (int)streaming_inference_get_temperature(),
+                    (int)(streaming_inference_get_temperature() * 100) % 100,
+                    streaming_inference_get_temperature() <= 0.05f ? " (greedy)" : "");
+            }
+        }
+
+    } else if (strncmp(command, "topp", 4) == 0 &&
+               (command[4] == '\0' || command[4] == ' ')) {
+        /* Nucleus (top-p) sampling control: topp [0.0..1.0] */
+        const char *arg = command + 4;
+        while (*arg == ' ') arg++;
+
+        if (*arg == '\0') {
+            console_printf(" Top-p (nucleus): %d.%02d\n",
+                (int)streaming_inference_get_top_p(),
+                (int)(streaming_inference_get_top_p() * 100) % 100);
+            console_printf(" Usage: topp [0.0..1.0]\n\n");
+        } else {
+            float p = parse_simple_float(arg);
+            if (p < 0.0f) {
+                console_printf(" Invalid value '%s'. Use: topp [0.0..1.0]\n\n", arg);
+            } else {
+                streaming_inference_set_top_p(p);
+                cmd_storage_config_autosave();
+                console_printf(" Top-p set to: %d.%02d\n\n",
+                    (int)streaming_inference_get_top_p(),
+                    (int)(streaming_inference_get_top_p() * 100) % 100);
+            }
+        }
+
     } else if (strncmp(command, "chat ", 5) == 0 || strcmp(command, "chat") == 0) {
         /* Single message chat command */
         extern int streaming_inference_init(bool preallocate);
@@ -466,84 +792,52 @@ void process_command(const char *command)
         }
 
         /* Auto-initialize (silent if already ready) */
-        if (!gguf_parser_get_arch()) {
-            if (!gguf_model_embedded()) {
-                console_printf(" Error: No AI model available.\n\n");
-                return;
-            }
-            size_t gguf_size = 0;
-            const uint8_t *gguf_data = get_embedded_gguf_model(&gguf_size);
-            if (!gguf_data || gguf_size == 0) {
-                console_printf(" Error: Failed to access model.\n\n");
-                return;
-            }
-            console_printf(" Loading model...");
-            console_flush();
-            if (gguf_load_model((void *)gguf_data, gguf_size) < 0) {
-                console_printf(" failed.\n\n");
-                return;
-            }
-            console_printf(" OK\n");
+        if (ensure_inference_ready() != 0) {
+            ui_err("No AI model available.");
+            console_printf("\n");
+            return;
         }
 
-        if (!bpe_tokenizer_is_initialized()) {
-            bpe_tokenizer_init();
+        /* Display response with colored roles */
+        console_printf("\n%syou>%s %s%s%s\n",
+            ui_c(UI_YELLOW), ui_c(UI_RESET),
+            ui_c(UI_DIM), prompt, ui_c(UI_RESET));
+        console_printf("%sembodios>%s ", ui_c(UI_GREEN), ui_c(UI_RESET));
+        chat_ask(prompt);
+        console_printf("\n\n");
+    } else if (strcmp(command, "demo") == 0) {
+        /* Built-in demo: a few showcase prompts with pretty framing */
+        static const char* demo_prompts[] = {
+            "What is the capital of France?",
+            "Write a haiku about silicon",
+            "2+2=?",
+        };
+        const int demo_count = 3;
+
+        if (ensure_inference_ready() != 0) {
+            console_printf("\n");
+            ui_warn("Demo needs an AI model, but none is embedded.");
+            console_printf("   Rebuild with: make GGUF_MODEL=/path/to/model.gguf\n\n");
+            return;
         }
 
-        if (!streaming_inference_is_ready()) {
-            console_printf(" Initializing...");
-            console_flush();
-            if (streaming_inference_init(false) != 0) {
-                console_printf(" failed.\n\n");
-                return;
-            }
-            console_printf(" OK\n");
-        }
-
-        /* Tokenize */
-        int prompt_tokens[256];
-        int prompt_len = 0;
-        if (bpe_tokenizer_is_initialized()) {
-            prompt_len = bpe_tokenizer_encode(prompt, prompt_tokens, 256, false, false);
-        }
-        if (prompt_len <= 0) {
-            prompt_tokens[0] = 1;
-            prompt_len = 1;
-        }
-
-        /* Generate with timing */
-        uint64_t start = chat_get_cycles();
-
-        int output_tokens[128];
-        int generated = streaming_inference_generate(prompt_tokens, prompt_len, output_tokens, 50);
-
-        uint64_t end = chat_get_cycles();
-        uint64_t elapsed_us = chat_cycles_to_us(end - start);
-
-        /* Display response */
         console_printf("\n");
-        if (generated > 0) {
-            char decoded[512];
-            int len = bpe_tokenizer_decode(output_tokens, generated, decoded, sizeof(decoded));
-            if (len > 0) {
-                console_printf("%s\n", decoded);
-            } else {
-                for (int i = 0; i < generated; i++) {
-                    const char *tok = streaming_inference_get_token(output_tokens[i]);
-                    if (tok) console_printf("%s", tok);
-                }
-                console_printf("\n");
+        ui_box_top("DEMO");
+        for (int i = 0; i < demo_count; i++) {
+            console_printf(" %s│%s %sQ%d:%s %s\n",
+                           ui_c(UI_DIM), ui_c(UI_RESET),
+                           ui_c(UI_YELLOW), i + 1, ui_c(UI_RESET),
+                           demo_prompts[i]);
+            console_printf(" %s│%s %sA:%s ", ui_c(UI_DIM), ui_c(UI_RESET),
+                           ui_c(UI_GREEN), ui_c(UI_RESET));
+            chat_ask(demo_prompts[i]);
+            console_printf("\n");
+            if (i + 1 < demo_count) {
+                console_printf(" %s│%s\n", ui_c(UI_DIM), ui_c(UI_RESET));
             }
-        } else {
-            console_printf("(no response)\n");
         }
+        ui_box_bottom();
         console_printf("\n");
-
-        /* Update perf stats */
-        g_chat_perf.last_prompt_tokens = prompt_len;
-        g_chat_perf.last_generated_tokens = generated;
-        g_chat_perf.last_total_us = elapsed_us;
-        g_chat_perf.valid = true;
     } else if (strncmp(command, "ai ", 3) == 0) {
         /* TinyStories interactive inference */
         const char *prompt = command + 3;
@@ -659,7 +953,9 @@ void process_command(const char *command)
 
         console_printf("\n=== Memory Test Complete ===\n");
     } else if (strcmp(command, "tasks") == 0) {
-        console_printf("Task scheduler not fully implemented\n");
+        scheduler_stats();
+    } else if (strcmp(command, "tasktest") == 0) {
+        scheduler_tasktest();
     } else if (strcmp(command, "models") == 0) {
         /* List all loaded models */
         model_registry_print_status();
@@ -1358,15 +1654,9 @@ void process_command(const char *command)
         #undef NET_ERR_UNREACHABLE
     } else if (strncmp(command, "deterministic ", 14) == 0 || strcmp(command, "deterministic") == 0) {
         /* Deterministic inference timing mode control */
-        extern int streaming_inference_set_deterministic(const void* config);
-        extern int streaming_inference_get_deterministic(void* config);
+        /* prototypes come from embodios/streaming_inference.h */
 
-        /* deterministic_config_t structure defined in streaming_inference.h */
-        struct {
-            bool interrupt_disable;
-            bool preallocate_buffers;
-            uint64_t max_latency_us;
-        } config;
+        deterministic_config_t config;
 
         const char *subcmd = command + 13; /* Skip "deterministic" */
         while (*subcmd == ' ') subcmd++; /* Skip whitespace */
@@ -1429,35 +1719,10 @@ void process_command(const char *command)
             console_printf("for industrial/robotics applications.\n");
         }
     } else if (strcmp(command, "modbustest") == 0) {
-        /* Modbus TCP integration test over TCP/IP stack */
-        extern modbus_ctx_t* modbus_new_tcp(uint32_t ip, uint16_t port, uint8_t unit_id);
-        extern void modbus_free(modbus_ctx_t *ctx);
-        extern int modbus_server_init(modbus_ctx_t *ctx, uint16_t port);
-        extern int modbus_server_start(modbus_ctx_t *ctx);
-        extern int modbus_server_stop(modbus_ctx_t *ctx);
-        extern int modbus_server_process(modbus_ctx_t *ctx);
-        extern int modbus_server_set_data(modbus_ctx_t *ctx, uint16_t *holding_regs, uint16_t num_holding,
-                                          uint16_t *input_regs, uint16_t num_input,
-                                          uint8_t *coils, uint16_t num_coils,
-                                          uint8_t *discrete_inputs, uint16_t num_discrete);
-        extern void modbus_get_stats(modbus_ctx_t *ctx, modbus_stats_t *stats);
+        /* Modbus TCP integration test over TCP/IP stack
+         * (prototypes and types come from embodios/modbus.h) */
         extern void tcpip_print_info(void);
         extern int tcpip_poll(void);
-
-        typedef struct modbus_ctx modbus_ctx_t;
-        typedef struct modbus_stats {
-            uint64_t requests_sent;
-            uint64_t responses_received;
-            uint64_t requests_received;
-            uint64_t responses_sent;
-            uint64_t exceptions_sent;
-            uint64_t exceptions_received;
-            uint64_t timeouts;
-            uint64_t crc_errors;
-            uint64_t invalid_responses;
-            uint64_t bytes_sent;
-            uint64_t bytes_received;
-        } modbus_stats_t;
 
         console_printf("\n=== Modbus TCP Integration Test ===\n\n");
         console_printf("This test demonstrates Modbus TCP protocol over the TCP/IP stack.\n");
@@ -2054,18 +2319,232 @@ skip_ethercat:
         #endif
 
         console_printf("\n=== Test Complete ===\n\n");
+    } else if (cmd_power_dispatch(command)) {
+        /* Power commands (shutdown/poweroff/halt/reboot/power) —
+         * handled in core/cmd_power.c */
     } else if (strcmp(command, "reboot") == 0) {
+        /* Kept as a last-resort alias; cmd_power_dispatch handles reboot. */
         console_printf("Rebooting...\n");
         arch_reboot();
     } else if (strcmp(command, "clear") == 0 || strcmp(command, "cls") == 0) {
         /* Clear screen using ANSI escape codes (works with serial terminals) */
         console_printf("\033[2J\033[H");
+    } else if (strcmp(command, "exonodes") == 0) {
+        /* Таблица пиров exo-кольца */
+        if (!exo_is_running()) {
+            console_printf("exo: not running (start with 'exo')\n");
+        } else {
+            int n = exo_node_count();
+            console_printf("\nexo ring: %d node(s)\n", n);
+            console_printf(" #  node_id            ip              ctrl   RAM(MB)  model\n");
+            for (int i = 0; i < n; i++) {
+                const exo_node_t *nd = exo_node_get(i);
+                if (!nd) continue;
+                char ip[16];
+                ip_to_string(nd->ip, ip, sizeof(ip));
+                console_printf(" %d  %-16s %-15s %-6u %-8u %s%s\n",
+                               i, nd->node_id, ip, (unsigned)nd->ctrl_port,
+                               (unsigned)(nd->ram_free >> 20), nd->model_id,
+                               nd->is_local ? " (local)" : "");
+            }
+            console_printf("\n");
+        }
+    } else if (strncmp(command, "exoshard", 8) == 0) {
+        /* exoshard — показать назначенный шард;
+         * exoshard <model> <n_layers> — назначить (ring memory weighted) */
+        if (!exo_is_running()) {
+            console_printf("Node not started. Run 'exo' first.\n");
+            return;
+        }
+        const char *args = command + 8;
+        while (*args == ' ') args++;
+
+        if (*args != '\0') {
+            char model[EXO_MODEL_ID_LEN];
+            int mi = 0;
+            while (*args && *args != ' ' && mi < EXO_MODEL_ID_LEN - 1)
+                model[mi++] = *args++;
+            model[mi] = '\0';
+            while (*args == ' ') args++;
+            int n_layers = parse_int(args);
+            if (n_layers <= 0) {
+                console_printf("Usage: exoshard <model_id> <n_layers> [even]\n");
+            } else {
+                while (*args && *args != ' ') args++;
+                while (*args == ' ') args++;
+                /* 'even' — поровну (детерминированно, не зависит от
+                 * погрешности оценок RAM пиров); иначе weighted по RAM */
+                exo_shard_strategy_t st =
+                    (strncmp(args, "even", 4) == 0)
+                        ? EXO_STRATEGY_RING_EVEN
+                        : EXO_STRATEGY_RING_MEMORY_WEIGHTED;
+                int ret = exo_shard_assign(model, (uint32_t)n_layers, st);
+                if (ret != EXO_OK)
+                    console_printf("exo: shard assign failed (%d)\n", ret);
+            }
+        } else {
+            const exo_shard_t *sh = exo_shard_local();
+            if (!sh) {
+                console_printf("exo: no shard assigned "
+                               "(use 'exoshard <model> <n_layers>')\n");
+            } else {
+                console_printf("local shard: model '%s' layers %u..%u of %u, "
+                               "ring %u/%u\n",
+                               sh->model_id, sh->start_layer, sh->end_layer,
+                               sh->n_layers, sh->ring_index, sh->ring_size);
+            }
+        }
+    } else if (strncmp(command, "exoserve", 8) == 0) {
+        /* exoserve [port] — старт OpenAI API; exoserve stop — останов */
+        const char *args = command + 8;
+        while (*args == ' ') args++;
+
+        if (strcmp(args, "stop") == 0) {
+            exo_serve_stop();
+        } else if (exo_server_running()) {
+            console_printf("exo: OpenAI API already running on :%u "
+                           "('exoserve stop' to stop)\n",
+                           (unsigned)exo_server_port());
+        } else {
+            int port = (*args) ? parse_int(args) : 0;
+            if (port < 0 || port > 65535) {
+                console_printf("Usage: exoserve [port|stop]\n");
+            } else {
+                /* Inference engine not ready? Auto-load the embedded GGUF
+                 * (as 'chat' does) so the API answers immediately. */
+                if (ensure_inference_ready() != 0) {
+                    console_printf("exo: inference engine not ready — no embedded "
+                                   "model; load one with 'model load' or rebuild "
+                                   "with GGUF_MODEL=<file.gguf>\n");
+                    return;
+                }
+                int ret = exo_serve_openai((uint16_t)port);
+                if (ret != EXO_OK)
+                    console_printf("exo: server start failed (%d)\n", ret);
+            }
+        }
+    } else if (strncmp(command, "exopeer ", 8) == 0) {
+        /* exopeer <node_id> <ip> <ctrl_port> <ram_mb> — статический пир
+         * (для транспортов без broadcast, напр. QEMU user-net + hostfwd) */
+        const char *args = command + 8;
+        while (*args == ' ') args++;
+        char pid[EXO_NODE_ID_LEN] = {0}, ip[20] = {0};
+        int pi = 0, ii = 0;
+        while (*args && *args != ' ' && pi < EXO_NODE_ID_LEN - 1)
+            pid[pi++] = *args++;
+        while (*args == ' ') args++;
+        while (*args && *args != ' ' && ii < 19)
+            ip[ii++] = *args++;
+        while (*args == ' ') args++;
+        int port = parse_int(args);
+        while (*args && *args != ' ') args++;
+        while (*args == ' ') args++;
+        int ram_mb = parse_int(args);
+        if (!exo_is_running()) {
+            console_printf("exo: not running (start with 'exo')\n");
+        } else if (pid[0] == '\0' || ip[0] == '\0' || port <= 0 || ram_mb <= 0) {
+            console_printf("Usage: exopeer <node_id> <ip> <ctrl_port> <ram_mb>\n");
+        } else {
+            int ret = exo_discovery_add_peer(pid, ip_from_string(ip),
+                                             (uint16_t)port, (uint64_t)ram_mb);
+            if (ret != EXO_OK)
+                console_printf("exo: add peer failed (%d)\n", ret);
+        }
+    } else if (strncmp(command, "setip ", 6) == 0) {
+        /* setip <ip> [netmask] [gateway] — статическая конфигурация IPv4
+         * (нужна для point-to-point линков между гостями QEMU, где обе
+         * ноды по умолчанию получают 10.0.2.15) */
+        const char *args = command + 6;
+        while (*args == ' ') args++;
+        char ip[20] = {0}, mask[20] = {0}, gw[20] = {0};
+        const char *fields[3] = { ip, mask, gw };
+        int fi = 0, ci = 0;
+        for (const char *p = args; ; p++) {
+            if (*p && *p != ' ' && fi < 3 && ci < 19) {
+                ((char *)fields[fi])[ci++] = *p;
+            } else {
+                if (ci > 0) { ((char *)fields[fi])[ci] = '\0'; fi++; ci = 0; }
+                if (!*p || *p == '\n') break;
+            }
+        }
+        if (ip[0] == '\0') {
+            console_printf("Usage: setip <ip> [netmask] [gateway]\n");
+        } else {
+            tcpip_set_ip(ip, mask[0] ? mask : NULL, gw[0] ? gw : NULL);
+            uint32_t cur = 0;
+            if (tcpip_get_local_ip(&cur) == NET_OK) {
+                char s[16];
+                ip_to_string(cur, s, sizeof(s));
+                console_printf("tcpip: IP set to %s\n", s);
+            }
+        }
+    } else if (strcmp(command, "exo") == 0 || strncmp(command, "exo ", 4) == 0) {
+        /* exo [node_id] [ctrl_port] — init + статус ноды */
+        if (!exo_is_running()) {
+            const char *args = command + 3;
+            while (*args == ' ') args++;
+
+            char node_id[EXO_NODE_ID_LEN];
+            node_id[0] = '\0';
+            int ni = 0;
+            while (*args && *args != ' ' && ni < EXO_NODE_ID_LEN - 1)
+                node_id[ni++] = *args++;
+            node_id[ni] = '\0';
+            while (*args == ' ') args++;
+            int port = (*args) ? parse_int(args) : 0;
+
+            int ret = exo_init(node_id[0] ? node_id : NULL, (uint16_t)port);
+            if (ret != EXO_OK) {
+                console_printf("exo: init failed (%d) — "
+                               "is TCP/IP up? (see 'net')\n", ret);
+            }
+        }
+
+        if (exo_is_running()) {
+            const exo_node_t *self = NULL;
+            for (int i = 0; i < exo_node_count(); i++) {
+                const exo_node_t *nd = exo_node_get(i);
+                if (nd && nd->is_local) { self = nd; break; }
+            }
+            char ip[16] = "?.?.?.?";
+            if (self && self->ip) ip_to_string(self->ip, ip, sizeof(ip));
+            console_printf("\nexo node: %s\n", self ? self->node_id : "?");
+            console_printf("  ip=%s  ctrl=tcp/%u  api=%s  discovery=udp/%u\n",
+                           ip, self ? (unsigned)self->ctrl_port : 0,
+                           exo_server_running() ? "on" : "off",
+                           EXO_DISCOVERY_PORT);
+            console_printf("  nodes=%d  shard=%s\n\n", exo_node_count(),
+                           exo_shard_local() ? "assigned" : "none");
+        }
+    } else if (cmd_storage_dispatch(command)) {
+        /* Storage commands (fls/fsave/fload/frm/df/fformat/fstest) —
+         * handled in core/cmd_storage.c */
+    } else if (cmd_smp_dispatch(command)) {
+        /* SMP commands (cpus/smpwork) — handled in core/cmd_smp.c */
+    } else if (strcmp(command, "uptime") == 0) {
+        uint64_t ticks = timer_get_ticks();
+        uint32_t freq = timer_get_frequency();
+        uint64_t secs = freq ? (ticks / freq) : 0;
+        console_printf("up %llu s (%llu ticks @ %u Hz)%s\n",
+                       (unsigned long long)secs,
+                       (unsigned long long)ticks,
+                       freq,
+                       kernel_interrupts_enabled() ? "" : " [polling mode]");
     } else if (strcmp(command, "version") == 0 || strcmp(command, "ver") == 0) {
         extern const char* kernel_version;
         extern const char* kernel_build;
         console_printf("\n");
-        console_printf(" EMBODIOS %s\n", kernel_version);
-        console_printf(" Build: %s\n\n", kernel_build);
+        console_printf(" %s%s███████╗%s %sEMBODIOS %s%s\n",
+                       ui_c(UI_CYAN), ui_c(UI_BOLD), ui_c(UI_RESET),
+                       ui_c(UI_BOLD), kernel_version, ui_c(UI_RESET));
+        console_printf(" %s%s██╔══██║%s codename %sPragma%s\n",
+                       ui_c(UI_CYAN), ui_c(UI_BOLD), ui_c(UI_RESET),
+                       ui_c(UI_YELLOW), ui_c(UI_RESET));
+        console_printf(" %s%s███████║%s %sOne binary. Any machine. No OS.%s\n",
+                       ui_c(UI_CYAN), ui_c(UI_BOLD), ui_c(UI_RESET),
+                       ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s%s╚══════╝%s Build: %s\n\n",
+                       ui_c(UI_CYAN), ui_c(UI_BOLD), ui_c(UI_RESET), kernel_build);
     } else {
         /* Unknown command - provide helpful suggestions */
         console_printf("\n Unknown command: '%s'\n", command);
@@ -2088,23 +2567,6 @@ skip_ethercat:
 }
 
 /* Note: transformer_init and transformer_reset_cache are now in transformer_full.c */
-
-int llama_model_load(const uint8_t *data, size_t size)
-{
-    (void)data;
-    (void)size;
-    console_printf("llama_model_load: stub implementation\n");
-    return -1;
-}
-
-int llama_generate(const char *prompt, char *response, size_t max_response)
-{
-    (void)prompt;
-    (void)response;
-    (void)max_response;
-    console_printf("llama_generate: stub implementation\n");
-    return -1;
-}
 
 /* External declaration for TinyLlama inference (from tinyllama_gguf_inference.c) */
 extern int tinyllama_inference(const char *prompt, char *response, size_t max_response);

@@ -160,6 +160,9 @@ typedef struct net_config {
 #define MAX_SOCKETS         16
 #define SOCKET_BUFFER_SIZE  4096
 
+/* UDP datagram queue depth per socket (для socket_recvfrom) */
+#define SOCKET_DGRAM_QUEUE  8
+
 typedef struct socket {
     int      fd;                /* Socket descriptor */
     int      type;              /* SOCK_STREAM or SOCK_DGRAM */
@@ -175,6 +178,13 @@ typedef struct socket {
     uint32_t timeout_ms;        /* Connection timeout (ms) */
     uint8_t  rx_buffer[SOCKET_BUFFER_SIZE];  /* Receive buffer */
     size_t   rx_len;            /* Data in receive buffer */
+    /* UDP: очередь метаданных датаграмм (payload идёт подряд в rx_buffer,
+     * длины/адреса — здесь; head — индекс старейшей датаграммы) */
+    uint32_t dgram_src_ip[SOCKET_DGRAM_QUEUE];
+    uint16_t dgram_src_port[SOCKET_DGRAM_QUEUE];
+    uint16_t dgram_len[SOCKET_DGRAM_QUEUE];
+    uint8_t  dgram_head;        /* индекс старейшей датаграммы */
+    uint8_t  dgram_count;       /* число ожидающих датаграмм */
     bool     active;            /* Socket in use */
 } socket_t;
 
@@ -295,6 +305,25 @@ int socket_accept(int fd, uint32_t *remote_ip, uint16_t *remote_port);
 int socket_send(int fd, const void *data, size_t len);
 int socket_recv(int fd, void *buffer, size_t len);
 int socket_close(int fd);
+
+/**
+ * Receive one UDP datagram with sender address (recvfrom semantics).
+ * For SOCK_DGRAM sockets: pops the oldest queued datagram; if len < datagram
+ * size, the remainder is discarded (like recvfrom without MSG_TRUNC).
+ * For SOCK_STREAM behaves as socket_recv and fills src from remote_ip/port.
+ * @param src_ip   out: sender IP (host byte order), may be NULL
+ * @param src_port out: sender port, may be NULL
+ * @return bytes copied, 0 if no data, <0 on error
+ */
+int socket_recvfrom(int fd, void *buffer, size_t len,
+                    uint32_t *src_ip, uint16_t *src_port);
+
+/**
+ * Local interface configuration getters (net_cfg is static inside tcpip.c).
+ * @return NET_OK on success, NET_ERR_INVALID if stack not initialized
+ */
+int tcpip_get_local_ip(uint32_t *ip_out);
+int tcpip_get_local_mac(uint8_t mac_out[ETH_ALEN]);
 
 /* Utility functions */
 uint32_t ip_from_string(const char *str);

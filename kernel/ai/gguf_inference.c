@@ -18,6 +18,7 @@
 
 #include <embodios/console.h>
 #include <embodios/gguf_parser.h>
+#include <embodios/kquants_dequant.h>
 #include <embodios/mm.h>
 #include <embodios/types.h>
 
@@ -187,6 +188,12 @@ static void dequantize_row_q5_0(const void *src, float *dst, int64_t n)
 #define QK_K 256
 #define K_SCALE_SIZE 12
 
+/* Q2_K: 2-bit K-quant (type 10) - ggml-compatible layout, 84 bytes/block */
+typedef kquant_block_q2_K block_q2_K;
+
+/* Q3_K: 3-bit K-quant (type 11) - ggml-compatible layout, 110 bytes/block */
+typedef kquant_block_q3_K block_q3_K;
+
 /* Q4_K: 4-bit K-quant (type 12)
  * Block format: 256 elements, ~4.5 bits per weight
  * Total: 2 + 2 + 12 + 128 = 144 bytes per block
@@ -230,6 +237,24 @@ static inline void get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t
         *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
         *m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
     }
+}
+
+/* Q2_K dequantization - ggml-exact port (see kquants_dequant.h) */
+static void dequantize_row_q2_K(const void *src, float *dst, int64_t n)
+{
+    kquant_dequant_q2_K(src, dst, n);
+}
+
+/* Q3_K dequantization - ggml-exact port (see kquants_dequant.h) */
+static void dequantize_row_q3_K(const void *src, float *dst, int64_t n)
+{
+    kquant_dequant_q3_K(src, dst, n);
+}
+
+/* IQ4_NL dequantization - ggml-exact port (see kquants_dequant.h) */
+static void dequantize_row_iq4_nl(const void *src, float *dst, int64_t n)
+{
+    kquant_dequant_iq4_nl(src, dst, n);
 }
 
 /* Q4_K dequantization - matches llama.cpp exactly */
@@ -358,6 +383,12 @@ static void dequantize_tensor(const void *src, float *dst, int64_t n_elements, g
     case GGML_TYPE_Q5_0:
         dequantize_row_q5_0(src, dst, n_elements);
         break;
+    case GGML_TYPE_Q2_K:
+        dequantize_row_q2_K(src, dst, n_elements);
+        break;
+    case GGML_TYPE_Q3_K:
+        dequantize_row_q3_K(src, dst, n_elements);
+        break;
     case GGML_TYPE_Q4_K:
         dequantize_row_q4_K(src, dst, n_elements);
         break;
@@ -366,6 +397,9 @@ static void dequantize_tensor(const void *src, float *dst, int64_t n_elements, g
         break;
     case GGML_TYPE_Q6_K:
         dequantize_row_q6_K(src, dst, n_elements);
+        break;
+    case GGML_TYPE_IQ4_NL:
+        dequantize_row_iq4_nl(src, dst, n_elements);
         break;
     default:
         /* Unsupported type - fill with zeros */
@@ -391,6 +425,11 @@ static struct {
     float **ffn_gate;    /* [n_layers][dim * hidden_dim] */
     float **ffn_up;      /* [n_layers][dim * hidden_dim] */
     float **ffn_down;    /* [n_layers][hidden_dim * dim] */
+
+    /* Optional QKV biases (Qwen2/GLM-4 style) - NULL when absent */
+    float **attn_q_bias; /* [n_layers][dim] */
+    float **attn_k_bias; /* [n_layers][kv_dim] */
+    float **attn_v_bias; /* [n_layers][kv_dim] */
 } g_dequant = {0};
 
 static bool g_weights_dequantized = false;
@@ -645,12 +684,23 @@ static int dequantize_weights(void)
     g_dequant.ffn_gate = (float **)heap_alloc(n_layers * sizeof(float *));
     g_dequant.ffn_up = (float **)heap_alloc(n_layers * sizeof(float *));
     g_dequant.ffn_down = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.attn_q_bias = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.attn_k_bias = (float **)heap_alloc(n_layers * sizeof(float *));
+    g_dequant.attn_v_bias = (float **)heap_alloc(n_layers * sizeof(float *));
 
     if (!g_dequant.attn_norm || !g_dequant.attn_q || !g_dequant.attn_k || !g_dequant.attn_v ||
         !g_dequant.attn_output || !g_dequant.ffn_norm || !g_dequant.ffn_gate || !g_dequant.ffn_up ||
-        !g_dequant.ffn_down) {
+        !g_dequant.ffn_down || !g_dequant.attn_q_bias || !g_dequant.attn_k_bias ||
+        !g_dequant.attn_v_bias) {
         console_printf("[GGUF-INF] Failed to allocate dequant layer arrays\n");
         return -1;
+    }
+
+    /* heap_alloc does not zero - NULL-init optional bias pointers */
+    for (int l = 0; l < n_layers; l++) {
+        g_dequant.attn_q_bias[l] = NULL;
+        g_dequant.attn_k_bias[l] = NULL;
+        g_dequant.attn_v_bias[l] = NULL;
     }
 
     /* Dequantize per-layer weights */
@@ -680,6 +730,17 @@ static int dequantize_weights(void)
             dequantize_layer_tensor("blk.", l, ".ffn_up.weight", (int64_t)hidden_dim * dim);
         g_dequant.ffn_down[l] =
             dequantize_layer_tensor("blk.", l, ".ffn_down.weight", (int64_t)dim * hidden_dim);
+
+        /* Optional QKV biases (Qwen2/GLM-4); stay NULL when the GGUF has none */
+        g_dequant.attn_q_bias[l] =
+            dequantize_layer_tensor("blk.", l, ".attn_q.bias", dim);
+        g_dequant.attn_k_bias[l] =
+            dequantize_layer_tensor("blk.", l, ".attn_k.bias", kv_dim);
+        g_dequant.attn_v_bias[l] =
+            dequantize_layer_tensor("blk.", l, ".attn_v.bias", kv_dim);
+        if (l == 0 && g_dequant.attn_q_bias[l]) {
+            console_printf("[GGUF-INF] QKV biases found (Qwen2/GLM style)\n");
+        }
 
         /* Check all succeeded */
         if (!g_dequant.attn_norm[l] || !g_dequant.attn_q[l] || !g_dequant.attn_k[l] ||
@@ -1054,6 +1115,17 @@ static void transformer_forward(int token, int pos)
         matmul(g_state.q, g_dequant.attn_q[l], g_state.xb, dim, dim);
         matmul(g_state.k, g_dequant.attn_k[l], g_state.xb, kv_dim, dim);
         matmul(g_state.v, g_dequant.attn_v[l], g_state.xb, kv_dim, dim);
+
+        /* Optional QKV biases (Qwen2/GLM-4); absent bias = no-op */
+        if (g_dequant.attn_q_bias[l]) {
+            for (int i = 0; i < dim; i++) g_state.q[i] += g_dequant.attn_q_bias[l][i];
+        }
+        if (g_dequant.attn_k_bias[l]) {
+            for (int i = 0; i < kv_dim; i++) g_state.k[i] += g_dequant.attn_k_bias[l][i];
+        }
+        if (g_dequant.attn_v_bias[l]) {
+            for (int i = 0; i < kv_dim; i++) g_state.v[i] += g_dequant.attn_v_bias[l][i];
+        }
 
         /* Apply RoPE (Rotary Position Embeddings) */
         rope(g_state.q, g_state.k, pos, head_dim, n_heads, n_kv_heads, g_config.rope_theta);

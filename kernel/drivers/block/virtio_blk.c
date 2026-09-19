@@ -1078,6 +1078,54 @@ void virtio_blk_test(void) {
         }
     }
 
+    /* Test 4: Write + readback on the LAST sector (with save/restore).
+     * Exercises the VIRTIO_BLK_T_OUT descriptor chain (header OUT + data +
+     * status) and verifies the status byte. Original content is restored
+     * afterwards so this is safe to run on a model disk. */
+    if (!dev->read_only && dev->capacity > 0) {
+        uint64_t last = dev->capacity - 1;
+        uint8_t* saved = (uint8_t*)dma_alloc_coherent(512, NULL);
+        uint8_t* verify = (uint8_t*)dma_alloc_coherent(512, NULL);
+
+        console_printf("Test 4: Write/readback sector %llu... ", last);
+
+        if (!saved || !verify) {
+            console_printf("FAIL (buffer allocation)\n");
+        } else if (virtio_blk_read(dev, last, 1, saved) != VIRTIO_OK) {
+            console_printf("FAIL (save original)\n");
+        } else {
+            /* Fill test pattern */
+            for (int i = 0; i < 512; i++) {
+                buffer[i] = (uint8_t)(i ^ 0xA5);
+            }
+
+            ret = virtio_blk_write(dev, last, 1, buffer);
+            if (ret != VIRTIO_OK) {
+                console_printf("FAIL (write error %d)\n", ret);
+            } else {
+                memset(verify, 0, 512);
+                ret = virtio_blk_read(dev, last, 1, verify);
+                if (ret != VIRTIO_OK) {
+                    console_printf("FAIL (readback error %d)\n", ret);
+                } else if (memcmp(verify, buffer, 512) != 0) {
+                    console_printf("FAIL (data mismatch)\n");
+                } else {
+                    console_printf("PASS (512 bytes verified)\n");
+                }
+            }
+
+            /* Restore original content and flush to stable storage */
+            virtio_blk_write(dev, last, 1, saved);
+            virtio_blk_flush(dev);
+        }
+
+        if (saved) dma_free_coherent(saved, 512, 0);
+        if (verify) dma_free_coherent(verify, 512, 0);
+    } else {
+        console_printf("Test 4: Write test... SKIP (%s)\n",
+                       dev->read_only ? "read-only device" : "no capacity");
+    }
+
     dma_free_coherent(buffer, 512, 0);
 
     console_printf("\nAll tests completed!\n");

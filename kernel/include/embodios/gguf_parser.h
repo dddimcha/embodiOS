@@ -34,7 +34,8 @@ typedef enum {
     GGML_TYPE_Q5_K    = 13,
     GGML_TYPE_Q6_K    = 14,
     GGML_TYPE_Q8_K    = 15,
-    GGML_TYPE_COUNT
+    GGML_TYPE_IQ4_NL  = 20,
+    GGML_TYPE_COUNT   = 21
 } ggml_type_t;
 
 /* ============================================================================
@@ -150,6 +151,12 @@ uint32_t gguf_parser_get_vocab_size(void);
  * @return Token score/priority
  */
 float gguf_parser_get_token_score(uint32_t index);
+
+/* Get number of loaded BPE merge rules (tokenizer.ggml.merges), 0 if none */
+uint32_t gguf_parser_get_merges_count(void);
+
+/* Get BPE merge rule by rank index ("left right"), or NULL */
+const char* gguf_parser_get_merge(uint32_t index);
 
 /**
  * Get pointer to tensor data region

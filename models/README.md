@@ -4,15 +4,18 @@ This directory contains AI models for EMBODIOS. Models are downloaded on-demand 
 
 ## Quick Start
 
-Download the default test model (TinyLlama):
+Download the default model (SmolLM-135M-Instruct Q4_K_M, ~100 MB):
 ```bash
-./scripts/download-models.sh
+./scripts/download-models.sh            # or: ./embodi pull smollm
 ```
 
 Download a specific model:
 ```bash
-./scripts/download-models.sh phi-2
+./scripts/download-models.sh tinyllama  # or: ./embodi pull tinyllama
 ```
+
+Downloads are verified against the size + SHA256 recorded in `manifest.json`.
+hf-mirror.com is tried first, huggingface.co is the fallback.
 
 ## Model Versioning
 
@@ -26,66 +29,44 @@ This ensures reproducible testing across different environments.
 
 ## Using EMBODIOS CLI
 
-Pull models using the CLI:
 ```bash
-# Pull from HuggingFace
-embodi pull TinyLlama/TinyLlama-1.1B-Chat-v1.0
-
-# Pull with quantization
-embodi pull microsoft/phi-2 --quantize 4
-
-# Pull direct URL
-embodi pull https://huggingface.co/.../model.gguf
+embodi pull smollm      # default model
+embodi pull tinyllama   # optional, ~669 MB
+embodi pull all         # everything
 ```
 
 ## Available Models
 
-| Model | Version | Size | License |
-|-------|---------|------|---------|
-| TinyLlama | v1.0-Q4_K_M | 638MB | Apache-2.0 |
-| Phi-2 | 2.0-Q4_K_M | 1.5GB | MIT |
+| Model | Version | Size | License | Status |
+|-------|---------|------|---------|--------|
+| SmolLM-135M-Instruct | Q4_K_M | 100 MB | Apache-2.0 | Verified in QEMU (default) |
+| TinyLlama-1.1B-Chat | v1.0-Q4_K_M | 669 MB | Apache-2.0 | Runtime-supported |
 
 ## Directory Structure
 
 ```
 models/
-├── manifest.json      # Model registry with versions
-├── README.md         # This file
-├── .gitkeep          # Ensures directory exists in git
-└── tinyllama/        # Downloaded models (git-ignored)
-    ├── tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
-    ├── .version      # Version tracking
-    └── .revision     # Git revision tracking
+├── manifest.json                         # Model registry with versions
+├── README.md                             # This file
+├── .gitkeep                              # Ensures directory exists in git
+└── smollm-135m-instruct-q4_k_m.gguf      # Downloaded (git-ignored)
 ```
+
+The kernel Makefile embeds `models/smollm-135m-instruct-q4_k_m.gguf` into
+the kernel image automatically when the file is present.
 
 ## Adding New Models
 
 1. Update `manifest.json` with model details:
    - Version and revision
-   - Download URL
+   - Download URL (plus hf-mirror.com mirror)
    - SHA256 checksum
    - File size
 
-2. Run download script:
+2. Add an entry to `scripts/download-models.sh` and run it:
    ```bash
    ./scripts/download-models.sh your-model
    ```
-
-## Testing with Models
-
-Run tests that use real models:
-```bash
-# Download model first
-./scripts/download-models.sh
-
-# Run tests
-pytest tests/integration/test_real_model_inference.py
-```
-
-Run interactive demo:
-```bash
-./scripts/testing/test_interactive.sh
-```
 
 ## Important Notes
 

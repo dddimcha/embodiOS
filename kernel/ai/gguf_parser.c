@@ -109,6 +109,9 @@ struct gguf_vocab_token {
 /* Maximum tensors to store (for most models) */
 #define GGUF_MAX_STORED_TENSORS 4096
 
+/* Maximum BPE merge rules to load (SmolLM-135M has ~48900) */
+#define GGUF_MAX_MERGES 131072
+
 /* ============================================================================
  * GGUF Parser Context
  * ============================================================================ */
@@ -137,6 +140,10 @@ struct gguf_parser_ctx {
     uint32_t vocab_count;
     float *vocab_scores;
     uint32_t *vocab_types;
+
+    /* BPE merge rules (tokenizer.ggml.merges), in rank order */
+    char **merges;
+    uint32_t merges_count;
 
     /* Tensor info storage */
     struct gguf_tensor_info *tensors;
@@ -201,6 +208,7 @@ static const size_t ggml_block_sizes[] = {
     [GGML_TYPE_Q5_K] = 176,                                                 /* 4 + 12 + 32 + 128 */
     [GGML_TYPE_Q6_K] = 210,                                                 /* 128 + 64 + 16 + 2 */
     [GGML_TYPE_Q8_K] = 292,
+    [GGML_TYPE_IQ4_NL] = 18,                                                /* 2 + 16 */
 };
 
 /* Elements per block for GGML types */
@@ -211,8 +219,9 @@ static const size_t ggml_block_elements[] = {
     [GGML_TYPE_Q6_K] = 256, [GGML_TYPE_Q8_K] = 256,
 };
 
-/* Renamed to avoid conflict with GGML library */
-static const char *kernel_ggml_type_name(ggml_type_t type)
+/* Exported as ggml_type_name() (declared in embodios/gguf_parser.h).
+ * The upstream GGML library is not built, so there is no conflict. */
+const char *ggml_type_name(ggml_type_t type)
 {
     static const char *names[] = {
         [GGML_TYPE_F32] = "F32",   [GGML_TYPE_F16] = "F16",   [GGML_TYPE_Q4_0] = "Q4_0",
@@ -220,6 +229,7 @@ static const char *kernel_ggml_type_name(ggml_type_t type)
         [GGML_TYPE_Q8_0] = "Q8_0", [GGML_TYPE_Q8_1] = "Q8_1", [GGML_TYPE_Q2_K] = "Q2_K",
         [GGML_TYPE_Q3_K] = "Q3_K", [GGML_TYPE_Q4_K] = "Q4_K", [GGML_TYPE_Q5_K] = "Q5_K",
         [GGML_TYPE_Q6_K] = "Q6_K", [GGML_TYPE_Q8_K] = "Q8_K",
+        [GGML_TYPE_IQ4_NL] = "IQ4_NL",
     };
     if (type < GGML_TYPE_COUNT && names[type])
         return names[type];
@@ -834,7 +844,8 @@ static int gguf_parse_kv_pair(const uint8_t **ptr, const uint8_t *end, int index
 
     /* LLaMA architecture parameters - try both prefixes */
     GGUF_DEBUG("Checking llama params for key: %s", key);
-    static const char *prefixes[] = {"llama.", "phi.", "mistral.", "qwen.", "qwen2.", "gemma.", NULL};
+    static const char *prefixes[] = {"llama.", "phi.", "mistral.", "qwen.", "qwen2.", "gemma.",
+                                     "chatglm.", "glm4.", NULL};
 
     for (int p = 0; prefixes[p]; p++) {
         size_t plen = strlen(prefixes[p]);
@@ -1144,6 +1155,11 @@ static int gguf_parse_kv_pair(const uint8_t **ptr, const uint8_t *end, int index
             GGUF_DEBUG("Token types skipped");
             return 0;
         }
+        /* Fall through to generic skip */
+        for (uint64_t i = 0; i < arr_len; i++) {
+            gguf_skip_value(ptr, end, (enum gguf_type)arr_type);
+        }
+        return 0;
 #if 0
         if (arr_type == GGUF_TYPE_INT32 && arr_len <= GGUF_MAX_VOCAB_SIZE) {
             g_ctx.vocab_types = (uint32_t*)heap_alloc(arr_len * sizeof(uint32_t));
@@ -1163,6 +1179,61 @@ static int gguf_parse_kv_pair(const uint8_t **ptr, const uint8_t *end, int index
         }
         return 0;
 #endif
+    }
+
+    /* BPE merge rules - string array in rank order (tokenizer.ggml.merges) */
+    if (strcmp(key, "tokenizer.ggml.merges") == 0 && value_type == GGUF_TYPE_ARRAY) {
+        uint32_t arr_type;
+        uint64_t arr_len;
+
+        if (safe_read_u32(ptr, end, &arr_type) < 0)
+            return -1;
+        if (safe_read_u64(ptr, end, &arr_len) < 0)
+            return -1;
+
+        if (arr_type != GGUF_TYPE_STRING || arr_len > GGUF_MAX_MERGES) {
+            GGUF_ERROR("Merges array bad type/length: type=%u len=%llu", arr_type,
+                       (unsigned long long)arr_len);
+            for (uint64_t i = 0; i < arr_len; i++) {
+                gguf_skip_value(ptr, end, (enum gguf_type)arr_type);
+            }
+            return 0;
+        }
+
+        g_ctx.merges = (char **)heap_alloc(arr_len * sizeof(char *));
+        if (!g_ctx.merges) {
+            GGUF_ERROR("Failed to allocate merges array");
+            for (uint64_t i = 0; i < arr_len; i++) {
+                safe_read_string(ptr, end, NULL, 0, NULL);
+            }
+            return 0;
+        }
+        g_ctx.merges_count = (uint32_t)arr_len;
+
+        for (uint64_t i = 0; i < arr_len; i++) {
+            uint64_t str_len;
+            if (*ptr + 8 > end) {
+                g_ctx.merges_count = (uint32_t)i;
+                break;
+            }
+            memcpy(&str_len, *ptr, 8);
+            (*ptr) += 8;
+
+            if (str_len > 256 || *ptr + str_len > end) {
+                g_ctx.merges_count = (uint32_t)i;
+                break;
+            }
+
+            g_ctx.merges[i] = (char *)heap_alloc(str_len + 1);
+            if (g_ctx.merges[i]) {
+                memcpy(g_ctx.merges[i], *ptr, str_len);
+                g_ctx.merges[i][str_len] = '\0';
+            }
+            (*ptr) += str_len;
+        }
+
+        GGUF_INFO("Loaded %u BPE merge rules", g_ctx.merges_count);
+        return 0;
     }
 
     /* Unknown key - skip the value */
@@ -1521,6 +1592,22 @@ float gguf_parser_get_token_score(uint32_t index)
 }
 
 /**
+ * Get number of loaded BPE merge rules (0 if none)
+ */
+uint32_t gguf_parser_get_merges_count(void) { return g_ctx.merges_count; }
+
+/**
+ * Get BPE merge rule by rank index ("left right"), or NULL
+ */
+const char *gguf_parser_get_merge(uint32_t index)
+{
+    if (!g_ctx.merges || index >= g_ctx.merges_count) {
+        return NULL;
+    }
+    return g_ctx.merges[index];
+}
+
+/**
  * Get tensor data start pointer
  */
 const void *gguf_parser_get_tensor_data(void) { return g_ctx.tensor_data_start; }
@@ -1595,7 +1682,7 @@ void gguf_parser_print_summary(void)
     console_printf("\nTensors: %llu\n", (unsigned long long)g_ctx.n_tensors);
     console_printf("Tensor data offset: %zu\n", (size_t)(g_ctx.tensor_data_start - g_ctx.data));
     console_printf("Alignment: %zu bytes\n", g_ctx.alignment);
-    console_printf("Quantization: %s\n", kernel_ggml_type_name(g_ctx.predominant_type));
+    console_printf("Quantization: %s\n", ggml_type_name(g_ctx.predominant_type));
     console_printf("==========================\n\n");
 }
 

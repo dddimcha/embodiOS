@@ -7,6 +7,9 @@
 #include <embodios/console.h>
 #include <embodios/mm.h>
 #include <embodios/gguf.h>
+#include <embodios/gguf_parser.h>
+#include <embodios/chat_template.h>
+#include <embodios/ui.h>
 
 /* String functions */
 void* memcpy(void* dest, const void* src, size_t n);
@@ -69,23 +72,7 @@ struct gguf_tensor {
     uint64_t offset;
 } __attribute__((packed));
 
-/* Tensor types */
-enum ggml_type {
-    GGML_TYPE_F32  = 0,
-    GGML_TYPE_F16  = 1,
-    GGML_TYPE_Q4_0 = 2,
-    GGML_TYPE_Q4_1 = 3,
-    GGML_TYPE_Q5_0 = 6,
-    GGML_TYPE_Q5_1 = 7,
-    GGML_TYPE_Q8_0 = 8,
-    GGML_TYPE_Q8_1 = 9,
-    GGML_TYPE_Q2_K = 10,
-    GGML_TYPE_Q3_K = 11,
-    GGML_TYPE_Q4_K = 12,
-    GGML_TYPE_Q5_K = 13,
-    GGML_TYPE_Q6_K = 14,
-    GGML_TYPE_Q8_K = 15,
-};
+/* Tensor types come from gguf_parser.h (enum ggml_type) */
 
 /* Tensor info cache */
 #define MAX_TENSORS 512
@@ -117,6 +104,7 @@ static struct {
     uint32_t n_ff;
     float rope_theta;
     float norm_eps;
+    size_t alignment;   /* general.alignment from GGUF metadata (default 32) */
 
     /* Tensor cache */
     struct tensor_info tensors[MAX_TENSORS];
@@ -124,14 +112,18 @@ static struct {
 } g_model;
 
 /* Type sizes */
-static size_t ggml_type_size(enum ggml_type type)
+static size_t ggml_type_size(ggml_type_t type)
 {
     switch (type) {
         case GGML_TYPE_F32:  return 4;
         case GGML_TYPE_F16:  return 2;
         case GGML_TYPE_Q4_0: return 18; /* block size 32 */
+        case GGML_TYPE_Q2_K: return 84;  /* block size 256 */
+        case GGML_TYPE_Q3_K: return 110; /* block size 256 */
         case GGML_TYPE_Q4_K: return 144; /* block size 256 */
         case GGML_TYPE_Q5_K: return 176; /* block size 256 */
+        case GGML_TYPE_Q6_K: return 210; /* block size 256 */
+        case GGML_TYPE_IQ4_NL: return 18; /* block size 32 */
         default: return 0;
     }
 }
@@ -154,10 +146,18 @@ static size_t calculate_tensor_size_from_info(struct tensor_info* t)
             return (n_elements / 32) * 18;  /* 32 values per 18-byte block */
         case GGML_TYPE_Q8_0:
             return (n_elements / 32) * 34;  /* 32 values per 34-byte block */
+        case GGML_TYPE_IQ4_NL:
+            return (n_elements / 32) * 18;  /* 32 values per 18-byte block */
+        case GGML_TYPE_Q2_K:
+            return (n_elements / 256) * 84;
+        case GGML_TYPE_Q3_K:
+            return (n_elements / 256) * 110;
         case GGML_TYPE_Q4_K:
             return (n_elements / 256) * 144;
         case GGML_TYPE_Q5_K:
             return (n_elements / 256) * 176;
+        case GGML_TYPE_Q6_K:
+            return (n_elements / 256) * 210;
         default:
             return n_elements * 4;  /* Assume F32 for unknown */
     }
@@ -278,13 +278,18 @@ static int parse_tensor_metadata(void)
 
         /* Calculate tensor size */
         g_model.tensors[i].size = calculate_tensor_size_from_info(&g_model.tensors[i]);
+
+        /* UX: load progress (redraws only when the percent changes) */
+        ui_progress("Parsing tensors", (uint32_t)i + 1, (uint32_t)n_tensors);
     }
 
     g_model.n_tensors_cached = n_tensors;
 
-    /* Align to 256-byte boundary for tensor data */
+    /* Align to general.alignment boundary for tensor data */
+    size_t alignment = g_model.alignment;
+    if (alignment < 1) alignment = 32;  /* GGUF default */
     size_t metadata_end = (size_t)(ptr - (uint8_t*)g_model.data);
-    size_t aligned_offset = (metadata_end + 255) & ~255;
+    size_t aligned_offset = (metadata_end + alignment - 1) & ~(alignment - 1);
     g_model.tensor_data = (uint8_t*)g_model.data + aligned_offset;
 
     return 0;
@@ -320,25 +325,47 @@ int gguf_load_model(void* data, size_t size)
         return -1;
     }
 
-    /* Parse metadata - using TinyStories defaults for now */
-    g_model.n_vocab = 32000;
-    g_model.n_embd = 2048;
-    g_model.n_layer = 22;
-    g_model.n_head = 32;
-    g_model.n_head_kv = 4;
-    g_model.n_ff = 5632;
+    /* Initialize gguf_parser first: it reads the real model geometry and
+     * alignment from GGUF metadata (no hardcoded TinyLlama constants). */
+    g_model.alignment = 32;  /* GGUF default general.alignment */
+    int parser_result = gguf_parser_load(data, size);
+    if (parser_result == 0) {
+        const struct gguf_model_arch* arch = gguf_parser_get_arch();
+        if (arch) {
+            g_model.n_vocab   = arch->vocab_size;
+            g_model.n_embd    = arch->embedding_length;
+            g_model.n_layer   = arch->block_count;
+            g_model.n_head    = arch->attention_head_count;
+            g_model.n_head_kv = arch->attention_head_count_kv;
+            g_model.n_ff      = arch->feed_forward_length;
+            g_model.rope_theta = arch->rope_freq_base;
+            g_model.norm_eps  = arch->attention_layer_norm_rms_epsilon;
+        }
+        size_t align = gguf_parser_get_alignment();
+        if (align > 0) g_model.alignment = align;
+        console_printf("[GGUF] Geometry from metadata: vocab=%u embd=%u layers=%u heads=%u kv=%u ff=%u align=%u\n",
+                       g_model.n_vocab, g_model.n_embd, g_model.n_layer,
+                       g_model.n_head, g_model.n_head_kv, g_model.n_ff,
+                       (unsigned)g_model.alignment);
+    } else {
+        /* Parser failed: fall back to safe zeroed geometry (helpers will
+         * simply not find tensors rather than use wrong dimensions). */
+        console_printf("[GGUF] Parser failed, geometry unavailable\n");
+        g_model.n_vocab = 0;
+        g_model.n_embd = 0;
+        g_model.n_layer = 0;
+        g_model.n_head = 0;
+        g_model.n_head_kv = 0;
+        g_model.n_ff = 0;
+    }
+
+    /* New vocab loaded - invalidate chat template detection cache */
+    chat_template_invalidate_cache();
 
     /* Parse tensor metadata to build cache */
     if (parse_tensor_metadata() < 0) {
         console_printf("Error: Failed to parse model\n");
         return -1;
-    }
-
-    /* Initialize gguf_parser for inference engine compatibility */
-    extern int gguf_parser_load(const void* data, size_t size);
-    int parser_result = gguf_parser_load(data, size);
-    if (parser_result < 0) {
-        /* Parser failed but we can still proceed */
     }
 
     return 0;

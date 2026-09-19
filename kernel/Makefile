@@ -136,13 +136,13 @@ ifeq ($(ARCH),x86_64)
     ifneq (,$(findstring x86_64-elf,$(CC)))
         # Cross-compiler (x86_64-elf-gcc)
         ASFLAGS = -c
-        LDFLAGS = -m elf_x86_64
+        LDFLAGS = -m elf_x86_64 -z noexecstack
     else
         # Check if we're on Linux or macOS
         UNAME_S := $(shell uname -s)
         ifeq ($(UNAME_S),Linux)
             ASFLAGS = -c
-            LDFLAGS = -m elf_x86_64
+            LDFLAGS = -m elf_x86_64 -z noexecstack
         else
             # macOS native flags (Clang)
             ASFLAGS = -arch x86_64
@@ -192,6 +192,11 @@ KERNEL_C_SOURCES = \
     core/hal_cpu.c \
     core/hal_timer.c \
     core/profiler.c \
+    core/ui.c \
+    core/cmd_storage.c \
+    core/cmd_smp.c \
+    core/cmd_power.c \
+    fs/embfs.c \
     drivers/pci/pci.c \
     drivers/block/virtio_blk.c \
     drivers/block/virtio_mmio.c \
@@ -202,6 +207,11 @@ KERNEL_C_SOURCES = \
     net/tcpip.c \
     net/modbus.c \
     net/ethercat.c \
+    exo/exo_node.c \
+    exo/exo_discovery.c \
+    exo/exo_shard.c \
+    exo/exo_transport.c \
+    exo/exo_server.c \
     mm/pmm.c \
     mm/vmm.c \
     mm/slab.c \
@@ -227,13 +237,13 @@ KERNEL_C_SOURCES = \
     ai/memory_opt.c \
     ai/quantized_matmul_simd.c \
     ai/embeddings.c \
-    ai/embedding_benchmark.c \
     ai/kv_cache_enhanced.c \
     ai/kv_cache_benchmark.c \
     ai/model_loader.c \
     ai/model_registry.c \
     ai/embedded_model_stubs.c \
     ai/bpe_tokenizer.c \
+    ai/chat_template.c \
     ai/transformer_full.c \
     ai/transformer_inference.c \
     ai/inference_test.c \
@@ -258,19 +268,6 @@ ifeq ($(COVERAGE),1)
     KERNEL_C_SOURCES += lib/gcov_stubs.c
 endif
 
-# Math library enabled (SSE enabled for AI inference)
-# ai/tvm_graph_executor.c \
-# ai/tvm_tinyllama.c \
-# ai/tensor_ops.c \
-# ai/transformer_full.c \
-# ai/gguf_loader.c \
-# ai/model_loader.c \
-# ai/simple_llm.c \
-# ai/tinyllama_gguf_inference.c \
-# ai/tvm_model_loader.c \
-# ai/working_model.c \
-# ai/real_inference.c \
-
 # LLaMA.cpp integration - ENABLED with full GGML support
 # The compat headers in kernel/include/compat/ provide bare-metal stubs for stdio.h, etc.
 # GGML sources synced from: https://github.com/ggerganov/llama.cpp/tree/master/ggml
@@ -279,8 +276,15 @@ endif
 # - C++ runtime (new/delete operators)
 # - pthread stubs for single-threaded kernel
 
-LLAMA_CPP_SOURCES = \
-    llama_cpp/kernel_stubs.cpp
+# NOTE: llama.cpp/GGML sources are present in llama_cpp/ but are NOT built.
+# They are an unmodified upstream snapshot that does not compile with the
+# freestanding compat headers (needs host <syscall.h>, sys/*.h) and provides
+# no compute backend (ggml-cpu is not built). The live inference engine is
+# ai/streaming_inference.c, which does not use the GGML API at all.
+# kernel_stubs.cpp (operator new/delete, pthread stubs) is only needed when
+# C++ sources are built; with no C++ in the build it is excluded too.
+# See kernel/llama_cpp/README.md.
+LLAMA_CPP_SOURCES =
 
 # GGML Vulkan backend (C++) - compiled when GGML_VULKAN=1
 # Provides GPU-accelerated matrix operations via Vulkan compute shaders
@@ -288,23 +292,20 @@ ifeq ($(GGML_VULKAN),1)
     LLAMA_CPP_SOURCES += llama_cpp/ggml/ggml-vulkan.cpp
 endif
 
-# GGML core library - ENABLED
-# Complete GGML sources synced from llama.cpp repository
-# ggml-backend-stubs.c provides kernel-based implementations of backend functions
-GGML_C_SOURCES = \
-    llama_cpp/ggml/ggml.c \
-    llama_cpp/ggml/ggml-quants.c \
-    llama_cpp/ggml/ggml-alloc.c \
-    llama_cpp/ggml/ggml-backend-stubs.c
+# GGML core library - DISABLED (see note above)
+# To resurrect, fix compat header conflicts first, then set:
+#   GGML_C_SOURCES = llama_cpp/ggml/ggml.c ... etc
+GGML_C_SOURCES =
 
 # Architecture-specific sources
 ifeq ($(ARCH),x86_64)
-    ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S $(ARCH_DIR)/interrupt.S
+    ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S $(ARCH_DIR)/interrupt.S $(ARCH_DIR)/smp_trampoline.S
     ARCH_C_SOURCES = \
         $(ARCH_DIR)/cpu.c \
         $(ARCH_DIR)/vga.c \
         $(ARCH_DIR)/early_init.c \
         $(ARCH_DIR)/idt.c \
+        $(ARCH_DIR)/pic.c \
         $(ARCH_DIR)/paging.c \
         $(ARCH_DIR)/keyboard.c \
         $(ARCH_DIR)/serial.c \
@@ -339,8 +340,8 @@ ARCH_C_OBJS = $(ARCH_C_SOURCES:.c=.o)
 TINYSTORIES_MODEL = ../models/tinystories-15m.bin
 TINYSTORIES_TOKENIZER = ../models/tokenizer.bin
 # GGUF model for embedded inference (smallest available: tinystories-656k.gguf ~732KB)
-# GGUF Model - can be overridden: make GGUF_MODEL=../models/qwen2.5-0.5b-q4_k_m.gguf
-GGUF_MODEL ?= ../models/qwen2.5-0.5b-q4_k_m.gguf
+# GGUF Model - can be overridden: make GGUF_MODEL=../models/smollm-135m-instruct-q4_k_m.gguf
+GGUF_MODEL ?= ../models/smollm-135m-instruct-q4_k_m.gguf
 
 # Enable model embedding for x86_64 builds if model files exist
 # Works on both Linux and macOS with cross-compilation
@@ -382,7 +383,7 @@ ALL_OBJS = $(ARCH_AS_OBJS) $(ARCH_C_OBJS) $(KERNEL_OBJS) $(LLAMA_CPP_OBJS) $(GGM
 # Targets
 all: embodios.elf embodios.bin
 
-embodios.elf: $(ALL_OBJS)
+embodios.elf: $(ALL_OBJS) $(ARCH_DIR)/kernel.ld
 ifeq ($(ARCH),aarch64)
 ifneq ($(AARCH64_ELF_GCC),)
 	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
@@ -466,8 +467,6 @@ ifeq ($(ARCH),x86_64)
 		--redefine-sym _binary____models_tinystories_15m_bin_end=_binary_tinystories_15m_bin_end \
 		--redefine-sym _binary____models_tinystories_15m_bin_size=_binary_tinystories_15m_bin_size \
 		$< $@
-	@# Create presence flag object
-	@echo "int _tinystories_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/tinystories_model_flag.o
 else
 	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
@@ -475,8 +474,11 @@ else
 		--redefine-sym _binary____models_tinystories_15m_bin_end=_binary_tinystories_15m_bin_end \
 		--redefine-sym _binary____models_tinystories_15m_bin_size=_binary_tinystories_15m_bin_size \
 		$< $@
-	@echo "int _tinystories_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/tinystories_model_flag.o
 endif
+
+# Presence flag object - separate rule to avoid -jN race
+ai/tinystories_model_flag.o: ai/tinystories_model.o
+	@echo "int _tinystories_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o $@
 
 # Embed tokenizer as binary object
 ai/tinystories_tokenizer.o: $(TINYSTORIES_TOKENIZER)
@@ -488,7 +490,6 @@ ifeq ($(ARCH),x86_64)
 		--redefine-sym _binary____models_tokenizer_bin_end=_binary_tokenizer_bin_end \
 		--redefine-sym _binary____models_tokenizer_bin_size=_binary_tokenizer_bin_size \
 		$< $@
-	@echo "int _tokenizer_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/tokenizer_flag.o
 else
 	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
@@ -496,8 +497,11 @@ else
 		--redefine-sym _binary____models_tokenizer_bin_end=_binary_tokenizer_bin_end \
 		--redefine-sym _binary____models_tokenizer_bin_size=_binary_tokenizer_bin_size \
 		$< $@
-	@echo "int _tokenizer_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/tokenizer_flag.o
 endif
+
+# Presence flag object - separate rule to avoid -jN race
+ai/tokenizer_flag.o: ai/tinystories_tokenizer.o
+	@echo "int _tokenizer_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o $@
 
 # Embed GGUF model as binary object
 # We copy to a fixed temp name to get predictable symbol names
@@ -512,7 +516,6 @@ ifeq ($(ARCH),x86_64)
 		--redefine-sym _binary_ai_embedded_model_gguf_end=_binary_gguf_model_end \
 		--redefine-sym _binary_ai_embedded_model_gguf_size=_binary_gguf_model_size \
 		$(GGUF_TEMP) $@
-	@echo "int _gguf_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/gguf_model_flag.o
 	@rm -f $(GGUF_TEMP)
 else ifeq ($(ARCH),aarch64)
 	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 \
@@ -521,16 +524,28 @@ else ifeq ($(ARCH),aarch64)
 		--redefine-sym _binary_ai_embedded_model_gguf_end=_binary_gguf_model_end \
 		--redefine-sym _binary_ai_embedded_model_gguf_size=_binary_gguf_model_size \
 		$(GGUF_TEMP) $@
-	@echo "int _gguf_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o ai/gguf_model_flag.o
 	@rm -f $(GGUF_TEMP)
 endif
+
+# Presence flag object - separate rule to avoid -jN race
+ai/gguf_model_flag.o: ai/gguf_model.o
+	@echo "int _gguf_model_present = 1;" | $(CC) $(CFLAGS) -x c -c - -o $@
 
 # ISO for x86_64
 ifeq ($(ARCH),x86_64)
 iso: embodios.elf
 	mkdir -p iso/boot/grub
 	cp embodios.elf iso/boot/
-	cp grub_iso/boot/grub/grub.cfg iso/boot/grub/grub.cfg
+	printf '%s\n' \
+	    'set timeout=3' \
+	    'set default=0' \
+	    'serial --unit=0 --speed=115200' \
+	    'terminal_input console serial' \
+	    'terminal_output console serial' \
+	    'menuentry "EMBODIOS - Bare Metal AI OS" {' \
+	    '    multiboot2 /boot/embodios.elf' \
+	    '    boot' \
+	    '}' > iso/boot/grub/grub.cfg
 	x86_64-elf-grub-mkrescue -o embodios.iso iso 2>&1 || grub-mkrescue -o embodios.iso iso 2>&1 || echo "grub-mkrescue not available"
 	@ls -lh embodios.iso 2>/dev/null || true
 

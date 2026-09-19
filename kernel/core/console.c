@@ -1,11 +1,40 @@
 /* EMBODIOS Console Implementation - Optimized for Performance (#143) */
 #include <embodios/console.h>
 #include <embodios/types.h>
+#include <embodios/spinlock.h>
 
 /* Output buffer for batching writes - reduces I/O overhead */
 #define CONSOLE_BUFFER_SIZE 256
 static char output_buffer[CONSOLE_BUFFER_SIZE];
 static size_t buffer_pos = 0;
+
+/* SMP-safe console lock. Raw CAS lock (not the ticket spinlock from
+ * spinlock.h) on purpose: __raw_spin_lock panics on deadlock detection,
+ * and panicking recurses into console_printf. IRQ state is saved so an
+ * IRQ0 tick on the BSP can never re-enter while the lock is held. */
+static volatile int console_lock_held = 0;
+
+static unsigned long console_lock(void)
+{
+    unsigned long flags = arch_irq_save();
+    while (!__sync_bool_compare_and_swap(&console_lock_held, 0, 1)) {
+        cpu_relax();
+    }
+    return flags;
+}
+
+static void console_unlock(unsigned long flags)
+{
+    __sync_lock_release(&console_lock_held);
+    arch_irq_restore(flags);
+}
+
+/* Force-release the console lock (kernel_panic path: the lock holder may
+ * be another CPU or a preempted context that will never run again). */
+void console_force_unlock(void)
+{
+    console_lock_held = 0;
+}
 
 /* Architecture-specific console drivers */
 #ifdef __x86_64__
@@ -73,7 +102,9 @@ void console_init(void)
 void console_putchar(char c)
 {
     if (!console_state.initialized) return;
+    unsigned long flags = console_lock();
     arch_console_putchar(c);
+    console_unlock(flags);
 }
 
 void console_puts(const char* str)
@@ -83,7 +114,9 @@ void console_puts(const char* str)
     const char* s = str;
     while (*s++) len++;
     if (len > 0) {
+        unsigned long flags = console_lock();
         arch_console_write_batch(str, len);
+        console_unlock(flags);
     }
 }
 
@@ -191,6 +224,8 @@ static int format_decimal(char* buf, uint64_t num, bool is_signed)
 
 void console_printf(const char* fmt, ...)
 {
+    unsigned long lock_flags = console_lock();
+
     __builtin_va_list args;
     __builtin_va_start(args, fmt);
 
@@ -348,6 +383,7 @@ done:
     /* Flush remaining buffer */
     flush_buffer();
     __builtin_va_end(args);
+    console_unlock(lock_flags);
 }
 
 void console_flush(void)
