@@ -7,6 +7,7 @@
 #include <embodios/types.h>
 #include <embodios/console.h>
 #include <embodios/gpu_backend.h>
+#include <embodios/vk_device.h>
 
 /* ============================================================================
  * Global Backend State
@@ -15,6 +16,10 @@
 static gpu_backend_type_t g_backend_type = GPU_BACKEND_NONE;
 static int g_backend_available = 0;
 static gpu_device_info_t g_device_info = {0};
+
+/* Cached result of gpu_backend_probe(): -1 = not probed yet,
+ * 0 = no usable GPU, 1 = usable Vulkan compute device. */
+static int g_probe_result = -1;
 
 /* ============================================================================
  * Forward Declarations for Vulkan Backend
@@ -40,37 +45,32 @@ int gpu_backend_init(gpu_backend_type_t type) {
         return 0;
     }
 
-    /* Auto-detect: try Vulkan first */
+    /* Auto-detect: try the kernel Vulkan device layer first */
     if (type == GPU_BACKEND_AUTO || type == GPU_BACKEND_VULKAN) {
-#ifdef GGML_USE_VULKAN
-        console_printf("[GPU Backend] Attempting Vulkan initialization...\n");
+        int vk_result = vk_device_init();
+        if (vk_result == VK_DEV_OK && vk_device_available()) {
+            g_backend_type = GPU_BACKEND_VULKAN;
+            g_backend_available = 1;
 
-        /* Try to initialize Vulkan backend */
-        int vk_result = ggml_backend_vk_init();
-        if (vk_result == 0) {
-            /* Check if any devices are available */
-            int device_count = ggml_backend_vk_get_device_count();
-            if (device_count > 0) {
-                g_backend_type = GPU_BACKEND_VULKAN;
-                g_backend_available = 1;
-
-                /* Get first device info */
-                g_device_info.type = GPU_BACKEND_VULKAN;
-                g_device_info.available = 1;
-                ggml_backend_vk_get_device_description(0, g_device_info.device_name,
-                                                       sizeof(g_device_info.device_name));
-
-                console_printf("[GPU Backend] Vulkan initialized: %d device(s) found\n", device_count);
-                return 0;
+            g_device_info.type = GPU_BACKEND_VULKAN;
+            g_device_info.available = 1;
+            const char *name = vk_device_name();
+            int i = 0;
+            while (name[i] && i < (int)sizeof(g_device_info.device_name) - 1) {
+                g_device_info.device_name[i] = name[i];
+                i++;
             }
+            g_device_info.device_name[i] = '\0';
 
-            console_printf("[GPU Backend] Vulkan initialized but no devices found\n");
-        } else {
-            console_printf("[GPU Backend] Vulkan initialization failed (code %d)\n", vk_result);
+            console_printf("[GPU Backend] Vulkan compute initialized: %s\n",
+                           g_device_info.device_name);
+            g_probe_result = 1;
+            return 0;
         }
-#else
-        console_printf("[GPU Backend] Vulkan support not compiled in (GGML_USE_VULKAN not defined)\n");
-#endif
+        /* vk_device_init already logged the precise reason (no device, no
+         * Venus feature, no KMD). This is an expected condition under QEMU
+         * TCG, not an error. */
+        (void)vk_result;
     }
 
     /* GPU initialization failed - automatic CPU fallback */
@@ -79,6 +79,7 @@ int gpu_backend_init(gpu_backend_type_t type) {
     g_backend_available = 0;
     g_device_info.type = GPU_BACKEND_NONE;
     g_device_info.available = 0;
+    g_probe_result = 0;
 
     /* Return error to signal GPU unavailable (caller should handle fallback) */
     return -1;
@@ -88,7 +89,7 @@ int gpu_backend_init(gpu_backend_type_t type) {
 void gpu_backend_shutdown(void) {
     if (g_backend_available) {
         console_printf("[GPU Backend] Shutting down\n");
-        /* TODO: Call Vulkan cleanup when implemented */
+        vk_device_shutdown();
         g_backend_available = 0;
         g_backend_type = GPU_BACKEND_NONE;
     }
@@ -165,4 +166,52 @@ int gpu_backend_enumerate_devices(gpu_device_info_t* devices, int max_devices) {
 
     /* No GPU available */
     return 0;
+}
+
+/* ============================================================================
+ * Runtime Probe & Compute Dispatch (WS-GPU, v0.5.0 "Tesla")
+ * ============================================================================ */
+
+/* Probe for a usable Vulkan compute GPU. Cached: only the first call scans
+ * the PCI bus and logs. Returns 1 only when a device AND a kernel Vulkan
+ * driver are both usable (never under QEMU TCG — no Venus). */
+int gpu_backend_probe(void) {
+    if (g_probe_result >= 0) {
+        return g_probe_result;
+    }
+
+    int candidates = vk_device_probe(NULL, 0);
+    if (candidates <= 0 || vk_device_init() != VK_DEV_OK ||
+        !vk_device_available()) {
+        g_probe_result = 0;
+        return 0;
+    }
+
+    g_probe_result = 1;
+    return 1;
+}
+
+/* GPU matmul with in-shader Q8_0 dequantization.
+ * Returns 0 on success, negative when the work was NOT done (caller falls
+ * back to the SIMD CPU path). Never blocks indefinitely: any transport
+ * error surfaces as a negative result. */
+int gpu_matmul_q8_0(const void *A, const void *B, float *C, int m, int k, int n) {
+    if (g_probe_result < 0) {
+        gpu_backend_probe();
+    }
+    if (g_probe_result <= 0) {
+        return -1;
+    }
+    return vk_matmul_q8_0(A, (const float*)B, C,
+                          (uint32_t)m, (uint32_t)k, (uint32_t)n);
+}
+
+const char *gpu_backend_name(void) {
+    if (g_probe_result < 0) {
+        gpu_backend_probe();
+    }
+    if (g_probe_result <= 0) {
+        return "none";
+    }
+    return vk_device_name();
 }

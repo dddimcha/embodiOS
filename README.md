@@ -8,7 +8,7 @@ Boot it as a kernel, an ISO, or a USB stick, and you land in a chat session
 with a transformer running on raw hardware. No Linux. No libc. No userspace.
 No dependencies.
 
-![version](https://img.shields.io/badge/version-0.4.1-blue)
+![version](https://img.shields.io/badge/version-0.5.0-blue)
 ![build](https://img.shields.io/badge/build-passing-brightgreen)
 ![license](https://img.shields.io/badge/license-Apache--2.0-orange)
 ![platform](https://img.shields.io/badge/platform-x86__64-lightgrey)
@@ -50,7 +50,7 @@ Prebuilt `elf` + `iso` + a QUICKSTART ship in `dist/` via `./embodi release`.
   ██╔══╝  ██║╚██╔╝██║██╔══██╗██║   ██║██║  ██║██║██║   ██║╚════██║
   ███████╗██║ ╚═╝ ██║██████╔╝╚██████╔╝██████╔╝██║╚██████╔╝███████║
   ╚══════╝╚═╝     ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝ ╚═════╝ ╚══════╝
-              One binary. Any machine. No OS.        v0.4.0 Pragma
+              One binary. Any machine. No OS.        v0.5.0 Tesla
 
   [ OK ] CPU features initialized
   [ OK ] Memory: 2048 MB detected, identity-mapped
@@ -97,8 +97,32 @@ on real tensor data, `tools/verify_kquants.py`).
 
 ### Tokenizer & chat formats
 
-Merge-order BPE (48,900 merges) with autodetected chat templates:
-ChatML, llama2, GLM. Override at runtime with `chatformat`.
+Merge-order BPE (up to 280k merges / 128k vocab) with autodetected chat
+templates: ChatML, llama2, llama3 (`<|start_header_id|>`), GLM. Override at
+runtime with `chatformat`.
+
+### Real-time tick & control loops (v0.5.0)
+
+The system tick is a **LAPIC timer @1 kHz** calibrated against HPET (PIT
+remains as automatic fallback). On top of it: `rt_timer` IRQ-context periodic
+callbacks and the `motor` demo — a 1 kHz PID closed loop driving a simulated
+DC motor, with rdtsc jitter accounting (mean/stddev/p99) and an asynchronous
+LLM policy hook. See [docs/motor-demo.md](docs/motor-demo.md).
+
+### GPU compute backend (v0.5.0)
+
+Vulkan compute matmul path with hand-assembled SPIR-V shaders (f32, Q8_0),
+validated bit-exact on lavapipe host-side; kernel probes PCI for a
+Vulkan-capable device and falls back to SIMD when none is present. See
+[docs/gpu-backend.md](docs/gpu-backend.md).
+
+### Verified models
+
+| Model | Params | Status |
+|-------|--------|--------|
+| SmolLM-135M-Instruct Q4_K_M (embedded default) | 135M | ✅ chat verified |
+| **Llama-3.2-1B-Instruct Q4_K_M** | 1.24B | ✅ chat verified on bare metal (v0.5.0) |
+| GLM-Edge-1.5B-Chat | 1.5B | ✅ forward pass verified |
 
 ### Sampling controls
 
@@ -195,7 +219,9 @@ to shell is under a second either way.
 
 | Capability | Status |
 |------------|--------|
-| Preemptive multitasking | ✅ PIT IRQ0 @100 Hz drives a priority preemptive scheduler with real context switches (`tasktest` shows interleaved tasks); `-append poll` keeps the old polling mode |
+| Preemptive multitasking | ✅ LAPIC timer @1 kHz (HPET-calibrated, PIT fallback) drives a priority preemptive scheduler with real context switches (`tasktest` shows interleaved tasks); `-append poll` keeps the old polling mode |
+| Real-time control | ✅ 1 kHz closed-loop PID on `rt_timer` IRQ callbacks with jitter accounting + LLM policy hook (`motor` demo) |
+| GPU backend | ✅ Vulkan compute matmul (f32/Q8_0 SPIR-V), lavapipe bit-exact host validation, PCI probe + SIMD fallback |
 | Interrupt handling (IDT/GDT) | ✅ IDT with full register-dump panics, remapped PIC 8259, LAPIC LVT setup, EOI-before-dispatch |
 | Model runtime | ✅ GGUF + 12 quant formats + llama/chatglm/glm4 architectures |
 | Command processor | ✅ 30+ command shell with boxed help |
@@ -207,11 +233,12 @@ to shell is under a second either way.
 ## Roadmap
 
 - [ ] Direct UEFI boot without GRUB (hybrid BIOS+UEFI ISO already ships)
-- [ ] Per-CPU LAPIC timers + IPI wakeups (APs currently poll a mailbox with IF=0)
+- [ ] Per-CPU LAPIC timers + IPI wakeups (BSP tick is LAPIC @1 kHz; APs currently poll a mailbox with IF=0)
+- [ ] Q4_K/Q6_K SPIR-V shaders (f32 + Q8_0 ship today, host bit-exact)
+- [ ] Venus/virtio-gpu command transport to activate the GPU backend under QEMU
 - [ ] More verified models (Qwen2.5, larger GLM variants)
 - [ ] Multi-node exo inference over a real network (two-node ring works
       under QEMU with a documented TCG caveat)
-- [ ] GPU backend (`kernel/ai/gpu_backend.c` scaffold is in place)
 
 ## Documentation
 

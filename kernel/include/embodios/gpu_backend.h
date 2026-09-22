@@ -108,6 +108,27 @@ int gpu_backend_select_device(int device_index);
 int gpu_backend_enumerate_devices(gpu_device_info_t* devices, int max_devices);
 
 /* ============================================================================
+ * Runtime probe & compute dispatch (v0.5.0 "Tesla", WS-GPU)
+ * ============================================================================ */
+
+/* Probe for a usable Vulkan compute GPU (PCI scan + feature check).
+ * Returns >0 if a GPU is present AND a kernel Vulkan driver can drive it,
+ * 0 otherwise (expected under QEMU TCG: no Venus/virtio-gpu-vulkan).
+ * Idempotent and cached; safe to call on every matmul — the first call logs
+ * a one-line report ("GPU: none (...)" when nothing usable was found). */
+int gpu_backend_probe(void);
+
+/* GPU matmul with in-shader Q8_0 dequantization: C[m*n] = dequant(A) * B.
+ * A: ggml Q8_0 blocks (34 bytes per 32 values, fp16 scale + int8 quants);
+ * k must be a multiple of 32. B and C are fp32, row-major.
+ * Returns 0 on success; any negative value means "not computed" and the
+ * caller MUST fall back to the SIMD/scalar CPU path. */
+int gpu_matmul_q8_0(const void *A, const void *B, float *C, int m, int k, int n);
+
+/* Static name of the probed backend/device ("none" when unavailable). */
+const char *gpu_backend_name(void);
+
+/* ============================================================================
  * Testing
  * ============================================================================ */
 
