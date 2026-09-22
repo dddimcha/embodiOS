@@ -146,3 +146,4 @@ memory_analysis.txt
 /test_*.py
 /benchmark_metrics.py
 /e2e_*.py
+tools/host_test_vulkan

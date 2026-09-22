@@ -8,6 +8,7 @@
 #include "../../include/embodios/kernel.h"
 #include "../../include/embodios/console.h"
 #include "../../include/embodios/interrupt.h"
+#include "../../include/embodios/lapic_timer.h"
 
 /* IDT entry structure */
 struct idt_entry {
@@ -169,6 +170,22 @@ void interrupt_handler(struct interrupt_frame* frame)
 
     if (vector >= 32 && vector < 48) {
         uint8_t irq = (uint8_t)(vector - 32);
+
+        if (irq == IRQ_TIMER && lapic_timer_active()) {
+            /* LAPIC timer tick (the PIT line is masked at the PIC, so
+             * vector 0x20 is delivered by the LAPIC): EOI goes to the
+             * LAPIC, not the 8259. The fast tick drives the rt_timer
+             * callback layer; the legacy 100 Hz chain (tick accounting +
+             * scheduler_tick) is decimated so preemption semantics,
+             * uptime and hal_timer behavior are unchanged. */
+            lapic_timer_eoi();
+            lapic_timer_tick();
+            if (lapic_timer_legacy_due()) {
+                timer_tick();
+                timer_interrupt_handler();
+            }
+            return;
+        }
 
         /* Acknowledge the PIC first: the timer path below may context-switch
          * away from this stack, and the PIT must be allowed to raise the next

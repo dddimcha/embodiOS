@@ -7,6 +7,7 @@
 #include "embodios/cmd_storage.h"
 #include "embodios/cmd_smp.h"
 #include "embodios/cmd_power.h"
+#include "embodios/motor.h"
 #include "embodios/streaming_inference.h"
 #include "embodios/console.h"
 #include "embodios/cpu.h"
@@ -338,6 +339,41 @@ static int chat_ask(const char *prompt, chat_piece_fn on_piece, void *piece_ctx)
     return generated;
 }
 
+/* WS-RT: LLM policy bridge for the motor demo (core/cmd_motor.c).
+ * Runs one short generation via the normal chat path and captures the
+ * reply text instead of streaming it to the console. Task context only —
+ * the caller (the 'motor run' loop) never blocks the control loop. */
+typedef struct {
+    char *out;
+    unsigned long size;
+    unsigned long len;
+} motor_llm_capture_t;
+
+static void motor_llm_piece(const char *piece, int len, void *vctx)
+{
+    motor_llm_capture_t *cap = (motor_llm_capture_t *)vctx;
+    for (int i = 0; i < len; i++) {
+        if (cap->len + 1 < cap->size) {
+            cap->out[cap->len++] = piece[i];
+        }
+    }
+}
+
+int motor_llm_query(const char *prompt, char *out, unsigned long out_size)
+{
+    if (!prompt || !out || out_size == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    if (ensure_inference_ready() != 0) {
+        return -1;
+    }
+    motor_llm_capture_t cap = { out, out_size, 0 };
+    int generated = chat_ask(prompt, motor_llm_piece, &cap);
+    out[cap.len] = '\0';
+    return (generated > 0 && cap.len > 0) ? 0 : -1;
+}
+
 /* Dim one-line generation stats appended after a chat answer:
  * proof of time-to-first-token (prompt eval) vs steady-state decode. */
 static void chat_print_stats_line(void)
@@ -402,6 +438,7 @@ void process_command(const char *command)
                        ui_c(UI_CYAN), ui_c(UI_RESET));
         console_printf(" %s│%s   version / mem  Build info, memory usage\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s   uptime / tasktest  Ticks+seconds, preemption demo\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   motor          1kHz PID motor demo + jitter\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s   color on|off   Toggle ANSI colors\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s   lspci / power    Hardware list, power status\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s   reboot / shutdown  Reset or ACPI poweroff\n", ui_c(UI_DIM), ui_c(UI_RESET));
@@ -2544,6 +2581,10 @@ skip_ethercat:
          * handled in core/cmd_storage.c */
     } else if (cmd_smp_dispatch(command)) {
         /* SMP commands (cpus/smpwork) — handled in core/cmd_smp.c */
+    } else if (strncmp(command, "motor", 5) == 0 &&
+               (command[5] == '\0' || command[5] == ' ')) {
+        /* RT motor control demo — handled in core/cmd_motor.c */
+        cmd_motor_dispatch(command + 5);
     } else if (strcmp(command, "uptime") == 0) {
         uint64_t ticks = timer_get_ticks();
         uint32_t freq = timer_get_frequency();
@@ -2568,6 +2609,16 @@ skip_ethercat:
                        ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s%s╚══════╝%s Build: %s\n\n",
                        ui_c(UI_CYAN), ui_c(UI_BOLD), ui_c(UI_RESET), kernel_build);
+    /* WS-GPU (v0.5.0 "Tesla"): GPU compute probe report. Keep this hunk at
+     * the end of the dispatcher, disjoint from other workstreams. */
+    } else if (strcmp(command, "gpu") == 0) {
+        extern int gpu_backend_probe(void);
+        extern const char *gpu_backend_name(void);
+        console_printf("GPU backend: %s\n", gpu_backend_name());
+        console_printf("usable Vulkan compute device: %s\n",
+                       gpu_backend_probe() ? "yes" : "no");
+        console_printf("(details: run 'vulkantest'; host validation: "
+                       "make -C tools vktest)\n");
     } else {
         /* Unknown command - provide helpful suggestions */
         console_printf("\n Unknown command: '%s'\n", command);

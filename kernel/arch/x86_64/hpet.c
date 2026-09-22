@@ -7,6 +7,7 @@
 #include <embodios/hpet.h>
 #include <embodios/types.h>
 #include <embodios/console.h>
+#include "../../include/arch/x86_64/paging.h"
 
 /* ============================================================================
  * Memory-Mapped I/O Access
@@ -59,13 +60,15 @@ static uint64_t hpet_start_counter = 0;
  */
 static volatile void *hpet_detect_fixed_address(void)
 {
-    /* Skip HPET in QEMU without proper memory mapping
-     * HPET base (0xFED00000) not mapped in early boot
-     * Fall back to TSC-based timing instead */
-    return NULL;
+    /* HPET MMIO (0xFED00000) sits above the boot-time 1GB identity map.
+     * Map it on demand (2MB pages from the static PD pool — no PMM/heap
+     * dependency, safe this early), then probe the capabilities register
+     * for a sane signature. Without an HPET the reads come back as
+     * 0xFF.../garbage and the sanity checks below reject it. */
+    if (!arch_identity_map_mmio(HPET_DEFAULT_BASE_ADDR, 0x1000)) {
+        return NULL;
+    }
 
-    /* Original code for systems with HPET mapped: */
-#if 0
     volatile void *base = (volatile void *)(uintptr_t)HPET_DEFAULT_BASE_ADDR;
 
     /* Try to read capabilities register
@@ -91,7 +94,6 @@ static volatile void *hpet_detect_fixed_address(void)
     }
 
     return base;
-#endif
 }
 
 /* ============================================================================

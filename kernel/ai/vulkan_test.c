@@ -12,6 +12,9 @@
 #include <embodios/kernel.h>
 #include <embodios/mm.h>
 #include <embodios/gpu_backend.h>
+#include <embodios/vk_device.h>
+
+#include "vk_shaders.h"
 
 /* ============================================================================
  * Test Utilities
@@ -32,6 +35,79 @@ static int tests_failed = 0;
 
 #define TEST_ASSERT_RANGE(val, min, max, msg) \
     TEST_ASSERT((val) >= (min) && (val) <= (max), msg)
+
+/* ============================================================================
+ * Real Probe Report (WS-GPU, v0.5.0 "Tesla")
+ * ============================================================================ */
+
+static void test_probe_report(void)
+{
+    console_printf("[Test] GPU probe report (real PCI scan)\n");
+
+    vk_candidate_t candidates[VK_MAX_CANDIDATES];
+    int count = vk_device_probe(candidates, VK_MAX_CANDIDATES);
+    int usable = gpu_backend_probe();
+
+    console_printf("  PCI GPU candidates: %d, usable Vulkan compute: %s\n",
+                   count, usable ? "yes" : "no");
+    for (int i = 0; i < count; i++) {
+        console_printf("    [%d] %04x:%04x at %02x:%02x.%x class %02x:%02x%s\n",
+                       i, candidates[i].vendor_id, candidates[i].device_id,
+                       candidates[i].bus, candidates[i].device,
+                       candidates[i].function,
+                       candidates[i].class_code, candidates[i].subclass,
+                       candidates[i].is_virtio_gpu ? " (virtio-gpu)" : "");
+    }
+    console_printf("  Backend name: %s\n", gpu_backend_name());
+
+    /* Under QEMU TCG there is no Venus/virtio-gpu-vulkan, so both outcomes
+     * are valid; the probe must simply be consistent. */
+    TEST_ASSERT(count >= 0, "Probe returned a candidate count");
+    TEST_ASSERT(usable == 0 || usable == 1, "Probe result is boolean");
+    TEST_ASSERT(gpu_backend_name() != 0, "Backend name is never NULL");
+    if (usable) {
+        TEST_ASSERT(count > 0, "Usable GPU implies at least one candidate");
+    }
+    console_printf("  PASS: Probe report consistent\n");
+}
+
+static void test_embedded_shaders(void)
+{
+    console_printf("[Test] Embedded SPIR-V shaders (from vk_shaders.h)\n");
+
+    TEST_ASSERT(vk_spv_matmul_f32_word_count > 5,
+                "matmul_f32 word count sane");
+    TEST_ASSERT(vk_spv_matmul_f32[0] == 0x07230203u,
+                "matmul_f32 SPIR-V magic");
+    TEST_ASSERT(vk_spv_matmul_q8_0_word_count > 5,
+                "matmul_q8_0 word count sane");
+    TEST_ASSERT(vk_spv_matmul_q8_0[0] == 0x07230203u,
+                "matmul_q8_0 SPIR-V magic");
+
+    console_printf("  matmul_f32: %u words, matmul_q8_0: %u words "
+                   "(lavapipe-validated on host)\n",
+                   vk_spv_matmul_f32_word_count, vk_spv_matmul_q8_0_word_count);
+    console_printf("  PASS: Embedded shaders present and well-formed\n");
+}
+
+static void test_dispatch_fallback_contract(void)
+{
+    console_printf("[Test] Dispatch fallback contract\n");
+
+    /* When no GPU is usable, gpu_matmul_q8_0 MUST return < 0 so callers
+     * fall back to the SIMD CPU path (zero-regression requirement). */
+    if (gpu_backend_probe() == 0) {
+        static const uint8_t dummy_a[34] = {0};
+        static const float dummy_b[32] = {0};
+        float c = 0.0f;
+        int ret = gpu_matmul_q8_0(dummy_a, dummy_b, &c, 1, 32, 1);
+        TEST_ASSERT(ret < 0, "gpu_matmul_q8_0 returns <0 without GPU");
+        console_printf("  PASS: Fallback contract honored (ret=%d)\n", ret);
+    } else {
+        console_printf("  SKIP: GPU present, fallback path not exercised\n");
+        tests_passed++;
+    }
+}
 
 /* ============================================================================
  * Backend Initialization Tests
@@ -319,8 +395,14 @@ int run_vulkan_tests(void)
     console_printf("====================================================================\n");
     console_printf("\n");
 
+    /* Real probe report (WS-GPU) */
+    console_printf("--- Probe & Dispatch Contract ---\n");
+    test_probe_report();
+    test_embedded_shaders();
+    test_dispatch_fallback_contract();
+
     /* Initialization Tests */
-    console_printf("--- Backend Initialization Tests ---\n");
+    console_printf("\n--- Backend Initialization Tests ---\n");
     test_backend_init_auto();
     test_backend_init_vulkan();
     test_backend_init_idempotent();

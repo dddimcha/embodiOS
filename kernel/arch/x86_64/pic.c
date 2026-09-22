@@ -7,6 +7,7 @@
  */
 #include <stdint.h>
 #include "../../include/arch/x86_64/pic.h"
+#include "../../include/embodios/lapic_timer.h"
 
 #define PIC1_COMMAND    0x20
 #define PIC1_DATA       0x21
@@ -96,6 +97,12 @@ void pic_mask_irq(uint8_t irq)
 
 void pic_unmask_irq(uint8_t irq)
 {
+    /* When the LAPIC timer has taken over the scheduling tick, the PIT
+     * line stays masked: vector 0x20 is delivered by the LAPIC instead,
+     * and unmasking IRQ0 would double-fire the tick handler. */
+    if (irq == 0 && lapic_timer_active()) {
+        return;
+    }
     uint16_t port = (irq < 8) ? PIC1_DATA : PIC2_DATA;
     uint8_t bit = irq & 7;
     outb(port, inb(port) & (uint8_t)~(1 << bit));
