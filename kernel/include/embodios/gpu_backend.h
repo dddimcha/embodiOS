@@ -125,6 +125,21 @@ int gpu_backend_probe(void);
  * caller MUST fall back to the SIMD/scalar CPU path. */
 int gpu_matmul_q8_0(const void *A, const void *B, float *C, int m, int k, int n);
 
+/* GPU matmul Q4_K weights x Q8_0 activations: C[m*n] = dequant(A) * dequant(B).
+ * A: ggml Q4_K superblocks (144 bytes per 256 values); B: ggml Q8_0 block
+ * chains, block b of column j at byte offset (j*(k/32) + b) * 34 (the caller
+ * quantizes fp32 activations per column, matching quantize_row_q8_0).
+ * k must be a multiple of 256.
+ * Returns 0 on success; any negative value means "not computed" and the
+ * caller MUST fall back to the SIMD/scalar CPU path. */
+int gpu_matmul_q4_k_q8_0(const void *A, const void *B, float *C,
+                         int m, int k, int n);
+
+/* As gpu_matmul_q4_k_q8_0, with A in ggml Q6_K superblocks (210 bytes per
+ * 256 values). */
+int gpu_matmul_q6_k_q8_0(const void *A, const void *B, float *C,
+                         int m, int k, int n);
+
 /* Static name of the probed backend/device ("none" when unavailable). */
 const char *gpu_backend_name(void);
 

@@ -405,8 +405,9 @@ int virtio_net_send(const void *data, size_t length)
             }
         }
 
-        if (hal_timer_get_microseconds() - start_us > 100000) {
-            break;  /* 100 ms */
+        if (hal_timer_get_microseconds() - start_us > 2000000) {
+            break;  /* 2000 ms — под TCG-контенцией хоста vCPU может
+                     * сталлиться на сотни мс; 100 мс было недостаточно */
         }
     }
 

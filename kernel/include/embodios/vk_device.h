@@ -81,6 +81,19 @@ int vk_matmul_f32(const float *A, const float *B, float *C,
 int vk_matmul_q8_0(const void *A, const float *B, float *C,
                    uint32_t m, uint32_t k, uint32_t n);
 
+/* C[m*n] = dequant_q4_k(A) * dequant_q8_0(B); A is ggml Q4_K superblocks
+ * (144 bytes per 256 values), B is Q8_0 block chains (block b of column j at
+ * byte offset (j*(k/32) + b) * 34). k must be a multiple of 256.
+ * Bit-exact against the CPU reference in tools/host_test_vulkan.c on
+ * lavapipe. Returns VK_DEV_OK or negative (caller falls back to CPU). */
+int vk_matmul_q4_k_q8_0(const void *A, const void *B, float *C,
+                        uint32_t m, uint32_t k, uint32_t n);
+
+/* As vk_matmul_q4_k_q8_0, with A in ggml Q6_K superblocks (210 bytes per
+ * 256 values: ql[128] qh[64] scales[16] int8, d fp16). */
+int vk_matmul_q6_k_q8_0(const void *A, const void *B, float *C,
+                        uint32_t m, uint32_t k, uint32_t n);
+
 /* Shutdown (idempotent). */
 void vk_device_shutdown(void);
 

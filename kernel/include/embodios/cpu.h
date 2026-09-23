@@ -49,11 +49,19 @@ struct smp_cpu_info {
     uint32_t apic_id;       /* Local APIC ID */
     int online;             /* CPU is online */
     int bsp;                /* Bootstrap processor */
+    int parked_if1;         /* AP parks with IF=1 (sti; hlt, IPI wakeup) */
     uint64_t work_count;    /* Mailbox work items executed on this CPU */
     uint64_t work_cycles;   /* TSC cycles spent in mailbox work */
-    uint64_t polls;         /* Mailbox poll iterations (AP liveness) */
+    uint64_t polls;         /* Mailbox poll iterations (AP liveness; only
+                             * advances in the IF=0 polling fallback) */
+    uint64_t ipi_wakeups;   /* Wakeup IPIs delivered to this CPU */
+    uint64_t ap_ticks;      /* AP local LAPIC timer ticks */
 };
 int smp_get_cpu_info(uint32_t cpu, struct smp_cpu_info *out);
+
+/* Map a sequential CPU id to its Local APIC ID (-1 if unknown/offline).
+ * Used by ipi.c for physical-destination IPIs. */
+int smp_cpu_to_apic_id(uint32_t cpu);
 
 /* Cross-CPU work queue: run fn(arg) on an AP's mailbox loop.
  * smp_work_dispatch posts work (spins if the previous item on that CPU is

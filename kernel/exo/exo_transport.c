@@ -170,14 +170,21 @@ static int tcp_write_all(int fd, const uint8_t *buf, size_t len,
             tcpip_poll();
             continue;
         }
-        if (ret == NET_ERR_UNREACHABLE) {
-            /* ARP ещё не разрешён — подождать ответ */
+        if (ret == NET_ERR_UNREACHABLE || ret == -4 /*VIRTIO_ERR_TIMEOUT*/) {
+            /* ARP ещё не разрешён, либо драйвер не дождался TX-completion
+             * под нагрузкой — повторить до истечения таймаута. Повтор
+             * безопасен: seq не инкрементируется при неудаче, а in-order
+             * guard у получателя дропает дубликаты. */
             if (timeout_ms &&
                 hal_timer_get_milliseconds() - start > timeout_ms)
                 return EXO_ERR_TIMEOUT;
             tcpip_poll();
             continue;
         }
+        console_printf("[EXO] transport: write fail fd=%d ret=%d state=%d\n",
+                       fd, ret,
+                       tcpip_get_socket_for_testing(fd)
+                           ? tcpip_get_socket_for_testing(fd)->state : -99);
         return EXO_ERR_NET;
     }
     return EXO_OK;
@@ -205,8 +212,94 @@ static int tcp_wait_established(int fd, uint32_t timeout_ms)
 }
 
 /* ============================================================================
- * Публичный API
+ * Персистентные соединения (v0.6.0)
+ *
+ * Раньше каждый hop открывал НОВОЕ TCP-соединение (connect-per-token):
+ * SYN-штормы, TIME_WAIT-утечки, ephemeral-порты и accept-блокировки
+ * делали кольцо нестабильным под TCG-нагрузкой (сбой после N токенов).
+ * Теперь: одно исходящее соединение на (ip,port) переиспользуется между
+ * токенами; входящие соединения живут постоянно и читаются асинхронно
+ * (без блокировки главного цикла) с покадровым накоплением.
  * ============================================================================ */
+
+#define EXO_OUT_CACHE   4
+#define EXO_IN_MAX      6
+#define EXO_IN_BUF      (48 + 16384)  /* hdr + hidden f32 до 4096 */
+
+typedef struct {
+    uint32_t ip;
+    uint16_t port;
+    int      fd;
+} exo_out_conn_t;
+
+typedef struct {
+    int    fd;
+    size_t have;
+    uint8_t buf[EXO_IN_BUF];
+} exo_in_conn_t;
+
+static exo_out_conn_t g_out[EXO_OUT_CACHE];
+static exo_in_conn_t  g_in[EXO_IN_MAX];
+
+static void out_conn_drop(int slot)
+{
+    if (g_out[slot].fd >= 0) {
+        socket_close(g_out[slot].fd);
+        /* повторный close добивает FIN_WAIT/CLOSED-состояние */
+        g_out[slot].fd = -1;
+    }
+}
+
+/* Валидное открытое соединение до (ip,port) или -1. */
+static int out_conn_get(uint32_t ip, uint16_t port)
+{
+    for (int i = 0; i < EXO_OUT_CACHE; i++) {
+        if (g_out[i].fd < 0) continue;
+        if (g_out[i].ip != ip || g_out[i].port != port) continue;
+        socket_t *s = tcpip_get_socket_for_testing(g_out[i].fd);
+        if (s && s->active && s->state == TCP_ESTABLISHED)
+            return g_out[i].fd;
+        out_conn_drop(i);  // stale
+    }
+    return -1;
+}
+
+/* Открыть новое соединение и положить в кэш. Возврат fd или <0. */
+static int out_conn_new(uint32_t ip, uint16_t port, int *err_out)
+{
+    int slot = -1;
+    for (int i = 0; i < EXO_OUT_CACHE; i++)
+        if (g_out[i].fd < 0) { slot = i; break; }
+    if (slot < 0) slot = 0;  /* вытеснение (старый fd уже мёртв) */
+
+    int fd = socket_create(SOCK_STREAM, IP_PROTO_TCP);
+    if (fd < 0) {
+        console_printf("[EXO] transport: socket_create failed (table full)\n");
+        if (err_out) *err_out = EXO_ERR_NET;
+        return -1;
+    }
+    if (socket_connect(fd, ip, port) != NET_OK) {
+        socket_close(fd);
+        if (err_out) *err_out = EXO_ERR_NET;
+        return -1;
+    }
+    int ret = tcp_wait_established(fd, EXO_CONNECT_TIMEOUT_MS);
+    if (ret != EXO_OK) {
+        console_printf("[EXO] transport: handshake timeout/fail (%d) to %u.%u.%u.%u:%u\n",
+                       ret,
+                       (unsigned)(ip >> 24) & 0xFF, (unsigned)(ip >> 16) & 0xFF,
+                       (unsigned)(ip >> 8) & 0xFF, (unsigned)ip & 0xFF,
+                       (unsigned)port);
+        socket_close(fd);
+        if (err_out) *err_out = ret;
+        return -1;
+    }
+    out_conn_drop(slot);
+    g_out[slot].ip = ip;
+    g_out[slot].port = port;
+    g_out[slot].fd = fd;
+    return fd;
+}
 
 int exo_transport_listen(uint16_t port)
 {
@@ -234,30 +327,33 @@ int exo_send_tensor(uint32_t dst_ip, uint16_t dst_port,
     if (hdr->payload_len > 0 && !payload)
         return EXO_ERR_PROTOCOL;
 
-    int fd = socket_create(SOCK_STREAM, IP_PROTO_TCP);
-    if (fd < 0) return EXO_ERR_NET;
-
-    int ret = socket_connect(fd, dst_ip, dst_port);
-    if (ret != NET_OK) {
-        socket_close(fd);
-        return EXO_ERR_NET;
-    }
-    ret = tcp_wait_established(fd, EXO_CONNECT_TIMEOUT_MS);
-    if (ret != EXO_OK) {
-        socket_close(fd);
-        return ret;
-    }
-
     uint8_t hdr_buf[48];
     size_t hdr_len = hdr_serialize(hdr, hdr_buf);
 
-    ret = tcp_write_all(fd, hdr_buf, hdr_len, EXO_IO_TIMEOUT_MS);
-    if (ret == EXO_OK && hdr->payload_len > 0)
-        ret = tcp_write_all(fd, (const uint8_t *)payload,
-                            hdr->payload_len, EXO_IO_TIMEOUT_MS);
+    /* Две попытки: первая на закэшированном соединении, вторая — на
+     * свежем (пере-подключение после ошибки/разрыва). */
+    int last_err = EXO_ERR_NET;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int fd = out_conn_get(dst_ip, dst_port);
+        if (fd < 0) {
+            int err = EXO_ERR_NET;
+            fd = out_conn_new(dst_ip, dst_port, &err);
+            if (fd < 0) { last_err = err; continue; }
+        }
 
-    socket_close(fd);
-    return ret;
+        int ret = tcp_write_all(fd, hdr_buf, hdr_len, EXO_IO_TIMEOUT_MS);
+        if (ret == EXO_OK && hdr->payload_len > 0)
+            ret = tcp_write_all(fd, (const uint8_t *)payload,
+                                hdr->payload_len, EXO_IO_TIMEOUT_MS);
+        if (ret == EXO_OK)
+            return EXO_OK;
+
+        /* Разрыв/ошибка: выкинуть из кэша и переподключиться один раз */
+        last_err = ret;
+        for (int i = 0; i < EXO_OUT_CACHE; i++)
+            if (g_out[i].fd == fd) { out_conn_drop(i); break; }
+    }
+    return last_err;
 }
 
 int exo_recv_tensor(int fd, exo_tensor_msg_t *hdr,
@@ -271,7 +367,7 @@ int exo_recv_tensor(int fd, exo_tensor_msg_t *hdr,
 
     ret = hdr_deserialize(hdr_buf, hdr);
     if (ret != EXO_OK) {
-        console_printf("[EXO] transport: bad message header (magic)\n");
+        console_printf("[EXO] transport: bad message header (magic) fd=%d\n", fd);
         return ret;
     }
 
@@ -283,45 +379,97 @@ int exo_recv_tensor(int fd, exo_tensor_msg_t *hdr,
     return tcp_read_exact(fd, (uint8_t *)payload, hdr->payload_len, timeout_ms);
 }
 
+/* Асинхронный polling: accept новых + покадровое чтение постоянных
+ * входящих соединений. БЕЗ блокировок — вызывается из главного цикла. */
 void exo_transport_poll(void)
 {
-    if (g_listen_fd < 0) return;
-
-    /* TODO(tcpip.c): публичный способ узнать о входящем SYN без
-     * tcpip_get_socket_for_testing() */
-    socket_t *s = tcpip_get_socket_for_testing(g_listen_fd);
-    if (!s || !s->active)
-        return;
-    /* SYN получен (SYN_RECEIVED) или handshake завершён (ESTABLISHED) */
-    if (s->state != TCP_SYN_RECEIVED && s->state != TCP_ESTABLISHED)
-        return;
-
-    uint32_t remote_ip = 0;
-    uint16_t remote_port = 0;
-    int conn = socket_accept(g_listen_fd, &remote_ip, &remote_port);
-    if (conn < 0) return;
-
-    char ip_str[16];
-    ip_to_string(remote_ip, ip_str, sizeof(ip_str));
-    console_printf("[EXO] tensor connection from %s:%u\n",
-                   ip_str, (unsigned)remote_port);
-
-    /* Принять одно сообщение на этом соединении и передать оркестратору.
-     * Максимальный payload — скрытый вектор модели (f32): 64 КБ с запасом. */
-    static uint8_t payload_buf[64 * 1024];
-    exo_tensor_msg_t hdr;
-
-    int ret = exo_recv_tensor(conn, &hdr, payload_buf,
-                              sizeof(payload_buf), EXO_IO_TIMEOUT_MS);
-    if (ret == EXO_OK) {
-        exo__handle_tensor_msg(conn, &hdr, payload_buf);
-    } else {
-        console_printf("[EXO] transport: recv failed (%d)\n", ret);
+    /* accept: listen-сокет увидел SYN (SYN_RECEIVED/ESTABLISHED) */
+    if (g_listen_fd >= 0) {
+        socket_t *ls = tcpip_get_socket_for_testing(g_listen_fd);
+        if (ls && ls->active &&
+            (ls->state == TCP_SYN_RECEIVED || ls->state == TCP_ESTABLISHED)) {
+            uint32_t remote_ip = 0;
+            uint16_t remote_port = 0;
+            int conn = socket_accept(g_listen_fd, &remote_ip, &remote_port);
+            if (conn >= 0) {
+                char ip_str[16];
+                ip_to_string(remote_ip, ip_str, sizeof(ip_str));
+                console_printf("[EXO] tensor connection from %s:%u\n",
+                               ip_str, (unsigned)remote_port);
+                int slot = -1;
+                for (int i = 0; i < EXO_IN_MAX; i++)
+                    if (g_in[i].fd < 0) { slot = i; break; }
+                if (slot >= 0) {
+                    g_in[slot].fd = conn;
+                    g_in[slot].have = 0;
+                } else {
+                    console_printf("[EXO] transport: inbound table full\n");
+                    socket_close(conn);
+                }
+                /* accept() переиспользовал listen-fd → пересоздать listener */
+                g_listen_fd = -1;
+                exo_transport_listen((uint16_t)g_listen_port);
+            }
+        }
+    } else if (g_listen_port > 0) {
+        /* listener умер (socket table churn) — восстановить */
+        exo_transport_listen((uint16_t)g_listen_port);
     }
 
-    socket_close(conn);
+    /* сервис постоянных входящих соединений */
+    for (int i = 0; i < EXO_IN_MAX; i++) {
+        if (g_in[i].fd < 0) continue;
+        int fd = g_in[i].fd;
+        socket_t *s = tcpip_get_socket_for_testing(fd);
+        if (!s || !s->active || s->state == TCP_CLOSED) {
+            g_in[i].fd = -1;
+            continue;
+        }
+        if (s->state == TCP_CLOSE_WAIT || s->state == TCP_LAST_ACK ||
+            s->state == TCP_TIME_WAIT) {
+            /* пир закрыл — добить и освободить слот */
+            socket_close(fd);
+            socket_t *s2 = tcpip_get_socket_for_testing(fd);
+            if (s2 && s2->active && s2->state == TCP_LAST_ACK) {
+                /* LAST_ACK ждёт финальный ACK пира; оставить стеку,
+                 * слот переиспользуем только после фактического close */
+                continue;
+            }
+            g_in[i].fd = -1;
+            continue;
+        }
 
-    /* accept() переиспользовал listen-fd → пересоздать listener */
-    g_listen_fd = -1;
-    exo_transport_listen((uint16_t)g_listen_port);
+        /* дренировать доступное в покадровый буфер */
+        if (g_in[i].have < sizeof(g_in[i].buf)) {
+            int n = socket_recv(fd, g_in[i].buf + g_in[i].have,
+                                sizeof(g_in[i].buf) - g_in[i].have);
+            if (n > 0)
+                g_in[i].have += (size_t)n;
+        }
+
+        /* обработать все ПОЛНЫЕ сообщения в буфере */
+        while (g_in[i].have >= 48) {
+            exo_tensor_msg_t hdr;
+            if (hdr_deserialize(g_in[i].buf, &hdr) != EXO_OK) {
+                console_printf("[EXO] transport: bad magic fd=%d, closing\n", fd);
+                socket_close(fd);
+                g_in[i].fd = -1;
+                break;
+            }
+            size_t need = 48 + (size_t)hdr.payload_len;
+            if (need > sizeof(g_in[i].buf)) {
+                console_printf("[EXO] transport: oversize payload %u, closing\n",
+                               (unsigned)hdr.payload_len);
+                socket_close(fd);
+                g_in[i].fd = -1;
+                break;
+            }
+            if (g_in[i].have < need)
+                break;  /* ждать остаток payload в следующих poll */
+
+            exo__handle_tensor_msg(fd, &hdr, g_in[i].buf + 48);
+            memmove(g_in[i].buf, g_in[i].buf + need, g_in[i].have - need);
+            g_in[i].have -= need;
+        }
+    }
 }

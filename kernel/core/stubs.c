@@ -19,6 +19,7 @@
 #include "embodios/modbus.h"
 #include "embodios/ethercat.h"
 #include "embodios/exo.h"
+#include "../exo/exo_internal.h"
 #include "embodios/benchmark.h"
 #include "embodios/model_registry.h"
 #include "embodios/pci.h"
@@ -398,6 +399,16 @@ static void chat_print_stats_line(void)
 }
 
 /* Enhanced command processing */
+/* exochat: emit-адаптер exo__chat → консоль (см. команду exochat ниже). */
+static void exochat_console_emit(const char *text, bool done, void *ctx)
+{
+    (void)ctx;
+    if (text && text[0])
+        console_printf("%s", text);
+    if (done)
+        console_printf("\n");
+}
+
 void process_command(const char *command)
 {
     /* Skip empty commands */
@@ -447,6 +458,7 @@ void process_command(const char *command)
         console_printf(" %s│%s   exo / exonodes Distributed node + ring table\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s   exoshard       Assigned model shard\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s   exoserve [p]   OpenAI-compatible API\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   exochat        Chat via exo ring (console out)\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s %s[Tests]%s\n", ui_c(UI_DIM), ui_c(UI_RESET),
                        ui_c(UI_CYAN), ui_c(UI_RESET));
         console_printf(" %s│%s   memtest / locktest / quanttest / benchmark\n", ui_c(UI_DIM), ui_c(UI_RESET));
@@ -539,6 +551,7 @@ void process_command(const char *command)
         console_printf("   exonodes           Discovered ring nodes table\n");
         console_printf("   exoshard [m] [n]   Show/assign layer shard\n");
         console_printf("   exoserve [p|stop]  OpenAI API server start/stop\n");
+        console_printf("   exochat [n] <msg>  Chat via exo ring, console output\n");
         console_printf("\n");
         console_printf(" Industrial:\n");
         console_printf("   modbustest         Modbus TCP test\n");
@@ -2510,6 +2523,61 @@ skip_ethercat:
             if (ret != EXO_OK)
                 console_printf("exo: add peer failed (%d)\n", ret);
         }
+    } else if (strcmp(command, "tcpsockets") == 0) {
+        /* tcpsockets — дамп TCP/UDP сокет-таблицы (диагностика утечек
+         * состояний FIN_WAIT/LAST_ACK/TIME_WAIT и т.п.) */
+        extern socket_t* tcpip_get_socket_for_testing(int fd);
+        static const char * const tcp_states[] = {
+            "CLOSED", "LISTEN", "SYN_SENT", "SYN_RECEIVED", "ESTABLISHED",
+            "FIN_WAIT_1", "FIN_WAIT_2", "CLOSE_WAIT", "CLOSING",
+            "LAST_ACK", "TIME_WAIT"
+        };
+        console_printf("fd  type state         local       remote\n");
+        for (int i = 0; i < 16; i++) {
+            socket_t *s = tcpip_get_socket_for_testing(i);
+            if (!s || !s->active) continue;
+            char lip[16], rip[16];
+            ip_to_string(s->local_ip, lip, sizeof(lip));
+            ip_to_string(s->remote_ip, rip, sizeof(rip));
+            const char *st = (s->state >= 0 && s->state <= 10)
+                             ? tcp_states[s->state] : "?";
+            console_printf("%2d  %s   %-12s %s:%u  %s:%u\n",
+                           i, s->type == SOCK_STREAM ? "tcp" : "udp",
+                           st, lip, s->local_port, rip, s->remote_port);
+        }
+    } else if (strncmp(command, "exochat", 7) == 0) {
+        /* exochat [max_tokens] <prompt> — один чат-ход через exo-путь:
+         * если назначен multi-node шард и локальная нода — ring[0],
+         * генерация идёт по кольцу (TENSOR-хопы видны в логе), иначе
+         * локальный полный прогон. Вывод — на консоль. Позволяет
+         * демонстрировать кольцо без HTTP-доступа хоста к гостю
+         * (point-to-point линки -netdev socket). */
+        if (!exo_is_running()) {
+            console_printf("exo: not running (start with 'exo')\n");
+        } else {
+            const char *args = command + 7;
+            while (*args == ' ') args++;
+            int max_tokens = 16;
+            /* опциональный числовой префикс — max_tokens */
+            if (*args >= '0' && *args <= '9') {
+                int v = 0;
+                const char *p = args;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                if (*p == ' ' && v > 0 && v <= 256) {
+                    max_tokens = v;
+                    args = p + 1;
+                    while (*args == ' ') args++;
+                }
+            }
+            if (*args == '\0' || *args == '\n') {
+                console_printf("Usage: exochat [max_tokens] <prompt>\n");
+            } else {
+                int ret = exo__chat(args, exochat_console_emit, NULL,
+                                    max_tokens);
+                if (ret != EXO_OK)
+                    console_printf("exo: chat failed (%d)\n", ret);
+            }
+        }
     } else if (strncmp(command, "setip ", 6) == 0) {
         /* setip <ip> [netmask] [gateway] — статическая конфигурация IPv4
          * (нужна для point-to-point линков между гостями QEMU, где обе
@@ -2619,6 +2687,11 @@ skip_ethercat:
                        gpu_backend_probe() ? "yes" : "no");
         console_printf("(details: run 'vulkantest'; host validation: "
                        "make -C tools vktest)\n");
+    /* WS-C (v0.6.0 "Volta"): virtio-gpu transport probe report. Isolated
+     * hunk at the end of the dispatcher, disjoint from other workstreams. */
+    } else if (strcmp(command, "gpuinfo") == 0) {
+        extern void virtio_gpu_print_info(void);
+        virtio_gpu_print_info();
     } else {
         /* Unknown command - provide helpful suggestions */
         console_printf("\n Unknown command: '%s'\n", command);

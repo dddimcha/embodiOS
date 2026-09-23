@@ -74,6 +74,15 @@ ISR_NOERRCODE 45
 ISR_NOERRCODE 46
 ISR_NOERRCODE 47
 
+/* LAPIC vectors (WS-A): installed explicitly by idt_init via
+ * idt_install_handler; not part of interrupt_stub_table.
+ *   240 (0xF0) IPI wakeup        - parked AP wake on mailbox post
+ *   241 (0xF1) AP LAPIC timer    - per-CPU local tick on APs
+ *   255 (0xFF) spurious          - LAPIC spurious vector (no EOI) */
+ISR_NOERRCODE 240
+ISR_NOERRCODE 241
+ISR_NOERRCODE 255
+
 /* Common ISR stub - saves all registers and calls C handler */
 isr_common_stub:
     /* Save all general purpose registers */
