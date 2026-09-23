@@ -27,6 +27,7 @@
 #include <embodios/lapic_timer.h>
 #include <embodios/rt_timer.h>
 #include <embodios/hpet.h>
+#include <embodios/cpu.h>
 #include <embodios/console.h>
 #include <embodios/types.h>
 #include "../../include/arch/x86_64/paging.h"
@@ -343,4 +344,106 @@ int lapic_timer_legacy_due(void)
 const char *lapic_timer_calib_source(void)
 {
     return calib_source;
+}
+
+/* ============================================================================
+ * WS-A: per-CPU LAPIC timers on APs
+ *
+ * Each AP calibrates and arms its own LAPIC timer (periodic, on
+ * LAPIC_AP_TICK_VECTOR) during bring-up, before the BSP's timer exists.
+ * The AP tick only feeds a per-CPU liveness counter and acts as a
+ * guaranteed hlt wake source; it never enters the BSP tick/scheduler
+ * chain (idt.c dispatches LAPIC_AP_TICK_VECTOR to lapic_timer_ap_tick).
+ * ============================================================================ */
+
+#define LAPIC_MAX_APIC_IDS   16
+
+static volatile uint64_t ap_tick_counts[LAPIC_MAX_APIC_IDS];
+
+uint32_t lapic_timer_bus_hz(void)
+{
+    return lapic_bus_hz;
+}
+
+int lapic_timer_init_ap(uint32_t hz)
+{
+    if (hz == 0 || hz > 1000000U) {
+        return -1;
+    }
+    if (!lapic_timer_probe()) {
+        return -1;
+    }
+
+    uint64_t apic_msr = rdmsr(MSR_APIC_BASE);
+    if (apic_msr & APIC_BASE_BSP) {
+        return -1;      /* BSP uses lapic_timer_init() */
+    }
+    apic_msr |= APIC_BASE_ENABLE;   /* already set by smp.c; keep exact */
+    wrmsr(MSR_APIC_BASE, apic_msr);
+
+    /* The LAPIC MMIO window is shared (same address on every CPU) and was
+     * identity-mapped by smp.c before the AP boot; lapic_base may still
+     * be zero here because the BSP calibrates its timer later. */
+    if (!lapic_base) {
+        lapic_base = apic_msr & 0xFFFFF000ULL;
+    }
+
+    /* LAPIC software enable + TPR=0 were done by apic_init_current_cpu()
+     * in smp.c; LINT0/LINT1/Error are masked there on APs. */
+
+    lapic_write(APIC_TIMER_DIVIDE, APIC_TIMER_DIV_16);
+    lapic_write(APIC_LVT_TIMER, APIC_LVT_MASKED);
+
+    /* Reuse the calibration base when another CPU already measured the
+     * bus clock; otherwise calibrate this CPU's timer against the HPET
+     * (preferred) or a PIT channel 2 one-shot. APs boot sequentially, so
+     * the calibration helpers never run concurrently. */
+    uint32_t window_cycles = 0;
+    if (lapic_bus_hz) {
+        window_cycles = lapic_bus_hz / 16U / (1000U / CALIB_MS);
+    } else if (hpet_is_available() && calibrate_hpet(&window_cycles) == 0) {
+        /* calibrated vs HPET */
+    } else if (calibrate_pit(&window_cycles) == 0) {
+        /* calibrated vs PIT ch2 */
+    } else {
+        return -1;
+    }
+
+    /* Same plausibility bound as the BSP path */
+    if (window_cycles < 1000U || window_cycles > 0x0F000000U) {
+        return -1;
+    }
+
+    uint64_t ticks_per_sec = (uint64_t)window_cycles * (1000U / CALIB_MS);
+    uint64_t initial = ticks_per_sec / hz;
+    if (initial == 0 || initial > 0xFFFFFFFFULL) {
+        return -1;
+    }
+    if (!lapic_bus_hz) {
+        lapic_bus_hz = (uint32_t)(ticks_per_sec * 16ULL);
+    }
+
+    /* Arm the periodic local tick on the AP tick vector. Interrupts are
+     * still disabled on this AP (smp_ap_main sti's later), so the first
+     * tick lands only after the park loop enables them. */
+    lapic_write(APIC_LVT_TIMER, LAPIC_AP_TICK_VECTOR | APIC_LVT_PERIODIC);
+    lapic_write(APIC_TIMER_INIT_CNT, (uint32_t)initial);
+    return 0;
+}
+
+void lapic_timer_ap_tick(void)
+{
+    lapic_write(APIC_EOI, 0);
+    uint32_t apic_id = cpu_get_id();
+    if (apic_id < LAPIC_MAX_APIC_IDS) {
+        ap_tick_counts[apic_id]++;
+    }
+}
+
+uint64_t lapic_timer_ap_ticks(uint32_t apic_id)
+{
+    if (apic_id >= LAPIC_MAX_APIC_IDS) {
+        return 0;
+    }
+    return ap_tick_counts[apic_id];
 }

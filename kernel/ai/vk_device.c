@@ -37,6 +37,11 @@
 #define VK_QK8_0                    32
 #define VK_Q8_0_BLOCK_BYTES         34
 
+/* K-quant geometry (Q4_K/Q6_K superblocks, 256 values each) */
+#define VK_QK_K                     256
+#define VK_Q4_K_SUPERBLOCK_BYTES    144
+#define VK_Q6_K_SUPERBLOCK_BYTES    210
+
 /* ---------------------------------------------------------------------------
  * Driver state
  * ------------------------------------------------------------------------- */
@@ -176,8 +181,14 @@ static const struct {
     uint32_t word_count;
     const char *name;
 } g_vk_shaders[] = {
-    { vk_spv_matmul_f32,  vk_spv_matmul_f32_word_count,  "matmul_f32"  },
-    { vk_spv_matmul_q8_0, vk_spv_matmul_q8_0_word_count, "matmul_q8_0" },
+    { vk_spv_matmul_f32,       vk_spv_matmul_f32_word_count,
+      "matmul_f32" },
+    { vk_spv_matmul_q8_0,      vk_spv_matmul_q8_0_word_count,
+      "matmul_q8_0" },
+    { vk_spv_matmul_q4_k_q8_0, vk_spv_matmul_q4_k_q8_0_word_count,
+      "matmul_q4_k_q8_0" },
+    { vk_spv_matmul_q6_k_q8_0, vk_spv_matmul_q6_k_q8_0_word_count,
+      "matmul_q6_k_q8_0" },
 };
 #define VK_NUM_PIPELINES (sizeof(g_vk_shaders) / sizeof(g_vk_shaders[0]))
 
@@ -288,10 +299,14 @@ const char *vk_device_name(void)
  * Dispatch entry points
  *
  * Buffer layout contract (shared with the shaders and the host test):
- *   binding 0: A — fp32[m*k] (matmul_f32) or Q8_0 blocks, padded to a 4-byte
- *              multiple (the shader reads whole u32 words; the last word of
- *              the final 34-byte block may straddle the unpadded end)
- *   binding 1: B — fp32[k*n]
+ *   binding 0: A — fp32[m*k] (matmul_f32), Q8_0 blocks (matmul_q8_0),
+ *              Q4_K superblocks (matmul_q4_k_q8_0, 144 B per 256 values) or
+ *              Q6_K superblocks (matmul_q6_k_q8_0, 210 B per 256 values);
+ *              padded to a 4-byte multiple (the shader reads whole u32 words;
+ *              the last word of the final block may straddle the unpadded end)
+ *   binding 1: B — fp32[k*n] (matmul_f32, matmul_q8_0) or Q8_0 block chains
+ *              (matmul_q4_k_q8_0, matmul_q6_k_q8_0: block b of column j at
+ *              byte offset (j*(k/32) + b) * 34), padded to a 4-byte multiple
  *   binding 2: C — fp32[m*n]
  *   push constants: u32 m, u32 k, u32 n (12 bytes)
  *   dispatch: ceil(m*n / 64) workgroups of 64 invocations, one C element per
@@ -324,6 +339,39 @@ int vk_matmul_q8_0(const void *A, const float *B, float *C,
     }
     /* TODO(dispatch): as vk_matmul_f32, with A uploaded as
      * m*(k/32)*VK_Q8_0_BLOCK_BYTES bytes, padded to a 4-byte multiple. */
+    return VK_DEV_NO_DRIVER;
+}
+
+int vk_matmul_q4_k_q8_0(const void *A, const void *B, float *C,
+                        uint32_t m, uint32_t k, uint32_t n)
+{
+    (void)A; (void)B; (void)C; (void)m; (void)k; (void)n;
+    if (k % VK_QK_K != 0) {
+        return VK_DEV_UNSUPPORTED;
+    }
+    if (g_vk_state != VK_STATE_READY) {
+        return VK_DEV_NO_DRIVER;
+    }
+    /* TODO(dispatch): as vk_matmul_q8_0, with A uploaded as
+     * m*(k/256)*VK_Q4_K_SUPERBLOCK_BYTES bytes and B as n*(k/32)*34 bytes of
+     * Q8_0 block chains (block b of column j at (j*(k/32)+b)*34), both padded
+     * to a 4-byte multiple. Mirrors test_matmul_q4_k_q8_0 in
+     * tools/host_test_vulkan.c exactly. */
+    return VK_DEV_NO_DRIVER;
+}
+
+int vk_matmul_q6_k_q8_0(const void *A, const void *B, float *C,
+                        uint32_t m, uint32_t k, uint32_t n)
+{
+    (void)A; (void)B; (void)C; (void)m; (void)k; (void)n;
+    if (k % VK_QK_K != 0) {
+        return VK_DEV_UNSUPPORTED;
+    }
+    if (g_vk_state != VK_STATE_READY) {
+        return VK_DEV_NO_DRIVER;
+    }
+    /* TODO(dispatch): as vk_matmul_q4_k_q8_0, with A uploaded as
+     * m*(k/256)*VK_Q6_K_SUPERBLOCK_BYTES bytes. */
     return VK_DEV_NO_DRIVER;
 }
 

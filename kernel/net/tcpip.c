@@ -833,8 +833,48 @@ void tcpip_check_timeouts(void)
     uint64_t current_time = hal_timer_get_milliseconds();
 
     for (int i = 0; i < MAX_SOCKETS; i++) {
-        /* Skip inactive sockets or sockets without timeout */
-        if (!sockets[i].active || sockets[i].timeout_ms == 0) {
+        if (!sockets[i].active)
+            continue;
+
+        /* TIME_WAIT expiry: сокеты клиентских соединений (timeout_ms == 0)
+         * после FIN-handshake остаются в TIME_WAIT навсегда и утекают
+         * (MAX_SOCKETS исчерпывается за ~десяток последовательных
+         * connect→close циклов, напр. exo TENSOR-хопы по одному на токен).
+         * RFC 793 prescribes 2*MSL; для встроенного стека достаточно 1 с. */
+        if (sockets[i].type == SOCK_STREAM &&
+            sockets[i].state == TCP_TIME_WAIT) {
+            if (current_time - sockets[i].last_activity_ms >= 1000) {
+                sockets[i].state = TCP_CLOSED;
+                socket_close(i);  /* CLOSED → полная очистка слота */
+            }
+            continue;
+        }
+
+        /* SYN retransmission (RFC 793): первый SYN мог тихо дропнуться
+         * из-за ARP-miss (resolve_dst_mac → UNREACHABLE, пакет теряется)
+         * или потеряться в сети. Повтор каждые 500 мс, максимум 8 раз;
+         * повторный SYN заодно повторно триггерит ARP-запрос. */
+        if (sockets[i].type == SOCK_STREAM &&
+            sockets[i].state == TCP_SYN_SENT) {
+            if (current_time - sockets[i].syn_last_ms >= 500) {
+                if (sockets[i].syn_retries >= 8) {
+                    console_printf("tcpip: SYN retries exhausted (fd %d)\n", i);
+                    socket_close(i);
+                    continue;
+                }
+                sockets[i].syn_last_ms = current_time;
+                sockets[i].syn_retries++;
+                sockets[i].last_activity_ms = current_time;
+                tcp_send_packet(sockets[i].remote_ip, sockets[i].remote_port,
+                                sockets[i].local_port,
+                                sockets[i].seq_num - 1,  /* ISN */
+                                0, TCP_SYN, NULL, 0);
+            }
+            continue;
+        }
+
+        /* Skip sockets without timeout */
+        if (sockets[i].timeout_ms == 0) {
             continue;
         }
 
@@ -1072,6 +1112,8 @@ int socket_connect(int fd, uint32_t ip, uint16_t port)
     /* TCP: Send SYN */
     sockets[fd].seq_num = tcp_generate_isn();
     sockets[fd].state = TCP_SYN_SENT;
+    sockets[fd].syn_last_ms = hal_timer_get_milliseconds();
+    sockets[fd].syn_retries = 0;
     tcp_send_packet(sockets[fd].remote_ip, sockets[fd].remote_port,
                     sockets[fd].local_port, sockets[fd].seq_num,
                     0, TCP_SYN, NULL, 0);

@@ -97,6 +97,16 @@ tramp_lm_entry:
     movabs $gdt64_descriptor, %rax
     lgdt (%rax)
 
+    /* Reload data/stack segments with the KERNEL GDT selectors (0x10).
+     * The trampoline-GDT selector 0x20 loaded above is beyond the kernel
+     * GDT limit; that stayed latent while APs ran with IF=0, but the
+     * first interrupt's iretq reloads SS and would #GP(0x20) (WS-A: APs
+     * now park with IF=1, so interrupts are taken on APs). */
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %ss
+
     /* Per-AP stack + entry point (slots inside this page: RIP-relative
      * deltas between trampoline symbols survive the copy to 0x8000) */
     mov tramp_stack_slot(%rip), %rsp

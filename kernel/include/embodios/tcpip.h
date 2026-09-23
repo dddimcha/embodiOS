@@ -158,7 +158,7 @@ typedef struct net_config {
  * ============================================================================ */
 
 #define MAX_SOCKETS         16
-#define SOCKET_BUFFER_SIZE  4096
+#define SOCKET_BUFFER_SIZE  16384  /* exo ring: hidden f32 2048 = 8KB + hdr */
 
 /* UDP datagram queue depth per socket (для socket_recvfrom) */
 #define SOCKET_DGRAM_QUEUE  8
@@ -185,6 +185,8 @@ typedef struct socket {
     uint16_t dgram_len[SOCKET_DGRAM_QUEUE];
     uint8_t  dgram_head;        /* индекс старейшей датаграммы */
     uint8_t  dgram_count;       /* число ожидающих датаграмм */
+    uint64_t syn_last_ms;       /* последний SYN (ретрансмиссия SYN_SENT) */
+    uint8_t  syn_retries;       /* число повторных SYN */
     bool     active;            /* Socket in use */
 } socket_t;
 

@@ -4,8 +4,11 @@
  *   - BSP enables its Local APIC (MMIO identity-mapped on demand)
  *   - 16/32/64-bit trampoline (smp_trampoline.S) is copied to physical 0x8000
  *   - Each AP gets a 64KB stack, boots through the trampoline into
- *     smp_ap_main(), registers itself, then parks in a mailbox work loop
- *     (IF=0, pause-polling; PIT IRQ0 stays on the BSP via the PIC)
+ *     smp_ap_main(), registers itself, calibrates its own LAPIC timer
+ *     (ipi_init_ap -> lapic_timer_init_ap) and parks in `sti; hlt` with
+ *     IF=1, woken by a wakeup IPI when work is posted (WS-A; the legacy
+ *     IF=0 pause-polling loop remains only as a fallback when the AP
+ *     cannot arm its LAPIC timer)
  *   - Work is delegated to APs through per-CPU mailboxes
  *     (smp_work_dispatch / smp_work_wait), used by parallel_inference.
  */
@@ -17,6 +20,8 @@
 #include <embodios/percpu.h>
 #include <embodios/tsc.h>
 #include <embodios/atomic.h>
+#include <embodios/ipi.h>
+#include <embodios/lapic_timer.h>
 #include "../../include/arch/x86_64/paging.h"
 
 /* ============================================================================
@@ -86,12 +91,19 @@ struct cpu_data {
     void *stack_top;            /* Stack top address */
     bool online;                /* CPU is online */
     bool bsp;                   /* Bootstrap processor flag */
+    volatile bool parked_if1;   /* AP parks with IF=1 (hlt + IPI wakeup);
+                                 * false => legacy IF=0 polling fallback */
 } __attribute__((aligned(64)));
 
 /* Per-CPU work mailbox: BSP posts fn/arg and bumps seq; the AP executes the
- * function in its poll loop and sets done = seq. One outstanding item per
+ * function in its park loop and sets done = seq. One outstanding item per
  * CPU (dispatch spins if the previous item is still in flight). Stats are
- * written by the owning CPU only, read cross-CPU for the 'cpus' command. */
+ * written by the owning CPU only, read cross-CPU for the 'cpus' command.
+ *
+ * Wake protocol (WS-A): when the AP parks with IF=1 (parked_if1), seq++ is
+ * followed by a wakeup IPI; the AP's cli/check/sti;hlt sequence closes the
+ * post-vs-sleep race (a pending IPI wakes hlt immediately). In the IF=0
+ * fallback the AP pause-polls seq and no IPI is sent. */
 typedef struct ap_mailbox {
     volatile uint64_t seq;
     volatile uint64_t done;
@@ -99,8 +111,8 @@ typedef struct ap_mailbox {
     void *arg;
     volatile uint64_t work_count;   /* completed work items */
     volatile uint64_t work_cycles;  /* TSC cycles spent in work items */
-    volatile uint64_t polls;        /* mailbox poll iterations (liveness) */
-    char _pad[8];
+    volatile uint64_t polls;        /* poll iterations (IF=0 fallback only) */
+    volatile uint64_t sleeps;       /* hlt park entries (IF=1 mode) */
 } ap_mailbox_t;
 
 static struct {
@@ -187,7 +199,10 @@ static uint32_t apic_init_current_cpu(void)
                APIC_SPURIOUS_ENABLE | APIC_SPURIOUS_VECTOR);
 
     /* LVT setup:
-     * - Timer/Error masked everywhere (no LAPIC timer yet, IF=0 on APs).
+     * - Timer masked for now; ipi_init_ap() arms a periodic per-CPU tick
+     *   on APs (LAPIC_AP_TICK_VECTOR), the BSP arms its own 1 kHz tick
+     *   later in lapic_timer_init().
+     * - Error masked everywhere.
      * - LINT0 on the BSP stays the 8259 PIC passthrough (ExtINT mode,
      *   unmasked): QEMU routes the PIC INTR line through the LAPIC once it
      *   is enabled, so masking LINT0 would silently kill PIT IRQ0.
@@ -288,14 +303,40 @@ static void smp_set_ap_stack(void *stack_top)
  * ============================================================================ */
 
 /**
+ * Execute one mailbox work item (seq s). Runs outside IRQ context on the
+ * AP's own stack, so SSE/FPU use in work functions is safe (enabled by
+ * smp_ap_boot_entry). Called with interrupts disabled; re-enables them
+ * around the work so the AP local tick and wakeup IPI stay live.
+ */
+static void ap_mailbox_run(ap_mailbox_t *mb, uint64_t s)
+{
+    smp_rmb();
+    smp_work_fn_t fn = mb->fn;
+    void *arg = mb->arg;
+    smp_rmb();
+
+    __asm__ volatile("sti");
+    uint64_t t0 = cpu_get_timestamp();
+    fn(arg);
+    uint64_t t1 = cpu_get_timestamp();
+    __asm__ volatile("cli");
+
+    mb->work_cycles += (t1 - t0);
+    mb->work_count++;
+    smp_wmb();
+    mb->done = s;
+    smp_wmb();
+}
+
+/**
  * smp_ap_main - AP main after trampoline. Runs with kernel GDT, per-AP
- * stack, IF=0. Registers the CPU, then parks in the mailbox work loop.
- * Never returns.
+ * stack, IF=0. Registers the CPU, arms its per-CPU LAPIC timer, then
+ * parks with IF=1 (`sti; hlt`) waiting for wakeup IPIs. Never returns.
  */
 void smp_ap_main(void)
 {
-    /* Shared IDT so exceptions on this AP hit the panic path instead of a
-     * triple fault (we keep IF=0, so no IRQs are taken). */
+    /* Shared IDT so exceptions and LAPIC vectors on this AP hit the real
+     * handlers (idt_init ran on the BSP; each CPU needs its own lidt). */
     extern void idt_ap_reload(void);
     idt_ap_reload();
 
@@ -306,34 +347,48 @@ void smp_ap_main(void)
         percpu_init_cpu(cpu_id);
     }
 
-    console_printf("SMP: AP cpu %u (APIC ID %u) online, stack %p\n",
-                   cpu_id, me->apic_id, me->stack_base);
+    /* Per-CPU LAPIC timer (periodic local tick on LAPIC_AP_TICK_VECTOR).
+     * Success means this AP can park with IF=1 and be woken by IPI; on
+     * failure keep the legacy IF=0 pause-polling loop as fallback. */
+    bool if1_park = (cpu_id < MAX_CPUS) && (ipi_init_ap() == 0);
+    me->parked_if1 = if1_park;
+    smp_wmb();
 
-    /* Mailbox work loop: poll for work posted via smp_work_dispatch().
-     * IF stays 0; 'hlt' would never wake (no LAPIC timer on APs), so this
-     * is a pause-polling loop. Work functions run outside IRQ context, so
-     * SSE/FPU use is safe (enabled by smp_ap_boot_entry). */
+    console_printf("SMP: AP cpu %u (APIC ID %u) online, stack %p, parking %s\n",
+                   cpu_id, me->apic_id, me->stack_base,
+                   if1_park ? "sti;hlt IF=1 (IPI wakeup)"
+                            : "IF=0 polling (fallback, no LAPIC timer)");
+
     ap_mailbox_t *mb = &smp_state.mailboxes[cpu_id];
+
+    if (!if1_park) {
+        /* Legacy fallback: pause-polling with IF=0 (no LAPIC timer on
+         * this AP, so hlt would never wake). */
+        for (;;) {
+            uint64_t s = mb->seq;
+            if (s != mb->done) {
+                ap_mailbox_run(mb, s);
+            }
+            mb->polls++;
+            __asm__ volatile("pause");
+        }
+    }
+
+    /* IF=1 park loop: cli -> re-check -> sti;hlt is the atomic sleep
+     * sequence. A wakeup IPI posted after the seq check but before hlt
+     * stays pending through the sti shadow and wakes the hlt immediately,
+     * so no work post is ever missed. The AP local tick (100 Hz) is an
+     * additional unconditional wake source. */
     for (;;) {
+        __asm__ volatile("cli");
         uint64_t s = mb->seq;
         if (s != mb->done) {
-            smp_rmb();
-            smp_work_fn_t fn = mb->fn;
-            void *arg = mb->arg;
-            smp_rmb();
-
-            uint64_t t0 = cpu_get_timestamp();
-            fn(arg);
-            uint64_t t1 = cpu_get_timestamp();
-
-            mb->work_cycles += (t1 - t0);
-            mb->work_count++;
-            smp_wmb();
-            mb->done = s;
-            smp_wmb();
+            ap_mailbox_run(mb, s);      /* sti/cli around fn internally */
+            continue;
         }
-        mb->polls++;
-        __asm__ volatile("pause");
+        mb->sleeps++;
+        smp_wmb();
+        __asm__ volatile("sti; hlt");
     }
 }
 
@@ -497,10 +552,22 @@ int smp_get_cpu_info(uint32_t cpu, struct smp_cpu_info *out)
     out->apic_id = c->apic_id;
     out->online = c->online ? 1 : 0;
     out->bsp = c->bsp ? 1 : 0;
+    out->parked_if1 = c->parked_if1 ? 1 : 0;
     out->work_count = mb->work_count;
     out->work_cycles = mb->work_cycles;
     out->polls = mb->polls;
+    out->ipi_wakeups = ipi_wakeup_count(cpu);
+    out->ap_ticks = lapic_timer_ap_ticks(c->apic_id);
     return 0;
+}
+
+int smp_cpu_to_apic_id(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS || cpu >= smp_state.num_online ||
+        !smp_state.cpus[cpu].online) {
+        return -1;
+    }
+    return (int)smp_state.cpus[cpu].apic_id;
 }
 
 /* ============================================================================
@@ -528,6 +595,14 @@ int smp_work_dispatch(uint32_t cpu, smp_work_fn_t fn, void *arg)
     smp_wmb();
     mb->seq++;      /* release: AP sees fn/arg before the new seq */
     smp_wmb();
+
+    /* Wake the parked AP (WS-A). The IPI is only needed when the AP
+     * sleeps in hlt with IF=1; the IF=0 polling fallback picks the work
+     * up by itself. A lost/spurious wakeup is harmless: the park loop
+     * re-checks seq after every wake. */
+    if (smp_state.cpus[cpu].parked_if1) {
+        ipi_send(cpu, IPI_WAKEUP_VECTOR);
+    }
     return 0;
 }
 

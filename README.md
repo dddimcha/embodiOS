@@ -8,7 +8,7 @@ Boot it as a kernel, an ISO, or a USB stick, and you land in a chat session
 with a transformer running on raw hardware. No Linux. No libc. No userspace.
 No dependencies.
 
-![version](https://img.shields.io/badge/version-0.5.0-blue)
+![version](https://img.shields.io/badge/version-0.6.0-blue)
 ![build](https://img.shields.io/badge/build-passing-brightgreen)
 ![license](https://img.shields.io/badge/license-Apache--2.0-orange)
 ![platform](https://img.shields.io/badge/platform-x86__64-lightgrey)
@@ -36,6 +36,7 @@ one package install on macOS, Debian/Ubuntu, or Arch.
 | QEMU via CLI | `./embodi run` | ✅ Verified |
 | Bootable ISO (BIOS, multiboot2) | `./embodi iso && ./embodi run --iso` | ✅ Verified |
 | Bootable ISO (UEFI, OVMF) | `./embodi run --iso --uefi` | ✅ Verified |
+| **Direct UEFI, no GRUB** | `make -C kernel uefi && qemu-system-x86_64 -bios OVMF.fd -drive if=ide,format=raw,file=kernel/esp.img -nographic` | ✅ Verified (v0.6.0) |
 | USB stick | `sudo dd if=dist/embodios.iso of=/dev/sdX bs=4M status=progress conv=fsync` | ✅ Hybrid image (El Torito + ESP), hardware 📖 |
 | Real hardware | Boot the USB, pick it in the boot menu | 📖 Documented |
 
@@ -50,7 +51,7 @@ Prebuilt `elf` + `iso` + a QUICKSTART ship in `dist/` via `./embodi release`.
   ██╔══╝  ██║╚██╔╝██║██╔══██╗██║   ██║██║  ██║██║██║   ██║╚════██║
   ███████╗██║ ╚═╝ ██║██████╔╝╚██████╔╝██████╔╝██║╚██████╔╝███████║
   ╚══════╝╚═╝     ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝ ╚═════╝ ╚══════╝
-              One binary. Any machine. No OS.        v0.5.0 Tesla
+              One binary. Any machine. No OS.        v0.6.0 Volta
 
   [ OK ] CPU features initialized
   [ OK ] Memory: 2048 MB detected, identity-mapped
@@ -109,12 +110,31 @@ callbacks and the `motor` demo — a 1 kHz PID closed loop driving a simulated
 DC motor, with rdtsc jitter accounting (mean/stddev/p99) and an asynchronous
 LLM policy hook. See [docs/motor-demo.md](docs/motor-demo.md).
 
-### GPU compute backend (v0.5.0)
+### GPU compute backend (v0.5.0, extended v0.6.0)
 
-Vulkan compute matmul path with hand-assembled SPIR-V shaders (f32, Q8_0),
-validated bit-exact on lavapipe host-side; kernel probes PCI for a
-Vulkan-capable device and falls back to SIMD when none is present. See
+Vulkan compute matmul path with hand-assembled SPIR-V shaders — f32, Q8_0,
+**Q4_K and Q6_K (v0.6.0)** — all validated **bit-exact** against the CPU
+reference on lavapipe; kernel probes PCI for a Vulkan-capable device and
+falls back to SIMD when none is present. v0.6.0 also adds the **virtio-gpu
+transport** (modern vendor-capability MMIO + legacy fallback) with a
+spec-complete **Venus capset layer** and a `gpuinfo` command. See
 [docs/gpu-backend.md](docs/gpu-backend.md).
+
+### SMP maturity (v0.6.0)
+
+Per-CPU LAPIC timers (each AP calibrates its own LVT against HPET) and
+**IPI wakeup**: APs park in `sti; hlt` with interrupts enabled instead of
+polling a mailbox. `-smp 4` boots 4/4 CPUs online with per-CPU state in
+`cpus`; UP and `-append poll` legacy modes unaffected.
+
+### Direct UEFI boot (v0.6.0)
+
+`make uefi` builds a PE32+ `BOOTX64.EFI` (emitted by `tools/mkuefi.py`,
+no external tooling) plus a FAT16 ESP image. The loader finds
+`embodios.elf` via the UEFI Simple File System, synthesizes a multiboot2
+info block, calls `ExitBootServices` and jumps to the kernel entry — GRUB
+is no longer in the boot path. Gate: `scripts/test_uefi.sh` 7/7 PASS,
+OVMF chat smoke verified. See [docs/uefi-boot.md](docs/uefi-boot.md).
 
 ### Verified models
 
@@ -122,7 +142,8 @@ Vulkan-capable device and falls back to SIMD when none is present. See
 |-------|--------|--------|
 | SmolLM-135M-Instruct Q4_K_M (embedded default) | 135M | ✅ chat verified |
 | **Llama-3.2-1B-Instruct Q4_K_M** | 1.24B | ✅ chat verified on bare metal (v0.5.0) |
-| GLM-Edge-1.5B-Chat | 1.5B | ✅ forward pass verified |
+| **Qwen2.5-1.5B-Instruct Q4_K_M** | 1.54B | ✅ chat verified on bare metal (v0.6.0) |
+| **GLM-Edge-1.5B-Chat** | 1.5B | ✅ chat verified on bare metal, zero code changes (v0.6.0) |
 
 ### Sampling controls
 
@@ -139,6 +160,7 @@ API straight from bare metal:
 embodios> exo                    # start node, UDP discovery on :5678
 embodios> exoshard even          # split layers across the ring
 embodios> exoserve 8080          # OpenAI-compatible HTTP API
+embodios> exochat 8 <prompt>     # ring generation from the console (v0.6.0)
 ```
 
 ```bash
@@ -148,9 +170,14 @@ curl -X POST localhost:18080/v1/chat/completions \
 # → {"choices":[{"message":{"content":"The capital of France is Paris."}}],...}
 ```
 
-Status: single-node ring fully working; a two-node ring agrees on 15/15
-shard splits and starts token exchange. Known limitation: virtio-net RX on
-the second guest under QEMU TCG — documented in `kernel/exo/README.md`.
+Status (v0.6.0): **two-node ring fully working over a real TCP network** —
+two QEMU instances shard SmolLM-135M 15/15 layers and generate multi-token
+answers in per-position lockstep ("What is the capital of France?" →
+"The capital of France is Paris.", ring numerics identical to local
+inference). Getting there required fixing five real TCP bugs (SYN
+retransmission, TIME_WAIT expiry, virtio-net TX timeout, persistent
+tensor connections, 16 KiB socket buffers) — the full story and numbers
+are in [docs/benchmark-v0.6.0.md](docs/benchmark-v0.6.0.md).
 
 ### Beautiful serial UX
 

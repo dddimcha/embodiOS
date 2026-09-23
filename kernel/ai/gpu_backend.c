@@ -206,6 +206,34 @@ int gpu_matmul_q8_0(const void *A, const void *B, float *C, int m, int k, int n)
                           (uint32_t)m, (uint32_t)k, (uint32_t)n);
 }
 
+/* GPU matmul with in-shader Q4_K x Q8_0 dequantization (v0.6.0 "Volta").
+ * Same contract as gpu_matmul_q8_0: negative = not computed, caller falls
+ * back to the CPU path. */
+int gpu_matmul_q4_k_q8_0(const void *A, const void *B, float *C,
+                         int m, int k, int n) {
+    if (g_probe_result < 0) {
+        gpu_backend_probe();
+    }
+    if (g_probe_result <= 0) {
+        return -1;
+    }
+    return vk_matmul_q4_k_q8_0(A, B, C,
+                               (uint32_t)m, (uint32_t)k, (uint32_t)n);
+}
+
+/* GPU matmul with in-shader Q6_K x Q8_0 dequantization (v0.6.0 "Volta"). */
+int gpu_matmul_q6_k_q8_0(const void *A, const void *B, float *C,
+                         int m, int k, int n) {
+    if (g_probe_result < 0) {
+        gpu_backend_probe();
+    }
+    if (g_probe_result <= 0) {
+        return -1;
+    }
+    return vk_matmul_q6_k_q8_0(A, B, C,
+                               (uint32_t)m, (uint32_t)k, (uint32_t)n);
+}
+
 const char *gpu_backend_name(void) {
     if (g_probe_result < 0) {
         gpu_backend_probe();

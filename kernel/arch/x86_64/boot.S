@@ -1,4 +1,10 @@
 /* EMBODIOS x86_64 Boot Code - Extended from compiler version */
+
+/* Size of the boot-time identity map in GB (2MB pages, one PDT per GB).
+ * Must cover the whole kernel image incl. embedded GGUF model + .bss
+ * (see setup_page_tables). paging.c extends the map at runtime beyond this. */
+#define BOOT_IDENTITY_GB 4
+
 .section .multiboot2
     .align 8
 multiboot2_header:
@@ -195,20 +201,19 @@ no_long_mode:
     call print_error_32
     hlt
 
-/* Set up 4-level page tables */
+/* Set up 4-level page tables.
+ * Identity-maps the first BOOT_IDENTITY_GB of physical memory with 2MB
+ * pages. 4GB (not 1GB) is required because the embedded GGUF model lives in
+ * .rodata: with a >1GB model embedded, .bss (page tables, boot and kernel
+ * stacks) lands above the 1GB mark, and the very first stack access after
+ * paging is enabled would fault before paging.c gets a chance to extend the
+ * map at runtime. paging.c:identity_map_2mb_range() skips entries that are
+ * already present, so the runtime extension above 4GB keeps working. */
 setup_page_tables:
-    /* Clear page tables */
+    /* Clear page tables (pml4 + pdpt + BOOT_IDENTITY_GB PDT pages) */
     mov $pml4_table, %edi
     xor %eax, %eax
-    mov $1024, %ecx  /* Clear 4KB (1024 dwords) for each table */
-    rep stosl
-
-    mov $pdpt_table, %edi
-    mov $1024, %ecx
-    rep stosl
-
-    mov $pdt_table, %edi
-    mov $1024, %ecx
+    mov $((2 + BOOT_IDENTITY_GB) * 1024), %ecx  /* 4KB = 1024 dwords each */
     rep stosl
 
     mov $pml4_table, %edi
@@ -218,15 +223,21 @@ setup_page_tables:
     or $0x03, %eax
     mov %eax, (%edi)
 
-    /* PDPT[0] -> PDT */
+    /* PDPT[0..BOOT_IDENTITY_GB-1] -> one PDT page each */
     mov $pdt_table, %eax
     or $0x03, %eax
-    mov %eax, pdpt_table
+    mov $pdpt_table, %edi
+    mov $BOOT_IDENTITY_GB, %ecx
+.map_pdpt:
+    mov %eax, (%edi)
+    add $0x1000, %eax
+    add $8, %edi
+    loop .map_pdpt
 
-    /* Map first 1GB using 2MB pages */
+    /* Map BOOT_IDENTITY_GB using 2MB pages */
     mov $pdt_table, %edi
     mov $0x83, %eax  /* Present + Writable + Huge */
-    mov $512, %ecx
+    mov $(BOOT_IDENTITY_GB * 512), %ecx
 .map_pages:
     mov %eax, (%edi)
     add $0x200000, %eax
@@ -339,7 +350,7 @@ no_long_mode_msg:   .asciz "ERROR: 64-bit mode not supported"
 .global pdt_table
 pml4_table:     .space 4096
 pdpt_table:     .space 4096
-pdt_table:      .space 4096
+pdt_table:      .space 4096 * BOOT_IDENTITY_GB
 pt_table:       .space 4096
 
 .align 16
