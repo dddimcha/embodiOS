@@ -30,6 +30,10 @@ void parallel_shutdown(void);
 int parallel_get_num_threads(void);
 void parallel_set_num_threads(int n);
 
+/* Nonzero when the worker pool is initialized and runs on real APs via
+ * IPI work posting (v0.7.0 "Maxwell") */
+int parallel_pool_on_smp(void);
+
 /* Core affinity configuration
  * parallel_set_core_affinity: Pin a specific thread to a CPU core
  * parallel_pin_cores: Enable/disable automatic core pinning (1 = enable, 0 = disable)
@@ -118,5 +122,38 @@ void parallel_rmsnorm(float* out, const float* x, const float* weight,
  * Combines SiLU activation with element-wise multiply
  */
 void parallel_swiglu(float* gate, const float* up, int size);
+
+/* ============================================================================
+ * Row-partitioned fused quantized matvec (v0.7.0 "Maxwell", WS-B)
+ * ============================================================================ */
+
+/* Per-row dot product for a fused quantized matvec: computes one output
+ * row from the row's first quantized block (w_row) and the shared
+ * Q8_1-quantized input (x_q8_1), nb = blocks per row. Matches the
+ * g_vec_dot_* kernel ABI (embodios/simd_kernels.h). */
+typedef float (*quant_row_dot_fn)(const void* w_row, const void* x_q8_1, int nb);
+
+/* Minimum MACs (rows*cols) to engage the SMP worker pool. Below this the
+ * IPI-post + join overhead (~10k cycles under TCG) is not amortized and the
+ * matvec runs on the calling CPU. SmolLM-135M reference points:
+ *   attn k/v  192x576  = 110k  -> serial
+ *   attn q/o  576x576  = 331k  -> parallel
+ *   ffn       1536x576 = 884k  -> parallel */
+#define PAR_QUANT_MATVEC_MIN_MACS 131072
+
+/* out[rows] = W[rows, cols] @ x with W stored as row-major quantized blocks
+ * and x already quantized to Q8_1 (quantize once on the BSP, then share).
+ *
+ * Output rows are split across the worker pool; every row is produced by
+ * exactly one dot() call on exactly one CPU, so the per-row FP/integer
+ * accumulation order is identical to the serial loop and the result is
+ * BIT-IDENTICAL at any thread count (greedy decode stays stable).
+ *
+ * Returns the number of threads that participated (1 = serial fallback:
+ * pool not initialized, single CPU online, or matrix below threshold). */
+int parallel_quant_matvec(float* out, const void* w_blocks,
+                          const void* x_q8_1, int rows, int cols,
+                          int nb_row, size_t block_bytes,
+                          quant_row_dot_fn dot);
 
 #endif /* _EMBODIOS_PARALLEL_INFERENCE_H */

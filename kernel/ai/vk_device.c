@@ -22,6 +22,7 @@
 #include <embodios/pci.h>
 #include <embodios/mm.h>
 #include <embodios/vk_device.h>
+#include <embodios/venus.h>
 
 #include "vk_shaders.h"
 
@@ -192,6 +193,19 @@ static const struct {
 };
 #define VK_NUM_PIPELINES (sizeof(g_vk_shaders) / sizeof(g_vk_shaders[0]))
 
+/* Venus compute device (valid when g_vk_state == VK_STATE_READY) */
+static venus_vk_device_t g_vk_venus_dev;
+
+/* Map the embedded shader table onto the Venus shader descriptor. */
+static void vk_venus_shader_map(venus_vk_shader_t *out)
+{
+    for (uint32_t i = 0; i < VK_NUM_PIPELINES; i++) {
+        out[i].code = g_vk_shaders[i].code;
+        out[i].word_count = g_vk_shaders[i].word_count;
+        out[i].name = g_vk_shaders[i].name;
+    }
+}
+
 /* Sanity-check an embedded SPIR-V module header. */
 static int vk_spv_header_ok(const uint32_t *code, uint32_t word_count)
 {
@@ -244,17 +258,28 @@ int vk_device_init(void)
     vk_candidate_t *dev = &g_vk_candidates[g_vk_active];
 
     if (dev->is_virtio_gpu) {
-        /* TODO(Venus activation): negotiate VIRTIO_GPU_F_VENUS during
-         * virtio feature negotiation; if the device does not offer Venus,
-         * there is no Vulkan transport — fall through to NO_DRIVER.
-         * Steps once Venus is present:
-         *   1. virtio-gpu ctrl/vcursor virtqueue setup (drivers/block/
-         *      virtio_mmio.c shows the queue plumbing pattern).
-         *   2. VIRTIO_GPU_CMD_CTX_INIT (context_id=1, VENUS flag).
-         *   3. vkCreateInstance/vkCreateDevice marshalled per
-         *      VK_EXT_command_stream into ring buffers, submitted via
-         *      VIRTIO_GPU_CMD_SUBMIT_3D on the Venus context.
-         *   4. Host-side synchronization via VIRTIO_GPU_F_FENCE fences. */
+        /* Venus activation (Maxwell v0.7.0): the virtio-gpu driver probed
+         * the Venus capset and brought up the ring transport at boot;
+         * venus_transport_get() is non-NULL exactly when that succeeded. */
+        venus_transport_t *t = venus_transport_get();
+        if (t) {
+            static venus_vk_shader_t shaders[VK_NUM_PIPELINES];
+            vk_venus_shader_map(shaders);
+            if (venus_vk_device_init(t, &g_vk_venus_dev, shaders,
+                                     VK_NUM_PIPELINES) == 0) {
+                console_printf("GPU: Venus compute device ready: \"%s\" "
+                               "(%u pipelines)\n",
+                               g_vk_venus_dev.device_name,
+                               (uint32_t)VK_NUM_PIPELINES);
+                g_vk_state = VK_STATE_READY;
+                return VK_DEV_OK;
+            }
+            console_printf("GPU: Venus transport present but device init "
+                           "failed; compute unavailable\n");
+            g_vk_state = VK_STATE_NO_DRIVER;
+            return VK_DEV_IO;
+        }
+
         console_printf("GPU: virtio-gpu found but no Venus (Vulkan) feature; "
                        "compute unavailable\n");
         g_vk_state = VK_STATE_NO_DRIVER;
@@ -282,7 +307,8 @@ const char *vk_device_name(void)
 {
     switch (g_vk_state) {
     case VK_STATE_READY:
-        return "Vulkan compute device";
+        return g_vk_venus_dev.ready ? g_vk_venus_dev.device_name
+                                    : "Vulkan compute device";
     case VK_STATE_PROBED:
         return "GPU candidate (driver not initialized)";
     case VK_STATE_NO_DRIVER:
@@ -315,71 +341,79 @@ const char *vk_device_name(void)
 int vk_matmul_f32(const float *A, const float *B, float *C,
                   uint32_t m, uint32_t k, uint32_t n)
 {
-    (void)A; (void)B; (void)C; (void)m; (void)k; (void)n;
     if (g_vk_state != VK_STATE_READY) {
         return VK_DEV_NO_DRIVER;
     }
-    /* TODO(dispatch): stage A/B into host-visible buffers (with the 4-byte
-     * tail padding documented above), update the descriptor set, record
-     * vkCmdBindPipeline/vkCmdPushConstants/vkCmdDispatch(ceil(m*n/64),1,1),
-     * submit and fence-wait, copy C back. Mirrors vk_run_matmul() in
-     * tools/host_test_vulkan.c exactly. */
-    return VK_DEV_NO_DRIVER;
+    uint64_t a_bytes = (uint64_t)m * k * 4;
+    uint64_t b_bytes = (uint64_t)k * n * 4;
+    if (venus_vk_matmul(&g_vk_venus_dev, 0, A, a_bytes, B, b_bytes,
+                        C, m, k, n) != 0) {
+        return VK_DEV_IO;
+    }
+    return VK_DEV_OK;
 }
 
 int vk_matmul_q8_0(const void *A, const float *B, float *C,
                    uint32_t m, uint32_t k, uint32_t n)
 {
-    (void)A; (void)B; (void)C; (void)m; (void)k; (void)n;
     if (k % VK_QK8_0 != 0) {
         return VK_DEV_UNSUPPORTED;
     }
     if (g_vk_state != VK_STATE_READY) {
         return VK_DEV_NO_DRIVER;
     }
-    /* TODO(dispatch): as vk_matmul_f32, with A uploaded as
-     * m*(k/32)*VK_Q8_0_BLOCK_BYTES bytes, padded to a 4-byte multiple. */
-    return VK_DEV_NO_DRIVER;
+    uint64_t a_bytes = (uint64_t)m * (k / VK_QK8_0) * VK_Q8_0_BLOCK_BYTES;
+    uint64_t b_bytes = (uint64_t)k * n * 4;
+    if (venus_vk_matmul(&g_vk_venus_dev, 1, A, a_bytes, B, b_bytes,
+                        C, m, k, n) != 0) {
+        return VK_DEV_IO;
+    }
+    return VK_DEV_OK;
 }
 
 int vk_matmul_q4_k_q8_0(const void *A, const void *B, float *C,
                         uint32_t m, uint32_t k, uint32_t n)
 {
-    (void)A; (void)B; (void)C; (void)m; (void)k; (void)n;
     if (k % VK_QK_K != 0) {
         return VK_DEV_UNSUPPORTED;
     }
     if (g_vk_state != VK_STATE_READY) {
         return VK_DEV_NO_DRIVER;
     }
-    /* TODO(dispatch): as vk_matmul_q8_0, with A uploaded as
-     * m*(k/256)*VK_Q4_K_SUPERBLOCK_BYTES bytes and B as n*(k/32)*34 bytes of
-     * Q8_0 block chains (block b of column j at (j*(k/32)+b)*34), both padded
-     * to a 4-byte multiple. Mirrors test_matmul_q4_k_q8_0 in
-     * tools/host_test_vulkan.c exactly. */
-    return VK_DEV_NO_DRIVER;
+    uint64_t a_bytes = (uint64_t)m * (k / VK_QK_K) * VK_Q4_K_SUPERBLOCK_BYTES;
+    uint64_t b_bytes = (uint64_t)n * (k / VK_QK8_0) * VK_Q8_0_BLOCK_BYTES;
+    if (venus_vk_matmul(&g_vk_venus_dev, 2, A, a_bytes, B, b_bytes,
+                        C, m, k, n) != 0) {
+        return VK_DEV_IO;
+    }
+    return VK_DEV_OK;
 }
 
 int vk_matmul_q6_k_q8_0(const void *A, const void *B, float *C,
                         uint32_t m, uint32_t k, uint32_t n)
 {
-    (void)A; (void)B; (void)C; (void)m; (void)k; (void)n;
     if (k % VK_QK_K != 0) {
         return VK_DEV_UNSUPPORTED;
     }
     if (g_vk_state != VK_STATE_READY) {
         return VK_DEV_NO_DRIVER;
     }
-    /* TODO(dispatch): as vk_matmul_q4_k_q8_0, with A uploaded as
-     * m*(k/256)*VK_Q6_K_SUPERBLOCK_BYTES bytes. */
-    return VK_DEV_NO_DRIVER;
+    uint64_t a_bytes = (uint64_t)m * (k / VK_QK_K) * VK_Q6_K_SUPERBLOCK_BYTES;
+    uint64_t b_bytes = (uint64_t)n * (k / VK_QK8_0) * VK_Q8_0_BLOCK_BYTES;
+    if (venus_vk_matmul(&g_vk_venus_dev, 3, A, a_bytes, B, b_bytes,
+                        C, m, k, n) != 0) {
+        return VK_DEV_IO;
+    }
+    return VK_DEV_OK;
 }
 
 void vk_device_shutdown(void)
 {
     if (g_vk_state == VK_STATE_READY) {
-        /* TODO(teardown): destroy pipelines, descriptor pool, command pool,
-         * device, instance (reverse order of vk_device_init). */
+        /* Venus objects are host-side; the transport teardown
+         * (venus_transport_shutdown) destroys the rendering context, which
+         * reclaims everything created inside it. */
+        memset(&g_vk_venus_dev, 0, sizeof(g_vk_venus_dev));
     }
     g_vk_active = -1;
     if (g_vk_state != VK_STATE_UNPROBED) {

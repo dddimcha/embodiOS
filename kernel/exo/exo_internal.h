@@ -23,6 +23,19 @@ uint64_t exo__next_request_id(void);
 void exo__handle_tensor_msg(int fd, const exo_tensor_msg_t *hdr,
                             const uint8_t *payload);
 
+/* --- Кольцевая активность (exo_node.c), читается из exo_shard/discovery --- */
+
+/* true, пока идёт/недавно шла кольцевая генерация (TENSOR/RESULT трафик
+ * в пределах EXO_NODE_TIMEOUT_MS или активный запрос оркестратора).
+ * Пока busy: discovery НЕ expire'ит пиров и НЕ ребалансирует шарды
+ * (детект сбоя посреди генерации — работа RESULT-таймаута, а не expire;
+ * иначе TCG-латентность позиции ~ beacon gap каскадно ломала кольцо). */
+bool exo_ring_busy(void);
+
+/* Выполнить отложенный rebalance (join/leave случился во время
+ * генерации). Вызывается из exo__chat до выбора пути генерации. */
+void exo_shard_check_pending(void);
+
 /* --- Генерация (exo_node.c), вызывается из exo_server.c --- */
 
 /* Callback выдачи куска текста; done=true на последнем вызове. */

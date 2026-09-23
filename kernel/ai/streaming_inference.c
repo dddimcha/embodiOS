@@ -512,14 +512,13 @@ static void matmul_q8_0_fused(float* out, const void* w_q8_0, const float* x,
         return;
     }
 
-    /* Quantize input vector once */
+    /* Quantize input vector once (on this CPU, then shared read-only) */
     quantize_row_q8_1(x, g_input_q8, cols);
 
-    /* Compute each output row */
-    for (int r = 0; r < rows; r++) {
-        const block_q8_0* row_weights = &weights[r * nb_cols];
-        out[r] = g_vec_dot_q8_0_q8_1(row_weights, g_input_q8, nb_cols);
-    }
+    /* Compute each output row — row-partitioned across the IPI worker pool
+     * when the matrix is big enough (bit-identical at any CPU count) */
+    parallel_quant_matvec(out, weights, g_input_q8, rows, cols, nb_cols,
+                          sizeof(block_q8_0), (quant_row_dot_fn)g_vec_dot_q8_0_q8_1);
 }
 
 /* Counter for Q4_K fused matmul */
@@ -551,14 +550,13 @@ static void matmul_q4_k_fused(float* out, const void* w_q4_k, const float* x,
         return;
     }
 
-    /* Quantize input vector to Q8_1 */
+    /* Quantize input vector to Q8_1 (on this CPU, then shared read-only) */
     quantize_row_q8_1(x, g_input_q8, cols);
 
-    /* Compute each output row */
-    for (int r = 0; r < rows; r++) {
-        const block_q4_K* row_weights = &weights[r * nb_cols];
-        out[r] = g_vec_dot_q4_k_q8_1(row_weights, g_input_q8, nb_cols);
-    }
+    /* Compute each output row — row-partitioned across the IPI worker pool
+     * when the matrix is big enough (bit-identical at any CPU count) */
+    parallel_quant_matvec(out, weights, g_input_q8, rows, cols, nb_cols,
+                          sizeof(block_q4_K), (quant_row_dot_fn)g_vec_dot_q4_k_q8_1);
 }
 
 /* Fused Q5_0 matrix-vector multiply (dominant format in SmolLM Q4_K_M:
@@ -575,10 +573,9 @@ static void matmul_q5_0_fused(float* out, const void* w_q5_0, const float* x,
 
     quantize_row_q8_1(x, g_input_q8, cols);
 
-    for (int r = 0; r < rows; r++) {
-        const block_q5_0* row_weights = &weights[r * nb_cols];
-        out[r] = g_vec_dot_q5_0_q8_1(row_weights, g_input_q8, nb_cols);
-    }
+    /* Row-partitioned across the IPI worker pool when big enough */
+    parallel_quant_matvec(out, weights, g_input_q8, rows, cols, nb_cols,
+                          sizeof(block_q5_0), (quant_row_dot_fn)g_vec_dot_q5_0_q8_1);
 }
 
 /* Fused Q6_K matrix-vector multiply (ffn_down in SmolLM Q4_K_M) */
@@ -595,10 +592,9 @@ static void matmul_q6_k_fused(float* out, const void* w_q6_k, const float* x,
 
     quantize_row_q8_1(x, g_input_q8, cols);
 
-    for (int r = 0; r < rows; r++) {
-        const block_q6_K* row_weights = &weights[r * nb_cols];
-        out[r] = g_vec_dot_q6_k_q8_1(row_weights, g_input_q8, nb_cols);
-    }
+    /* Row-partitioned across the IPI worker pool when big enough */
+    parallel_quant_matvec(out, weights, g_input_q8, rows, cols, nb_cols,
+                          sizeof(block_q6_K), (quant_row_dot_fn)g_vec_dot_q6_k_q8_1);
 }
 
 /* ============================================================================
@@ -1616,15 +1612,17 @@ static void extract_embedding_transposed(const void* src, float* dst,
 
 /* Transposed matmul for Q8_0 weights stored as [dim, vocab_size]
  * Computes: out[vocab_size] = W[dim, vocab_size]^T @ x[dim]
- * For each output position v, we sum across dim: out[v] = sum_d(W[d,v] * x[d]) */
-static void matmul_transposed_q8_0(float* out, const void* w_q8_0, const float* x,
-                                    int dim, int vocab_size) {
-    const int blocks_per_row = vocab_size / QK8_0;  /* Blocks per dim row */
-    const size_t row_bytes = blocks_per_row * sizeof(block_q8_0);
-    const block_q8_0* base = (const block_q8_0*)w_q8_0;
-
-    /* Zero output */
-    for (int v = 0; v < vocab_size; v++) {
+ * For each output position v, we sum across dim: out[v] = sum_d(W[d,v] * x[d])
+ *
+ * WS-B: vocab blocks [blk0, blk1) are the partition unit. For a fixed output
+ * v the accumulation still happens in ascending d order — exactly as in the
+ * full-range serial loop — so the result is bit-identical at any CPU count. */
+static void matmul_transposed_q8_0_range(float* out, const block_q8_0* base,
+                                         const float* x, int dim,
+                                         int blocks_per_row, size_t row_bytes,
+                                         int blk0, int blk1) {
+    /* Zero this partition's output slice */
+    for (int v = blk0 * QK8_0; v < blk1 * QK8_0; v++) {
         out[v] = 0.0f;
     }
 
@@ -1633,8 +1631,8 @@ static void matmul_transposed_q8_0(float* out, const void* w_q8_0, const float* 
         const block_q8_0* row_start = (const block_q8_0*)((const char*)base + d * row_bytes);
         float xd = x[d];
 
-        /* Process all vocab positions */
-        for (int blk = 0; blk < blocks_per_row; blk++) {
+        /* Process this partition's vocab positions */
+        for (int blk = blk0; blk < blk1; blk++) {
             const block_q8_0* block = &row_start[blk];
             float scale = fp16_to_fp32(block->d) * xd;
             int v_base = blk * QK8_0;
@@ -1644,6 +1642,49 @@ static void matmul_transposed_q8_0(float* out, const void* w_q8_0, const float* 
             }
         }
     }
+}
+
+typedef struct {
+    float* out;
+    const block_q8_0* base;
+    const float* x;
+    int dim;
+    int blocks_per_row;
+    size_t row_bytes;
+} transposed_q8_0_args_t;
+
+static void transposed_q8_0_worker(void* arg, int thread_id, int start, int end) {
+    transposed_q8_0_args_t* a = (transposed_q8_0_args_t*)arg;
+    (void)thread_id;
+    matmul_transposed_q8_0_range(a->out, a->base, a->x, a->dim,
+                                 a->blocks_per_row, a->row_bytes, start, end);
+}
+
+static void matmul_transposed_q8_0(float* out, const void* w_q8_0, const float* x,
+                                    int dim, int vocab_size) {
+    const int blocks_per_row = vocab_size / QK8_0;  /* Blocks per dim row */
+    const size_t row_bytes = blocks_per_row * sizeof(block_q8_0);
+    const block_q8_0* base = (const block_q8_0*)w_q8_0;
+
+#if PARALLEL_INFERENCE_ENABLED
+    /* Engage the IPI worker pool when it is up and the matrix amortizes the
+     * IPI-post + join overhead (same MAC threshold as the row matvecs). */
+    if (parallel_get_num_threads() > 1 &&
+        (int64_t)vocab_size * (int64_t)dim >= PAR_QUANT_MATVEC_MIN_MACS) {
+        transposed_q8_0_args_t args = {
+            .out = out, .base = base, .x = x, .dim = dim,
+            .blocks_per_row = blocks_per_row, .row_bytes = row_bytes
+        };
+        int nthreads = parallel_get_num_threads();
+        int chunk = blocks_per_row / (nthreads * 4);
+        if (chunk < 8) chunk = 8;
+        parallel_for(transposed_q8_0_worker, &args, blocks_per_row, chunk);
+        return;
+    }
+#endif
+
+    matmul_transposed_q8_0_range(out, base, x, dim, blocks_per_row, row_bytes,
+                                 0, blocks_per_row);
 }
 
 /* Transposed matmul for F32 weights */

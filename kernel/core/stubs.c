@@ -456,7 +456,8 @@ void process_command(const char *command)
         console_printf(" %s│%s %s[Network / exo]%s\n", ui_c(UI_DIM), ui_c(UI_RESET),
                        ui_c(UI_CYAN), ui_c(UI_RESET));
         console_printf(" %s│%s   exo / exonodes Distributed node + ring table\n", ui_c(UI_DIM), ui_c(UI_RESET));
-        console_printf(" %s│%s   exoshard       Assigned model shard\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   exodiscover    Live discovery table / exoring auto\n", ui_c(UI_DIM), ui_c(UI_RESET));
+        console_printf(" %s│%s   exoshard       Assigned model shard ('auto' supported)\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s   exoserve [p]   OpenAI-compatible API\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s   exochat        Chat via exo ring (console out)\n", ui_c(UI_DIM), ui_c(UI_RESET));
         console_printf(" %s│%s %s[Tests]%s\n", ui_c(UI_DIM), ui_c(UI_RESET),
@@ -549,7 +550,9 @@ void process_command(const char *command)
         console_printf(" Distributed inference (exo):\n");
         console_printf("   exo [id] [port]    Init node + show status\n");
         console_printf("   exonodes           Discovered ring nodes table\n");
-        console_printf("   exoshard [m] [n]   Show/assign layer shard\n");
+        console_printf("   exodiscover        Live discovery table (age)\n");
+        console_printf("   exoring [auto]     Build/show ring (auto = from discovery)\n");
+        console_printf("   exoshard [m] [n]   Show/assign layer shard ('auto' = RAM-weighted)\n");
         console_printf("   exoserve [p|stop]  OpenAI API server start/stop\n");
         console_printf("   exochat [n] <msg>  Chat via exo ring, console output\n");
         console_printf("\n");
@@ -2422,9 +2425,29 @@ skip_ethercat:
             }
             console_printf("\n");
         }
+    } else if (strcmp(command, "exodiscover") == 0) {
+        /* exodiscover — живая таблица discovery (id, ip:port, ram_free, age) */
+        if (!exo_is_running()) {
+            console_printf("exo: not running (start with 'exo')\n");
+        } else {
+            exo_discovery_print_table();
+        }
+    } else if (strcmp(command, "exoring") == 0 ||
+               strcmp(command, "exoring auto") == 0) {
+        /* exoring [auto] — показать/построить кольцо из живой таблицы
+         * discovery. auto: оркестратор = max ram_free, tiebreak по node_id
+         * (все ноды вычисляют идентичное кольцо). Ручные exopeer/exoshard
+         * остаются override'ами. */
+        if (!exo_is_running()) {
+            console_printf("exo: not running (start with 'exo')\n");
+        } else if (exo_ring_auto() != EXO_OK) {
+            console_printf("exo: ring build failed\n");
+        }
     } else if (strncmp(command, "exoshard", 8) == 0) {
         /* exoshard — показать назначенный шард;
-         * exoshard <model> <n_layers> — назначить (ring memory weighted) */
+         * exoshard auto — RAM-weighted split по auto-кольцу (модель и
+         *   n_layers определяются из загруженной GGUF);
+         * exoshard <model> <n_layers> [even] — ручное назначение */
         if (!exo_is_running()) {
             console_printf("Node not started. Run 'exo' first.\n");
             return;
@@ -2432,7 +2455,10 @@ skip_ethercat:
         const char *args = command + 8;
         while (*args == ' ') args++;
 
-        if (*args != '\0') {
+        if (strcmp(args, "auto") == 0) {
+            if (exo_shard_auto() != EXO_OK)
+                console_printf("exo: auto shard failed\n");
+        } else if (*args != '\0') {
             char model[EXO_MODEL_ID_LEN];
             int mi = 0;
             while (*args && *args != ' ' && mi < EXO_MODEL_ID_LEN - 1)
@@ -2641,14 +2667,16 @@ skip_ethercat:
                            ip, self ? (unsigned)self->ctrl_port : 0,
                            exo_server_running() ? "on" : "off",
                            EXO_DISCOVERY_PORT);
-            console_printf("  nodes=%d  shard=%s\n\n", exo_node_count(),
-                           exo_shard_local() ? "assigned" : "none");
+            console_printf("  nodes=%d  shard=%s%s\n\n", exo_node_count(),
+                           exo_shard_local() ? "assigned" : "none",
+                           exo_ring_is_degraded() ? "  ring=DEGRADED" : "");
         }
     } else if (cmd_storage_dispatch(command)) {
         /* Storage commands (fls/fsave/fload/frm/df/fformat/fstest) —
          * handled in core/cmd_storage.c */
     } else if (cmd_smp_dispatch(command)) {
         /* SMP commands (cpus/smpwork) — handled in core/cmd_smp.c */
+    } else if (cmd_parbench_dispatch(command)) {  /* parbench — core/cmd_parbench.c */
     } else if (strncmp(command, "motor", 5) == 0 &&
                (command[5] == '\0' || command[5] == ' ')) {
         /* RT motor control demo — handled in core/cmd_motor.c */
