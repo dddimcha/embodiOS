@@ -30,7 +30,7 @@
 /* Kernel version info */
 /* Single source of truth for the kernel version. create_iso.sh
    extracts this via grep to keep the ISO manifest in sync. */
-const char* kernel_version = "v0.5.0";
+const char* kernel_version = "v0.7.0";
 const char* kernel_build = __DATE__ " " __TIME__;
 
 /* External symbols from linker script */

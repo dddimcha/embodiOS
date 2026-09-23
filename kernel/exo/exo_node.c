@@ -218,9 +218,10 @@ int exo_forward_shard(const float *hidden_in, size_t len,
  * (под TCG-эмуляцией ~7 с/токен; OpenAI-клиент может задать max_tokens) */
 #define EXO_DEFAULT_MAX_TOKENS  64
 
-/* Таймаут ожидания RESULT от хвоста кольца: под TCG-эмуляцией прогон
- * половины SmolLM-135M + lm_head + sampling занимает десятки секунд. */
-#define EXO_RING_RESULT_TIMEOUT_MS  180000
+/* Таймаут ожидания RESULT от хвоста кольца: под TCG-контенцией (3 ноды
+ * на 2 CPU) один проход позиции по кольцу занимает 1-3 минуты. Это же
+ * путь детекта сбоя: peer мёртв → RESULT не придёт → чистый abort. */
+#define EXO_RING_RESULT_TIMEOUT_MS  300000
 
 /* Активный запрос оркестратора (один за раз — lockstep протокол) */
 typedef struct {
@@ -233,6 +234,27 @@ typedef struct {
 } exo_ring_req_t;
 
 static exo_ring_req_t g_ring_req;
+
+/* Генерация по кольцу была прервана из-за сбоя транспорта/таймаута
+ * (не по EOS). Выставляется exo_ring_generate, читается exo__chat. */
+static bool g_ring_aborted = false;
+
+/* Последняя кольцевая активность (TENSOR получен/обработан, позиция
+ * оркестратора). Пока активность свежая — discovery не expire'ит пиров
+ * и не ребалансирует кольцо (см. exo_ring_busy). */
+static uint64_t g_ring_activity_ms = 0;
+
+bool exo_ring_busy(void)
+{
+    if (g_ring_req.active)
+        return true;
+    if (!g_ring_activity_ms)
+        return false;
+    /* Окно = RESULT-таймаут (покрывает максимальную латентность позиции:
+     * между входящими TENSOR'ами нода может молчать дольше beacon-gap). */
+    return hal_timer_get_milliseconds() - g_ring_activity_ms
+           < EXO_RING_RESULT_TIMEOUT_MS;
+}
 
 /* Индекс локальной ноды в таблице discovery (для exo_ring_next) */
 static int self_table_index(void)
@@ -303,6 +325,12 @@ static int send_result_to_head(const exo_tensor_msg_t *tensor_hdr,
 
 static void handle_tensor(const exo_tensor_msg_t *hdr, const uint8_t *payload)
 {
+    /* Пока нода гоняет свой шард, мейн-луп (и beacon'ы) стоит —
+     * пульсируем прямо из горячего пути, чтобы пиры не expire'или нас
+     * посреди генерации (EXO_NODE_TIMEOUT_MS > латентности позиции). */
+    exo_discovery_heartbeat();
+    g_ring_activity_ms = hal_timer_get_milliseconds();  /* ring busy */
+
     const exo_shard_t *shard = exo_shard_local();
     if (!shard) {
         console_printf("[EXO] TENSOR dropped: no shard assigned\n");
@@ -331,6 +359,7 @@ static void handle_tensor(const exo_tensor_msg_t *hdr, const uint8_t *payload)
     /* Прогон локальных слоёв; pos = seq (порядок токенов в запросе) */
     if (exo_forward_shard(hidden, n_elems, hidden, hdr->seq) != EXO_OK)
         return;
+    exo_discovery_heartbeat();  /* beacon сразу после длинного forward */
 
     bool last_in_ring = (shard->ring_index == shard->ring_size - 1);
     if (last_in_ring) {
@@ -344,8 +373,10 @@ static void handle_tensor(const exo_tensor_msg_t *hdr, const uint8_t *payload)
         }
         bool finished = streaming_inference_is_stop_token(token);
         int ret = send_result_to_head(hdr, (int32_t)token, finished);
-        if (ret != EXO_OK)
+        if (ret != EXO_OK) {
             console_printf("[EXO] ring tail: RESULT send failed (%d)\n", ret);
+            exo_ring_mark_degraded("RESULT send failed");
+        }
         return;
     }
 
@@ -354,6 +385,7 @@ static void handle_tensor(const exo_tensor_msg_t *hdr, const uint8_t *payload)
     int next_idx = exo_ring_next(self_idx);
     if (next_idx < 0) {
         console_printf("[EXO] ring: no next node\n");
+        exo_ring_mark_degraded("no next node in ring");
         return;
     }
     const exo_node_t *next = exo_node_get(next_idx);
@@ -362,9 +394,11 @@ static void handle_tensor(const exo_tensor_msg_t *hdr, const uint8_t *payload)
     exo_tensor_msg_t out = *hdr;
     out.payload_len = (uint32_t)(n_elems * sizeof(float));
     int ret = exo_send_tensor(next->ip, next->ctrl_port, &out, hidden);
-    if (ret != EXO_OK)
+    if (ret != EXO_OK) {
         console_printf("[EXO] forward to '%s' failed (%d)\n",
                        next->node_id, ret);
+        exo_ring_mark_degraded("TENSOR forward failed");
+    }
 }
 
 void exo__handle_tensor_msg(int fd, const exo_tensor_msg_t *hdr,
@@ -496,6 +530,7 @@ static int exo_ring_generate(const exo_shard_t *shard,
     g_ring_req.active = true;
     g_ring_req.request_id = exo__next_request_id();
     g_ring_req.result_ready = false;
+    g_ring_aborted = false;
 
     console_printf("[EXO] ring generate: req=%llu prompt=%d tokens, "
                    "local layers %u..%u, next '%s'\n",
@@ -527,14 +562,21 @@ static int exo_ring_generate(const exo_shard_t *shard,
             .payload_len = (uint32_t)(dim * sizeof(float)),
         };
         if (exo_send_tensor(next->ip, next->ctrl_port, &hdr, hidden) != EXO_OK) {
-            console_printf("[EXO] ring: TENSOR send failed at pos=%d\n", pos);
+            console_printf("[EXO] ring: TENSOR send failed at pos=%d "
+                           "(peer '%s' lost)\n", pos, next->node_id);
+            g_ring_aborted = true;
+            exo_ring_mark_degraded("TENSOR send failed mid-generation");
             break;
         }
 
         /* Lockstep: ждать RESULT-барьер от хвоста кольца */
         g_ring_req.result_ready = false;
+        g_ring_activity_ms = hal_timer_get_milliseconds();  /* ring busy */
         if (ring_wait_result((uint32_t)pos, EXO_RING_RESULT_TIMEOUT_MS) != EXO_OK) {
-            console_printf("[EXO] ring: RESULT timeout at pos=%d\n", pos);
+            console_printf("[EXO] ring: RESULT timeout at pos=%d — "
+                           "peer unreachable, aborting generation\n", pos);
+            g_ring_aborted = true;
+            exo_ring_mark_degraded("RESULT timeout mid-generation");
             break;
         }
 
@@ -556,6 +598,13 @@ static int exo_ring_generate(const exo_shard_t *shard,
     }
 
     g_ring_req.active = false;
+    if (g_ring_aborted)
+        g_ring_activity_ms = 0;  /* abort: expire/rebalance сразу активны */
+    /* иначе busy-окно (RESULT-таймаут) договаривает grace-период: все ноды
+     * вернулись в idle, beacon'ы потекут каждые 2 с, expire не сработает
+     * на пирах, чьи beacon'ы дропались в переполненной RX-очереди во время
+     * блокирующих forward'ов (наблюдалось в exo3node: spurios-expire сразу
+     * после последнего токена). */
     console_printf("[EXO] ring generate done: %d tokens (%d pos)\n",
                    generated, pos);
     return generated;
@@ -598,6 +647,10 @@ int exo__chat(const char *prompt, exo_emit_fn emit, void *ctx,
         return EXO_ERR_PROTOCOL;
     }
 
+    /* Join/leave, случившийся во время прошлой генерации, применяем
+     * здесь — между запросами, когда смена шардов безопасна. */
+    exo_shard_check_pending();
+
     /* Выбор пути: кольцо, если шард назначен и нод больше одной.
      * Оркестратор обязан быть ring[0] (embedding + запуск прохода);
      * иначе — корректный fallback на полный локальный прогон (модель
@@ -610,6 +663,15 @@ int exo__chat(const char *prompt, exo_emit_fn emit, void *ctx,
                        shard->ring_index, shard->ring_size);
         use_ring = false;
     }
+    if (use_ring && exo_ring_is_degraded()) {
+        /* Кольцо деградировало (таймаут/обрыв посреди прошлой генерации):
+         * не ждать снова по EXO_RING_RESULT_TIMEOUT_MS — честный локальный
+         * прогон (модель замаплена целиком), пока discovery не пересоберёт
+         * кольцо (expire/re-join → rebalance сбрасывает degraded). */
+        console_printf("[EXO] ring degraded — local fallback until "
+                       "rebalance\n");
+        use_ring = false;
+    }
 
     /* TODO(stream): посимвольная выдача — сейчас токены накапливаются
      * и эмитятся в конце одним проходом (для SSE это допустимо). */
@@ -617,6 +679,18 @@ int exo__chat(const char *prompt, exo_emit_fn emit, void *ctx,
     int n_out = use_ring
         ? exo_ring_generate(shard, prompt_tokens, n_prompt, out_tokens, max_tokens)
         : exo_local_generate(prompt_tokens, n_prompt, out_tokens, max_tokens);
+    if (use_ring && g_ring_aborted) {
+        /* Чистый abort: консольная ошибка + кольцо помечено degraded
+         * (см. exo_ring_mark_degraded); частичный ответ, если есть,
+         * выдаём с пометкой об обрыве. */
+        if (n_out <= 0) {
+            emit("[exo] generation aborted: ring peer lost "
+                 "(ring marked degraded)", true, ctx);
+            return EXO_ERR_TIMEOUT;
+        }
+        emit("\n[exo] generation aborted mid-stream: ring peer lost "
+             "(ring marked degraded, partial answer below)\n", false, ctx);
+    }
     if (n_out <= 0) {
         emit("[exo] generation failed", true, ctx);
         return EXO_ERR_UNSUPPORTED;

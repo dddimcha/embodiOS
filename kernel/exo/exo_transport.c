@@ -36,8 +36,10 @@
 /* Макс. чанк TCP-потока: MTU 1500 - eth(14) - ip(20) - tcp(20) = 1446,
  * с запасом 1400. */
 #define EXO_TCP_CHUNK       1400
-#define EXO_CONNECT_TIMEOUT_MS  3000
-#define EXO_IO_TIMEOUT_MS       10000
+/* Таймауты TCG-scaled: под 3-нодной TCG-контенцией гостевое время
+ * растянуто; handshake и window-drain занимают секунды. */
+#define EXO_CONNECT_TIMEOUT_MS  15000
+#define EXO_IO_TIMEOUT_MS       30000
 
 static int g_listen_fd = -1;
 static int g_listen_port = 0;
@@ -466,6 +468,12 @@ void exo_transport_poll(void)
             }
             if (g_in[i].have < need)
                 break;  /* ждать остаток payload в следующих poll */
+
+            /* Трафик от пира = признак живости: во время кольцевой
+             * генерации beacon'ы редки (блокирующий forward), поэтому
+             * discovery-liveness подпитывается от тензорного трафика. */
+            if (s->remote_ip)
+                exo_discovery_touch_ip(s->remote_ip);
 
             exo__handle_tensor_msg(fd, &hdr, g_in[i].buf + 48);
             memmove(g_in[i].buf, g_in[i].buf + need, g_in[i].have - need);

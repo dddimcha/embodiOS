@@ -1,21 +1,26 @@
 /* EMBODIOS Venus (virtio-gpu Vulkan) Protocol Layer
  *
- * Volta v0.6.0, WS-C Part 2 — SPEC-COMPLETE, NOT VALIDATED IN THIS
- * ENVIRONMENT. QEMU 7.2 here ships `virtio-gpu-pci`/`virtio-gpu-gl-pci`
- * but no Venus-enabled device, so the code below is written against:
+ * Maxwell v0.7.0, WS-A — Venus GPU inference transport.
  *
- *   - Virtio specification v1.2, 5.7 "GPU Device" (capsets, contexts)
- *   - virglrenderer: virgl_renderer_capset_venus (capset wire layout)
- *   - Mesa src/virtio/vulkan (vn_ring, VK_MESA ring protocol) and the
- *     venus-protocol repo (vn_protocol_driver_* generated encoders)
+ * Two halves:
+ *   1. Transport: capset handshake, Venus context, Mesa ring protocol
+ *      (vkCreateRingMESA/vkNotifyRingMESA/vkSetReplyCommandStreamMESA) over
+ *      blob-backed shared memory, synchronous command roundtrips.
+ *   2. Compute device: venus_vk_device_init() brings up a full Vulkan
+ *      instance->device->queue->pipelines stack by emitting
+ *      VK_EXT_command_stream records (see venus_cs.h) into the ring, and
+ *      venus_vk_matmul() runs one of the embedded compute shaders on
+ *      blob-backed storage buffers.
  *
- * Everything past the VIRTIO_GPU_CAPSET_VENUS capability handshake is
- * marked TODO(venus-host) and must be validated against a live Venus host
- * (`qemu -device virtio-gpu-gl-pci,venus=on` + host Vulkan driver) before
- * being trusted.
+ * Wire format is byte-modeled on the Mesa venus-protocol generated encoders
+ * (vk.xml VkCommandTypeEXT ids). In this sandbox no Venus device exists, so
+ * the host-executed path is exercised only by tools/host_test_venus.c
+ * (structural decode + lavapipe semantic replay); the kernel keeps the
+ * honest no-Venus path: venus_transport_probe() returns NULL and gpuinfo
+ * prints "unavailable".
  *
- * When the GPU device has no Venus capset the layer is inert:
- * venus_transport_probe() logs the absence and returns NULL.
+ * Author: EMBODIOS Team
+ * License: MIT
  */
 
 #ifndef EMBODIOS_VENUS_H
@@ -36,48 +41,26 @@ struct venus_capset {
 } __packed;
 
 /* ============================================================================
- * Venus ring layout (shared guest/host memory region)
+ * Mesa ring layout (vn_ring_get_layout, VK_RING_FLAGS_NONE)
  *
- * The Venus command transport is a single-producer/single-consumer ring in
- * guest-allocated shared memory. The guest registers the ring with the
- * host renderer via vkCreateRingMESA (VK_MESA ring protocol command),
- * which references a virtio-gpu resource (blob) backing the ring pages.
- *
- * TODO(venus-host): field offsets follow Mesa vn_ring_layout; validate
- * against a live host before relying on them.
+ * Cacheline-separated counters inside one blob resource:
+ *   head @ 0, tail @ 64, status @ 128, buffer @ 192,
+ *   extra region directly after the buffer.
+ * head/tail are u32 monotonic byte counters (wrap-safe via signed diff).
  * ============================================================================ */
 
-#define VN_RING_STATUS_ALIVE        0   /* ring operating normally */
-#define VN_RING_STATUS_ABORT        1   /* renderer asked guest to abort */
+#define VN_RING_HEAD_OFF        0
+#define VN_RING_TAIL_OFF        64
+#define VN_RING_STATUS_OFF      128
+#define VN_RING_DATA_OFF        192
 
-struct vn_ring_layout {
-    volatile uint32_t head;         /* 0x00: consumer position (host) */
-    volatile uint32_t tail;         /* 0x04: producer position (guest) */
-    volatile uint32_t status;       /* 0x08: VN_RING_STATUS_* */
-    uint32_t pad0[5];               /* 0x0c..0x1f */
-    volatile uint32_t buffer_size;  /* 0x20: data region size in bytes */
-    uint32_t pad1[7];               /* 0x24..0x3f */
-    uint8_t  data[];                /* 0x40: ring data (circular) */
-} __packed;
+#define VN_RING_STATUS_ALIVE    0   /* ring operating normally */
+#define VN_RING_STATUS_ABORT    1   /* renderer asked guest to abort */
 
-#define VN_RING_DATA_OFFSET         0x40
-#define VN_RING_DEFAULT_SIZE        (128 * 1024)
-
-/* VK_MESA ring protocol: ring registration command (host-side handler
- * vkr_dispatch_vkCreateRingMESA in virglrenderer). Serialized by the
- * vn_protocol encoders; fields below are the logical payload.
- * TODO(venus-host): confirm exact serialized layout from the generated
- * vn_protocol_driver_command.h of the target venus-protocol release. */
-typedef struct vn_ring_create_info {
-    uint32_t resource_id;   /* virtio-gpu resource backing the ring */
-    uint32_t size;          /* total shared region size */
-    uint32_t head_offset;   /* offset of head counter */
-    uint32_t tail_offset;   /* offset of tail counter */
-    uint32_t status_offset; /* offset of status word */
-    uint32_t buffer_offset; /* offset of ring data */
-    uint32_t extra_size;    /* trailing scratch bytes */
-    uint32_t idle_timeout;  /* renderer idle timeout (ms) */
-} vn_ring_create_info_t;
+#define VN_RING_BUFFER_SIZE     (128 * 1024)    /* circular command data */
+#define VN_RING_EXTRA_SIZE      (64 * 1024)     /* renderer scratch */
+#define VN_RING_SHMEM_SIZE      (VN_RING_DATA_OFF + VN_RING_BUFFER_SIZE + \
+                                 VN_RING_EXTRA_SIZE)
 
 /* ============================================================================
  * Venus transport state
@@ -91,15 +74,68 @@ typedef struct venus_transport {
 
     uint32_t ctx_id;                /* Venus rendering context (0 = none) */
 
-    /* Command ring (guest-allocated shared memory) */
-    struct vn_ring_layout *ring;    /* NULL until ring is registered */
-    uint64_t ring_dma;              /* DMA/physical address of ring */
-    uint32_t ring_size;             /* total bytes of ring allocation */
-    uint32_t ring_resource_id;      /* blob/resource backing the ring */
+    /* Command ring: HOST3D|MAPPABLE blob, mapped into the guest through the
+     * virtio-gpu shared-memory window (identity-mapped MMIO). */
+    volatile uint8_t *ring;         /* mapped ring base (NULL until mapped) */
+    uint64_t ring_phys;             /* hostmem_base + map_info */
+    uint32_t ring_size;             /* blob size (>= VN_RING_SHMEM_SIZE) */
+    uint32_t ring_resource_id;      /* blob resource backing the ring */
+    uint64_t ring_id;               /* VkRingMESA id chosen by the guest */
     bool ring_registered;           /* vkCreateRingMESA acknowledged */
+
+    /* Reply shmem: small HOST3D|MAPPABLE blob, target of
+     * vkSetReplyCommandStreamMESA for synchronous roundtrips. */
+    volatile uint8_t *reply;
+    uint32_t reply_resource_id;
+    uint32_t reply_size;
 
     bool active;                    /* transport usable for vk commands */
 } venus_transport_t;
+
+/* ============================================================================
+ * Venus Vulkan compute device
+ * ============================================================================ */
+
+#define VENUS_VK_MAX_SHADERS    4
+
+/* Embedded SPIR-V module descriptor (vk_device.c maps g_vk_shaders onto this) */
+typedef struct venus_vk_shader {
+    const uint32_t *code;
+    uint32_t word_count;
+    const char *name;
+} venus_vk_shader_t;
+
+/* All handles are guest-assigned u64 object ids (Venus convention). */
+typedef struct venus_vk_device {
+    venus_transport_t *t;
+
+    uint64_t instance;
+    uint64_t physical;              /* first physical device */
+    uint64_t device;
+    uint64_t queue;
+    uint32_t queue_family_index;    /* compute-capable family */
+
+    uint64_t shader_modules[VENUS_VK_MAX_SHADERS];
+    uint64_t set_layout;            /* 3 storage buffers, compute */
+    uint64_t pipeline_layout;       /* + 12-byte push constants */
+    uint64_t pipelines[VENUS_VK_MAX_SHADERS];
+    uint32_t shader_count;
+
+    uint64_t desc_pool;
+    uint64_t desc_set;
+    uint64_t cmd_pool;
+    uint64_t cmd_buf;
+    uint64_t fence;
+
+    /* memory types that are HOST_VISIBLE|HOST_COHERENT (bitmask) */
+    uint32_t host_visible_coherent_types;
+
+    char device_name[256];          /* VkPhysicalDeviceProperties */
+    uint32_t vendor_id;
+    uint32_t device_type;
+
+    bool ready;
+} venus_vk_device_t;
 
 /* ============================================================================
  * Public API
@@ -107,8 +143,8 @@ typedef struct venus_transport {
 
 /**
  * Probe the virtio-gpu device for Venus support and, if present, bring up
- * the Venus transport (capset fetch + Venus context creation + ring
- * registration).
+ * the Venus transport (capset fetch + Venus context creation + ring and
+ * reply shmem registration).
  *
  * Called by the virtio-gpu driver at the end of a successful probe.
  *
@@ -132,10 +168,10 @@ venus_transport_t *venus_transport_get(void);
 /**
  * Execute a marshalled Venus/Vulkan command stream on the Venus context.
  *
- * The caller provides vn_protocol-encoded command bytes (per the
- * venus-protocol vn_cs_encoder wire format). The stream is written to the
- * command ring when it is registered, or submitted directly with
- * VIRTIO_GPU_CMD_SUBMIT_3D otherwise.
+ * The caller provides vn_protocol-encoded command bytes (venus_cs.h wire
+ * format). The stream is written to the command ring and the renderer is
+ * woken with vkNotifyRingMESA; without a registered ring the stream is
+ * submitted directly with VIRTIO_GPU_CMD_SUBMIT_3D.
  *
  * @param cmds      vn_protocol-encoded command stream
  * @param cmds_len  stream size in bytes
@@ -144,6 +180,39 @@ venus_transport_t *venus_transport_get(void);
  *         (VIRTIO_GPU_ERR_INVALID when no Venus transport exists)
  */
 int venus_vk_execute(const void *cmds, uint32_t cmds_len, uint64_t *fence_id);
+
+/**
+ * Bring up the Vulkan compute stack on an active Venus transport:
+ * instance, physical device, compute queue, shader modules, descriptor
+ * set layout (3 storage buffers), pipeline layout (12B push constants),
+ * compute pipelines, descriptor pool/set, command pool/buffer, fence.
+ *
+ * Every step is a synchronous ring roundtrip with the renderer; on any
+ * VkResult != VK_SUCCESS the function fails and `dev->ready` stays false.
+ *
+ * @return 0 on success, negative error otherwise
+ */
+int venus_vk_device_init(venus_transport_t *t, venus_vk_device_t *dev,
+                         const venus_vk_shader_t *shaders, uint32_t count);
+
+/**
+ * Run one matmul on the compute device.
+ *
+ *   binding 0: A — `a_bytes` bytes (shader-specific layout)
+ *   binding 1: B — `b_bytes` bytes
+ *   binding 2: C — m*n fp32 results
+ *   push constants: u32 m, u32 k, u32 n
+ *   dispatch: ceil(m*n / 64) workgroups
+ *
+ * Buffers are per-call HOST3D/GUEST_VRAM blobs imported via
+ * VkImportMemoryResourceInfoMESA, destroyed before return.
+ *
+ * @return 0 on success, negative error otherwise
+ */
+int venus_vk_matmul(venus_vk_device_t *dev, uint32_t pipeline_idx,
+                    const void *A, uint64_t a_bytes,
+                    const void *B, uint64_t b_bytes,
+                    float *C, uint32_t m, uint32_t k, uint32_t n);
 
 /**
  * Print Venus transport state to the console (used by the gpuinfo command).

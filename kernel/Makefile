@@ -195,6 +195,7 @@ KERNEL_C_SOURCES = \
     core/ui.c \
     core/cmd_storage.c \
     core/cmd_smp.c \
+    core/cmd_parbench.c \
     core/cmd_power.c \
     core/rt_timer.c \
     core/cmd_motor.c \

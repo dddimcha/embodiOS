@@ -1,5 +1,77 @@
 # kernel/exo — распределённый инференс (exo-style) для embodiOS
 
+## v0.7.0 "Maxwell": live discovery, auto ring, failure handling
+
+**Live discovery.** Пока exo запущен (`exo`), `exo_poll()` из главного
+цикла ядра непрерывно обслуживает discovery: JSON-анонс
+`{"type":"discovery","node_id",...,"memory","memory_free","model"}`
+уходит UDP broadcast'ом на :5678 каждые **2 с** (`EXO_ANNOUNCE_INTERVAL_MS`),
+входящие анонсы разбираются в таблицу пиров, пиры без heartbeat
+**30 с** (`EXO_NODE_TIMEOUT_MS`) удаляются (кроме pinned от `exopeer`).
+Join/leave пира автоматически вызывает `exo_shard_rebalance()`.
+Команда **`exodiscover`** печатает живую таблицу: node_id, ip:ctrl_port,
+ram_free (MB), возраст последнего heartbeat (с), флаги local/pinned/live.
+
+**Auto ring.** **`exoring auto`** строит кольцо из живой таблицы discovery:
+сортировка по `ram_free` (убывание), при равенстве — **детерминированный
+tiebreak по node_id** (лексикографически), поэтому все ноды вычисляют
+**идентичное кольцо** независимо от порядка прихода анонсов. ring[0] —
+оркестратор (max ram_free). **`exoshard auto`** назначает шарды по этому
+кольцу RAM-weighted стратегией (`ram_free_i / Σram_free` слоёв), model_id и
+n_layers берутся из загруженной GGUF (сделайте warm-up `chat hi` заранее);
+при равной RAM получается ровный разрез (3 ноды × smollm-30 → 10/10/10).
+Ручные `exopeer` / `exoshard <model> <n> [even]` остаются override'ами.
+
+**Failure handling.** Таймаут TENSOR/RESULT посреди кольцевой генерации
+(`EXO_RING_RESULT_TIMEOUT_MS` = 180 с на ожидание RESULT-барьера от хвоста;
+I/O-таймауты транспорта 10 с) → **чистый abort**: консольная ошибка
+`ring: RESULT timeout ... aborting generation`, частичный ответ помечается
+обрывом, кольцо помечается **DEGRADED** (`exo_ring_mark_degraded`, видно в
+статусе `exo`), зависаний и паник нет (lockstep-ожидание всегда с таймаутом,
+сокеты добиваются transport'ом). Пока кольцо degraded, `exochat` уходит в
+честный локальный прогон (модель замаплена целиком). Мёртвый пир истекает
+по discovery за ~30 с → rebalance (кольцо меньшего размера, degraded
+сбрасывается); **переанонсировавшийся пир снова входит в таблицу →
+rebalance → новое кольцо** (`exoring auto`/`exoshard auto` показывают его).
+
+**Known issue (Maxwell).** Re-join после kill'а пира проверен для
+idle-килла (peer истекает по EXO_NODE_TIMEOUT_MS, рестарт → re-announce →
+rediscovery + rebalance за секунды; см. probe в WS-C отчёте). После
+kill'а посреди генерации оркестратор чисто абортирует (DEGRADED, responsive,
+expire+rebalance к 1-нодному кольцу — всё проверено), но rediscovery
+перезапущенного пира на нём в этой сессии не наблюдался: подозрение на
+RX-путь virtio-net/tcpip после шторма ретраев к мёртвому пиру (TX и
+управление работают, UDP beacons не доходят). Workaround: новое кольцо
+собирается на других нодах / после перезагрузки оркестратора. TODO:
+диагностика virtio RX после peer-death storm.
+
+**Воспроизведение** (QEMU TCG, `. $HOME/env.sh`, сборка
+`make -C kernel GGUF_MODEL=/tmp/models/smollm-135m-instruct-q4_k_m.gguf`):
+
+```bash
+# 3-node demo: live discovery + exoring auto + exoshard auto (10/10/10) +
+# exochat "What is the capital of France?" -> "Paris", без transport errors
+python3 /mnt/agents/work/exo3node.py /tmp/work-exo/kernel/embodios.elf
+
+# failure kill-test: 2-нодное кольцо, SIGKILL ноды B посреди генерации ->
+# A чисто абортирует, ring DEGRADED, B истекает, рестарт B -> новое кольцо
+python3 /mnt/agents/work/exo2node_kill.py /tmp/work-exo/kernel/embodios.elf
+
+# 2-node regression (pinned peers, even split)
+python3 /mnt/agents/work/exo2node.py /tmp/work-exo/kernel/embodios.elf
+```
+
+**Топология 3-нодного демо.** В sandbox-QEMU 7.2 (Debian) нет `mcast`
+netdev, а tcpip-стек одноинтерфейсный, поэтому общий L2-сегмент строит
+userspace-хаб на хосте: NIC каждой ноды — `-netdev dgram` (1 UDP-датаграмма
+= 1 Ethernet-кадр, границы кадров сохраняются — в отличие от TCP socket
+пар), Python-хаб (`exo3node.py`, класс `Hub`) фладит каждый кадр остальным
+портам. Broadcast (discovery) и unicast TCP (TENSOR/RESULT) ходят через хаб.
+Ноды: `52:54:00:00:00:0A/0B/0C`, статические IP 10.0.0.1/2/3 на одной
+подсети 10.0.0.0/29 (`setip`). Логи: `/mnt/agents/work/logs/exo3node_*.log`.
+
+---
+
 **Статус: LIVE INFERENCE** (ветка feat/exo-live). Кольцевой проход токена
 (PROMPT→TENSOR→RESULT) работает на реальном инференсе: `exo_forward_shard`
 гоняет свой диапазон слоёв через layer-range API streaming_inference.c,
@@ -90,10 +162,15 @@
 
 | Команда | Действие |
 |---|---|
-| `exo [id] [port]` | `exo_init(id, port)` + печать статуса ноды |
+| `exo [id] [port]` | `exo_init(id, port)` + печать статуса ноды (вкл. ring=DEGRADED) |
 | `exonodes` | дамп таблицы пиров (`exo_node_count`/`exo_node_get`) |
-| `exoshard [model] [n_layers]` | просмотр шарда / `exo_shard_assign(model, n, EXO_STRATEGY_RING_MEMORY_WEIGHTED)` |
+| `exodiscover` | живая таблица discovery: id, ip:port, ram_free, age, флаги |
+| `exoring [auto]` | построить/показать кольцо из таблицы discovery (оркестратор = ring[0]) |
+| `exoshard [model] [n_layers] [even]` | просмотр шарда / ручное назначение |
+| `exoshard auto` | RAM-weighted split по auto-кольцу (модель из загруженной GGUF) |
+| `exopeer <id> <ip> <port> <ram_mb>` | статический pinned-пир (override, не истекает) |
 | `exoserve [port|stop]` | старт/стоп OpenAI API (`exo_serve_openai`/`exo_serve_stop`) |
+| `exochat [n] <msg>` | чат через exo-кольцо с выводом на консоль |
 
 `exo_poll()` вызывается из главного цикла (`kernel_loop`, core/kernel.c)
 в ветке простоя — discovery и серверы обслуживаются, пока shell ждёт ввода.

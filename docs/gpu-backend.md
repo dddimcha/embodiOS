@@ -298,3 +298,107 @@ When the capset is absent the layer is inert by construction: it logs
 `venus_transport_probe()` returns NULL. Integration with
 `gpu_backend.c`/`vk_device.c` (WS-B) is via the exported
 `venus_transport_probe()` / `venus_vk_execute()` symbols.
+
+## Venus GPU inference (v0.7.0 "Maxwell", WS-A)
+
+The v0.6.0 transport skeleton is now a complete Venus compute path.
+
+### Architecture
+
+```
+kernel/ai/vk_device.c          kernel/drivers/gpu/venus.c           virtio-gpu
+---------------------          ----------------------------          ---------
+vk_device_init()    -------->  venus_vk_device_init()               (probe:
+  when venus_transport_get()     instance -> physdev -> compute        capset +
+  is non-NULL                    queue -> 4 shader modules ->          ctx_create)
+                                 descriptor set layout (3 storage)
+                                 pipeline layout (+12B push consts)
+                                 4 compute pipelines -> pool/set ->
+                                 cmd pool/buffer -> fence
+vk_matmul_{f32,q8_0,  ------->  venus_vk_matmul(idx 0..3)
+  q4_k_q8_0,q6_k_q8_0}           3 imported-blob storage buffers,
+                                 descriptors, begin/bind/push/
+                                 dispatch(ceil(m*n/64)), submit+fence,
+                                 wait, copy C back, teardown
+```
+
+All Vulkan traffic is VK_EXT_command_stream records produced by the
+freestanding encoder in `kernel/drivers/gpu/venus_cs.h` — byte-modeled on
+the Mesa venus-protocol generated encoders (`vn_protocol_driver_*.h`), with
+the real `VkCommandTypeEXT` ids from the venus-protocol vk.xml (e.g.
+`vkCreateInstance=0`, `vkCreateBuffer=50`, `vkQueueSubmit=18`,
+`vkCreateRingMESA=188`). Record header is `{u32 type, u32 flags}`;
+`flags & VK_COMMAND_GENERATE_REPLY_BIT_EXT` requests a reply record in the
+reply stream. Handles are guest-assigned u64 object ids.
+
+### Ring protocol (Mesa `vn_ring` layout)
+
+One `BLOB_MEM_HOST3D | USE_MAPPABLE` blob holds the ring, mapped into the
+guest through the virtio-gpu shared-memory PCI window
+(`RESOURCE_MAP_BLOB` -> offset, identity-mapped MMIO):
+
+```
+offset   0: u32 head (renderer -> guest, acquire)
+offset  64: u32 tail (guest -> renderer, release)
+offset 128: u32 status (0 = alive)
+offset 192: circular command buffer, 128 KB; then 64 KB extra region
+```
+
+Produced records are appended with wrap, `tail` is stored with release
+ordering, and the renderer is woken with a `vkNotifyRingMESA` record sent
+via `VIRTIO_GPU_CMD_SUBMIT_3D` on the Venus context. Completion is a poll
+of `head` past the submission tail (wrap-safe signed compare), matching
+`vn_ring_wait_seqno`. Commands needing a result are preceded by a
+`vkSetReplyCommandStreamMESA` pointing at a second blob (reply shmem) and
+carry `VK_COMMAND_GENERATE_REPLY_BIT`; the reply record is decoded from
+the shmem once the ring head passes. `vkCreateRingMESA` itself is sent via
+`SUBMIT_3D` with the Mesa layout offsets (head/tail/status/buffer/extra).
+
+### Memory model
+
+- **Ring + reply shmem**: `BLOB_MEM_HOST3D` blobs, `USE_MAPPABLE`, mapped
+  once at probe time.
+- **Matmul buffers**: per call, `vkCreateBuffer` ->
+  `vkGetBufferMemoryRequirements` -> blob resource sized
+  `round_page(max(size, memreq.size))` (`BLOB_MEM_GUEST_VRAM` with
+  `HOST3D` fallback) -> `vkGetMemoryResourcePropertiesMESA` for importable
+  memory types -> `vkAllocateMemory` with `VkImportMemoryResourceInfoMESA`
+  on `pNext` (allocation size == blob size, memory type = first
+  HOST_VISIBLE|HOST_COHERENT bit allowed by both the buffer requirements
+  and the resource) -> `vkBindBufferMemory`. Guest CPU access goes through
+  the shared-memory window mapping; HOST_COHERENT means no flush
+  bookkeeping. Buffers are destroyed (`vkDestroyBuffer`/`vkFreeMemory`,
+  `UNMAP_BLOB`+`UNREF`) before `venus_vk_matmul` returns — no host object
+  leaks across calls.
+
+### Validation
+
+`make -C tools venustest` builds `tools/host_test_venus.c`, which links the
+**real** `kernel/drivers/gpu/venus.c` against a mock virtio-gpu backend and
+a mock Venus renderer that consumes ring records exactly like
+virglrenderer:
+
+- **Structural**: every ring record is walked with the `vncs_walk_next`
+  decoder from `venus_cs.h`; the cursor must land exactly on each record
+  end, every opcode must be a known real `VkCommandTypeEXT`, and the init
+  (41 records) and matmul (49 records) opcode streams are asserted against
+  the expected orders.
+- **Semantic**: the mock renderer replays the decoded records 1:1 onto
+  lavapipe (guest object id -> real Vulkan handle map, genuinely encoded
+  reply records in the reply shmem, blob memory mirrored into
+  `vkMapMemory`'d buffers around submits). `venus_vk_device_init` brings
+  the whole stack up through the ring, and `venus_vk_matmul` runs
+  `matmul_f32` and `matmul_q4_k_q8_0` **bit-exact** against the CPU
+  reference (identical float op order as the shaders).
+
+### Sandbox limitation
+
+QEMU 7.2 in this sandbox has no `venus=on` device, so the in-kernel path is
+validated host-side only (above) and boots plain QEMU with the honest
+fallback: `venus_transport_probe()` returns NULL, gpuinfo prints
+`venus: unavailable (no VIRTIO_GPU_CAPSET_VENUS)`, and
+`vk_matmul_*` return `VK_DEV_NO_DRIVER`. Byte-level ring/wire behavior on
+a live Venus host (`-device virtio-gpu-pci,venus=on`) is exercised by the
+same encoder/decoder code the host test byte-validates against the Mesa
+generated layouts, but should still be smoke-tested on real hardware
+before a release.

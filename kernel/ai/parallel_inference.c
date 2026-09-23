@@ -1,12 +1,24 @@
 /* Parallel Inference Engine for EMBODIOS
  *
- * Implements multi-threaded inference using a thread pool.
+ * Implements multi-threaded inference using a worker pool.
  * Can scale from 1 thread (QEMU single-core) to N threads (native multi-core).
  *
  * Key features:
- * - Work-stealing thread pool for matmul
+ * - Work-stealing worker pool for matmul
  * - Parallel attention head computation
- * - Barrier synchronization between layers
+ * - Row-partitioned fused quantized matvec (bit-identical at any CPU count)
+ *
+ * Worker execution model (v0.7.0 "Maxwell", WS-B): when more than one CPU is
+ * online the workers run on real Application Processors through the IPI work
+ * posting mechanism (arch/x86_64/ipi.c + smp_work_dispatch). APs park in
+ * `sti; hlt` with IF=1; parallel_for() posts one work item per AP mailbox and
+ * pokes each parked AP with IPI_WAKEUP_VECTOR, then the BSP runs its own
+ * slice and joins via completion counters (work.completed / workers_done) and
+ * smp_work_wait(). There is NO IF=0 mailbox polling anywhere in this
+ * inference path — the legacy IF=0 pause-polling loop survives only inside
+ * smp.c as an arch-level fallback for APs that failed to arm their LAPIC
+ * timer, and the task-based worker threads below are only used on UP boots
+ * where parallel_for() degenerates to a serial call anyway.
  */
 
 #include <embodios/console.h>
@@ -203,9 +215,11 @@ static void parallel_worker_run(int thread_id) {
     smp_mb();
 }
 
-/* SMP AP worker: executed by an Application Processor's mailbox loop
- * (smp_work_dispatch). thread_id i runs on CPU i. Runs outside IRQ context
- * on the AP, so SSE/FPU math is safe (enabled during AP bring-up). */
+/* SMP AP worker: posted by parallel_for() through smp_work_dispatch(); the
+ * target AP is woken from its `sti; hlt` park by IPI_WAKEUP_VECTOR
+ * (ipi_send in arch/x86_64/ipi.c) and executes this in its park loop after
+ * hlt returns. thread_id i runs on CPU i. Runs outside IRQ context on the
+ * AP, so SSE/FPU math is safe (enabled during AP bring-up). */
 static void parallel_ap_worker(void* arg) {
     int thread_id = (int)(uintptr_t)arg;
     g_per_core_stats[thread_id].core_id = (uint32_t)thread_id;  /* cpu == thread */
@@ -609,6 +623,66 @@ void parallel_matmul_f32(float* out, const float* weights, const float* input,
 }
 
 /* ============================================================================
+ * Row-partitioned fused quantized matvec (v0.7.0 "Maxwell", WS-B)
+ * ============================================================================ */
+
+typedef struct {
+    float* out;             /* [rows] output */
+    const uint8_t* w;       /* row-major quantized weight blocks */
+    const void* xq;         /* shared Q8_1-quantized input (read-only) */
+    int nb_row;             /* quantized blocks per row */
+    size_t row_bytes;       /* nb_row * block_bytes */
+    quant_row_dot_fn dot;   /* one-row dot product (g_vec_dot_* kernel) */
+} quant_matvec_args_t;
+
+/* Compute output rows [start, end). Each row is a single dot() call, so the
+ * per-row accumulation order — and therefore the result bits — does not
+ * depend on which CPU computes the row or how many CPUs share the matrix. */
+static void quant_matvec_worker(void* arg, int thread_id, int start, int end) {
+    quant_matvec_args_t* a = (quant_matvec_args_t*)arg;
+    (void)thread_id;
+
+    for (int r = start; r < end; r++) {
+        a->out[r] = a->dot(a->w + (size_t)r * a->row_bytes, a->xq, a->nb_row);
+    }
+}
+
+int parallel_quant_matvec(float* out, const void* w_blocks,
+                          const void* x_q8_1, int rows, int cols,
+                          int nb_row, size_t block_bytes,
+                          quant_row_dot_fn dot) {
+    quant_matvec_args_t args = {
+        .out = out,
+        .w = (const uint8_t*)w_blocks,
+        .xq = x_q8_1,
+        .nb_row = nb_row,
+        .row_bytes = (size_t)nb_row * block_bytes,
+        .dot = dot
+    };
+
+    int num_threads = (g_pool_initialized && g_pool.use_smp)
+                      ? g_pool.num_threads : 1;
+
+    /* Serial fallback: UP boot, pool not up, or matrix too small to
+     * amortize the IPI-post + join overhead (PAR_QUANT_MATVEC_MIN_MACS). */
+    if (num_threads <= 1 ||
+        (int64_t)rows * (int64_t)cols < PAR_QUANT_MATVEC_MIN_MACS ||
+        rows < num_threads * 8) {
+        quant_matvec_worker(&args, 0, 0, rows);
+        return 1;
+    }
+
+    /* Chunked work-stealing over rows: chunking affects only which CPU
+     * computes a row, never the per-row arithmetic, so output bits are
+     * identical for any thread count. */
+    int chunk = rows / (num_threads * 4);
+    if (chunk < 8) chunk = 8;
+
+    parallel_for(quant_matvec_worker, &args, rows, chunk);
+    return num_threads;
+}
+
+/* ============================================================================
  * Parallel Attention
  * ============================================================================ */
 
@@ -802,6 +876,10 @@ void parallel_swiglu(float* gate, const float* up, int size) {
 
 int parallel_get_num_threads(void) {
     return g_pool_initialized ? g_pool.num_threads : 1;
+}
+
+int parallel_pool_on_smp(void) {
+    return g_pool_initialized && g_pool.use_smp;
 }
 
 void parallel_set_num_threads(int n) {

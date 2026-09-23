@@ -187,6 +187,27 @@ static int virtio_gpu_parse_modern_caps(virtio_gpu_dev_t *dev,
         if (cap_id == 0x09 && cap_len >= 16) {  /* vendor-specific */
             uint8_t cfg_type = pci_config_read8(pci_dev->addr, cap_off + 3);
             uint8_t bar = pci_config_read8(pci_dev->addr, cap_off + 4);
+
+            /* Shared-memory window (virtio_pci_cap64): 64-bit length/offset.
+             * This is the blob host-memory region — it is only mapped on
+             * demand by RESOURCE_MAP_BLOB users (can be hundreds of MB), so
+             * just record it here. */
+            if (cfg_type == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG && cap_len >= 24) {
+                uint64_t length = pci_config_read32(pci_dev->addr, cap_off + 8);
+                uint64_t offset = pci_config_read32(pci_dev->addr, cap_off + 12);
+                length |= (uint64_t)pci_config_read32(pci_dev->addr,
+                                                      cap_off + 16) << 32;
+                offset |= (uint64_t)pci_config_read32(pci_dev->addr,
+                                                      cap_off + 20) << 32;
+                uint64_t base = pci_bar_address(pci_dev, bar);
+                if (base && !(pci_dev->bar[bar] & PCI_BAR_IO) && length) {
+                    dev->hostmem_base = base + offset;
+                    dev->hostmem_size = length;
+                }
+                cap_off = cap_next;
+                continue;
+            }
+
             uint32_t offset = pci_config_read32(pci_dev->addr, cap_off + 8);
             uint32_t length = pci_config_read32(pci_dev->addr, cap_off + 12);
             uint64_t base = pci_bar_address(pci_dev, bar);
@@ -907,6 +928,186 @@ int virtio_gpu_submit_3d(uint32_t ctx_id, const void *cmds,
     }
     if (fence_id) {
         *fence_id = cmd.hdr.fence_id;
+    }
+    return VIRTIO_GPU_OK;
+}
+
+/* ============================================================================
+ * Blob resources (VIRTIO_GPU_F_RESOURCE_BLOB)
+ * ============================================================================ */
+
+bool virtio_gpu_has_blob(void)
+{
+    const virtio_gpu_dev_t *dev = &g_gpu;
+    if (!dev->initialized || !dev->hostmem_base) {
+        return false;
+    }
+    if (dev->modern) {
+        return (dev->features64 & (1ULL << VIRTIO_GPU_F_RESOURCE_BLOB)) != 0;
+    }
+    return (dev->base.features & VIRTIO_GPU_F_RESOURCE_BLOB_MASK) != 0;
+}
+
+bool virtio_gpu_hostmem_window(uint64_t *base, uint64_t *size)
+{
+    const virtio_gpu_dev_t *dev = &g_gpu;
+    if (!dev->initialized || !dev->hostmem_base) {
+        return false;
+    }
+    if (base) *base = dev->hostmem_base;
+    if (size) *size = dev->hostmem_size;
+    return true;
+}
+
+int virtio_gpu_resource_create_blob(uint32_t resource_id, uint32_t blob_mem,
+                                    uint32_t blob_flags, uint64_t blob_id,
+                                    uint64_t size)
+{
+    virtio_gpu_dev_t *dev = &g_gpu;
+    if (!dev->initialized) {
+        return VIRTIO_GPU_ERR_INVALID;
+    }
+
+    struct virtio_gpu_resource_create_blob cmd = {0};
+    struct virtio_gpu_ctrl_hdr resp_hdr;
+
+    cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB;
+    cmd.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    cmd.hdr.fence_id = ++dev->fence_seq;
+    cmd.resource_id = resource_id;
+    cmd.blob_mem = blob_mem;
+    cmd.blob_flags = blob_flags;
+    cmd.nr_entries = 0;     /* host-allocated blobs take no guest entries */
+    cmd.blob_id = blob_id;
+    cmd.size = size;
+
+    int ret = virtio_gpu_ctrl_xfer(dev, &cmd, sizeof(cmd),
+                                   &resp_hdr, sizeof(resp_hdr),
+                                   NULL, 0, false);
+    if (ret != VIRTIO_GPU_OK) {
+        return ret;
+    }
+    if (resp_hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
+        return VIRTIO_GPU_ERR_DEVICE;
+    }
+    return VIRTIO_GPU_OK;
+}
+
+int virtio_gpu_resource_attach_backing(uint32_t resource_id,
+                                       const void *entries,
+                                       uint32_t nr_entries)
+{
+    virtio_gpu_dev_t *dev = &g_gpu;
+    if (!dev->initialized || (!entries && nr_entries)) {
+        return VIRTIO_GPU_ERR_INVALID;
+    }
+
+    struct virtio_gpu_resource_attach_backing cmd = {0};
+    struct virtio_gpu_ctrl_hdr resp_hdr;
+
+    cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+    cmd.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    cmd.hdr.fence_id = ++dev->fence_seq;
+    cmd.resource_id = resource_id;
+    cmd.nr_entries = nr_entries;
+
+    int ret = virtio_gpu_ctrl_xfer(dev, &cmd, sizeof(cmd),
+                                   &resp_hdr, sizeof(resp_hdr),
+                                   entries,
+                                   nr_entries * sizeof(struct virtio_gpu_mem_entry),
+                                   false);
+    if (ret != VIRTIO_GPU_OK) {
+        return ret;
+    }
+    if (resp_hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
+        return VIRTIO_GPU_ERR_DEVICE;
+    }
+    return VIRTIO_GPU_OK;
+}
+
+int virtio_gpu_resource_map_blob(uint32_t resource_id, uint64_t offset,
+                                 uint64_t *map_info)
+{
+    virtio_gpu_dev_t *dev = &g_gpu;
+    if (!dev->initialized || !map_info) {
+        return VIRTIO_GPU_ERR_INVALID;
+    }
+
+    struct virtio_gpu_resource_map_blob cmd = {0};
+    struct virtio_gpu_resp_resource_map_blob resp;
+
+    cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB;
+    /* MAP/UNMAP_BLOB must carry the ring index so the device fences them
+     * on ring 0 (virtio spec 1.2, 5.7.6.10). */
+    cmd.hdr.flags = VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX;
+    cmd.hdr.fence_id = ++dev->fence_seq;
+    cmd.hdr.ring_idx = 0;
+    cmd.resource_id = resource_id;
+    cmd.offset = offset;
+
+    int ret = virtio_gpu_ctrl_xfer(dev, &cmd, sizeof(cmd),
+                                   &resp, sizeof(resp), NULL, 0, false);
+    if (ret != VIRTIO_GPU_OK) {
+        return ret;
+    }
+    if (resp.hdr.type != VIRTIO_GPU_RESP_OK_MAP_BLOB) {
+        return VIRTIO_GPU_ERR_DEVICE;
+    }
+    *map_info = resp.map_info;
+    return VIRTIO_GPU_OK;
+}
+
+int virtio_gpu_resource_unmap_blob(uint32_t resource_id)
+{
+    virtio_gpu_dev_t *dev = &g_gpu;
+    if (!dev->initialized) {
+        return VIRTIO_GPU_ERR_INVALID;
+    }
+
+    struct virtio_gpu_resource_unmap_blob cmd = {0};
+    struct virtio_gpu_ctrl_hdr resp_hdr;
+
+    cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB;
+    cmd.hdr.flags = VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX;
+    cmd.hdr.fence_id = ++dev->fence_seq;
+    cmd.hdr.ring_idx = 0;
+    cmd.resource_id = resource_id;
+
+    int ret = virtio_gpu_ctrl_xfer(dev, &cmd, sizeof(cmd),
+                                   &resp_hdr, sizeof(resp_hdr),
+                                   NULL, 0, false);
+    if (ret != VIRTIO_GPU_OK) {
+        return ret;
+    }
+    if (resp_hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
+        return VIRTIO_GPU_ERR_DEVICE;
+    }
+    return VIRTIO_GPU_OK;
+}
+
+int virtio_gpu_resource_unref(uint32_t resource_id)
+{
+    virtio_gpu_dev_t *dev = &g_gpu;
+    if (!dev->initialized) {
+        return VIRTIO_GPU_ERR_INVALID;
+    }
+
+    struct virtio_gpu_resource_unref cmd = {0};
+    struct virtio_gpu_ctrl_hdr resp_hdr;
+
+    cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_UNREF;
+    cmd.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    cmd.hdr.fence_id = ++dev->fence_seq;
+    cmd.resource_id = resource_id;
+
+    int ret = virtio_gpu_ctrl_xfer(dev, &cmd, sizeof(cmd),
+                                   &resp_hdr, sizeof(resp_hdr),
+                                   NULL, 0, false);
+    if (ret != VIRTIO_GPU_OK) {
+        return ret;
+    }
+    if (resp_hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
+        return VIRTIO_GPU_ERR_DEVICE;
     }
     return VIRTIO_GPU_OK;
 }
