@@ -17,10 +17,14 @@
  * already configured an ICD.)
  *
  * Pass criteria:
- *   matmul_f32 : max abs error < 1e-3  (identical accumulation order, so the
- *                expected value is actually ~0)
- *   matmul_q8_0: max relative error < 1e-2 (per-block dequant structure
- *                matches the kernel scalar dot product)
+ *   matmul_f32      : max abs error < 1e-3 (identical accumulation order, so
+ *                     the expected value is actually ~0)
+ *   matmul_q8_0     : max relative error < 1e-2 (per-block dequant structure
+ *                     matches the kernel scalar dot product)
+ *   matmul_q4_k_q8_0: max abs error == 0 (exact int32 group sums + identical
+ *                     float op order as the CPU reference; lavapipe executes
+ *                     IEEE fp32 semantics)
+ *   matmul_q6_k_q8_0: max abs error == 0 (same argument)
  */
 
 #include <stdint.h>
@@ -503,6 +507,60 @@ static void quantize_row_q8_0(const float *x, block_q8_0 *blocks, int k)
 }
 
 /* ============================================================================
+ * ggml Q4_K superblock (144 bytes): d/dmin fp16 + 12 packed 6-bit
+ * scales/mins + 128 bytes of nibbles (256 values, 8 groups of 32).
+ * Layout mirrored from kernel/ai/simd_kernels_scalar.c (block_q4_K).
+ * ========================================================================== */
+
+#define QK_K 256
+#define Q4_K_SUPERBLOCK_BYTES 144
+
+typedef struct __attribute__((packed)) {
+    uint16_t d;
+    uint16_t dmin;
+    uint8_t scales[12];
+    uint8_t qs[QK_K / 2];
+} block_q4_K;
+
+/* Identical to get_scale_min_k4() in kernel/ai/simd_kernels_scalar.c */
+static void get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *mn)
+{
+    if (j < 4) {
+        *d = q[j] & 63;
+        *mn = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *mn = (q[j + 4] >> 4) | ((q[j] >> 6) << 4);
+    }
+}
+
+/* ============================================================================
+ * ggml Q6_K superblock (210 bytes): ql[128] + qh[64] + scales[16] int8 +
+ * d fp16 (256 values, 2 halves x 4 groups of 32).
+ * Layout mirrored from kernel/ai/simd_kernels_scalar.c (block_q6_K).
+ * ========================================================================== */
+
+#define Q6_K_SUPERBLOCK_BYTES 210
+
+typedef struct __attribute__((packed)) {
+    uint8_t ql[QK_K / 2];
+    uint8_t qh[QK_K / 4];
+    int8_t scales[QK_K / 16];
+    uint16_t d;
+} block_q6_K;
+
+static uint16_t rd_u16le(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static void wr_u16le(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+/* ============================================================================
  * Deterministic PRNG (splitmix64)
  * ========================================================================== */
 
@@ -554,6 +612,105 @@ static void matmul_q8_0_ref(const block_q8_0 *A, const float *B, float *C,
                 for (uint32_t jj = 0; jj < QK8_0; jj++)
                     bacc += (float)blk->qs[jj] * B[(b * QK8_0 + jj) * n + j];
                 acc += d * bacc;
+            }
+            C[i * n + j] = acc;
+        }
+    }
+}
+
+/* Q4_K x Q8_0 reference: mirrors the SPIR-V shader (and, structurally,
+ * vec_dot_q4_k_q8_1_scalar in kernel/ai/simd_kernels_scalar.c). B holds one
+ * Q8_0 block chain per column: block b of column j at B[(j*nb8 + b) * 34].
+ * All integer group sums are exact; float ops run in the same order as the
+ * shader, so the comparison below is expected to be bit-exact.
+ *
+ * The mins term uses summs += yd * (mn * sum(yq)): Q8_0 activations carry
+ * no fp16 block sum (that is Q8_1), so the mins contribution is computed
+ * from the dequantized activation scale times the exact int32 quant sum. */
+static void matmul_q4_k_q8_0_ref(const uint8_t *A, const uint8_t *B, float *C,
+                                 uint32_t m, uint32_t k, uint32_t n)
+{
+    uint32_t nb = k / QK_K;
+    uint32_t nb8 = k / QK8_0;
+    for (uint32_t i = 0; i < m; i++) {
+        for (uint32_t j = 0; j < n; j++) {
+            float acc = 0.0f;
+            for (uint32_t sb = 0; sb < nb; sb++) {
+                const uint8_t *sbp = A + ((size_t)i * nb + sb) *
+                                         Q4_K_SUPERBLOCK_BYTES;
+                float xd = fp16_to_fp32(rd_u16le(sbp));
+                float xdmin = fp16_to_fp32(rd_u16le(sbp + 2));
+                const uint8_t *sc12 = sbp + 4;
+                float sumi = 0.0f, summs = 0.0f;
+                for (int j8 = 0; j8 < 8; j8++) {
+                    uint8_t sc, mn;
+                    get_scale_min_k4(j8, sc12, &sc, &mn);
+                    const uint8_t *yb = B + ((size_t)j * nb8 + sb * 8 + j8) *
+                                            Q8_0_BLOCK_BYTES;
+                    float yd = fp16_to_fp32(rd_u16le(yb));
+                    const uint8_t *qs = sbp + 16 + (j8 / 2) * 32;
+                    int use_high = j8 & 1;
+                    int32_t isum = 0, iysum = 0;
+                    for (int l = 0; l < 32; l++) {
+                        int q = use_high ? (qs[l] >> 4) : (qs[l] & 0xF);
+                        int yq = (int8_t)yb[2 + l];
+                        isum += q * yq;
+                        iysum += yq;
+                    }
+                    sumi += (float)sc * yd * (float)isum;
+                    summs += yd * (float)(mn * iysum);
+                }
+                /* (acc + a) - b: matches the shader's canonical form;
+                 * lavapipe rewrites acc + (a - b) into this anyway. */
+                acc = (acc + xd * sumi) - xdmin * summs;
+            }
+            C[i * n + j] = acc;
+        }
+    }
+}
+
+/* Q6_K x Q8_0 reference: mirrors the SPIR-V shader, which mirrors
+ * vec_dot_q6_k_q8_1_scalar (kernel/ai/simd_kernels_scalar.c) with Q8_0
+ * activations. Per group g of half h the 32 elements split into two exact
+ * int32 sums (l<16, l>=16) scaled by sc[2g] / sc[2g+1]; group order 0..7 per
+ * half matches the scalar kernel's scale-apply order. */
+static void matmul_q6_k_q8_0_ref(const uint8_t *A, const uint8_t *B, float *C,
+                                 uint32_t m, uint32_t k, uint32_t n)
+{
+    uint32_t nb = k / QK_K;
+    uint32_t nb8 = k / QK8_0;
+    for (uint32_t i = 0; i < m; i++) {
+        for (uint32_t j = 0; j < n; j++) {
+            float acc = 0.0f;
+            for (uint32_t sb = 0; sb < nb; sb++) {
+                const uint8_t *sbp = A + ((size_t)i * nb + sb) *
+                                         Q6_K_SUPERBLOCK_BYTES;
+                float d = fp16_to_fp32(rd_u16le(sbp + 208));
+                float sumi = 0.0f;
+                for (int h = 0; h < 2; h++) {
+                    const uint8_t *ql = sbp + 64 * h;
+                    const uint8_t *qh = sbp + 128 + 32 * h;
+                    const int8_t *sc = (const int8_t *)(sbp + 192 + 8 * h);
+                    for (int g = 0; g < 4; g++) {
+                        const uint8_t *yb = B + ((size_t)j * nb8 + sb * 8 +
+                                                 4 * h + g) * Q8_0_BLOCK_BYTES;
+                        float yd = fp16_to_fp32(rd_u16le(yb));
+                        int32_t acc0 = 0, acc1 = 0;
+                        for (int l = 0; l < 32; l++) {
+                            int lo = (g < 2) ? (ql[l + (g & 1) * 32] & 0xF)
+                                             : (ql[l + (g & 1) * 32] >> 4);
+                            int q = (lo | (((qh[l] >> (2 * g)) & 3) << 4)) - 32;
+                            int yq = (int8_t)yb[2 + l];
+                            if (l < 16)
+                                acc0 += q * yq;
+                            else
+                                acc1 += q * yq;
+                        }
+                        sumi += (float)sc[2 * g] * yd * (float)acc0;
+                        sumi += (float)sc[2 * g + 1] * yd * (float)acc1;
+                    }
+                }
+                acc += d * sumi;
             }
             C[i * n + j] = acc;
         }
@@ -807,28 +964,33 @@ static VkPipeline vk_create_pipeline(struct vk_ctx *c, const uint32_t *code,
     return pipeline;
 }
 
-/* Run one compute matmul: A (a_bytes), B (fp32 k*n), C (fp32 m*n).
+/* Run one compute matmul: A (a_bytes), B (b_bytes), C (fp32 m*n).
  *
- * The A buffer is rounded up to a 4-byte multiple (tail zero-filled):
- * matmul_q8_0 reads whole u32 words and the final word of the last 34-byte
- * Q8_0 block can otherwise straddle the buffer end (out-of-bounds SSBO
- * read). The kernel driver applies the same padding when uploading weights. */
+ * Both the A and B buffers are rounded up to a 4-byte multiple (tail
+ * zero-filled): the quantized-format shaders read whole u32 words and the
+ * final word of the last 34/144/210-byte block can otherwise straddle the
+ * buffer end (out-of-bounds SSBO read; found during lavapipe validation
+ * with a single-block matrix). The kernel driver applies the same padding
+ * when uploading weights/activations. */
 static void vk_run_matmul(struct vk_ctx *c, VkPipeline pipeline,
                           const void *a_data, VkDeviceSize a_bytes,
-                          const float *b_data, const float *c_fill,
-                          float *c_out,
+                          const void *b_data, VkDeviceSize b_bytes,
+                          const float *c_fill, float *c_out,
                           uint32_t m, uint32_t k, uint32_t n)
 {
     VkDeviceSize a_alloc = (a_bytes + 3) & ~3ULL;
+    VkDeviceSize b_alloc = (b_bytes + 3) & ~3ULL;
     struct vk_buf ba = vk_buf_create(c, a_alloc);
-    struct vk_buf bb = vk_buf_create(c, (VkDeviceSize)k * n * 4);
+    struct vk_buf bb = vk_buf_create(c, b_alloc);
     struct vk_buf bc = vk_buf_create(c, (VkDeviceSize)m * n * 4);
 
     void *pa = vk_buf_map(c, &ba);
     memcpy(pa, a_data, a_bytes);
     memset((char *)pa + a_bytes, 0, a_alloc - a_bytes);
     vkUnmapMemory(c->device, ba.memory);
-    memcpy(vk_buf_map(c, &bb), b_data, (size_t)k * n * 4);
+    void *pb = vk_buf_map(c, &bb);
+    memcpy(pb, b_data, b_bytes);
+    memset((char *)pb + b_bytes, 0, b_alloc - b_bytes);
     vkUnmapMemory(c->device, bb.memory);
     memcpy(vk_buf_map(c, &bc), c_fill, (size_t)m * n * 4);
     vkUnmapMemory(c->device, bc.memory);
@@ -919,8 +1081,8 @@ static int test_matmul_f32(struct vk_ctx *c, VkPipeline pipeline,
         C_fill[i] = -999.0f; /* sentinel: shader must overwrite every element */
 
     matmul_f32_ref(A, B, C_ref, m, k, n);
-    vk_run_matmul(c, pipeline, A, (VkDeviceSize)m * k * 4, B, C_fill, C_gpu,
-                  m, k, n);
+    vk_run_matmul(c, pipeline, A, (VkDeviceSize)m * k * 4, B,
+                  (VkDeviceSize)k * n * 4, C_fill, C_gpu, m, k, n);
 
     double max_abs = 0.0, max_rel = 0.0;
     for (uint32_t i = 0; i < m * n; i++) {
@@ -964,8 +1126,8 @@ static int test_matmul_q8_0(struct vk_ctx *c, VkPipeline pipeline,
         quantize_row_q8_0(A_f32 + (size_t)i * k, A_q8 + (size_t)i * nb, (int)k);
 
     matmul_q8_0_ref(A_q8, B, C_ref, m, k, n);
-    vk_run_matmul(c, pipeline, A_q8, a_blocks * Q8_0_BLOCK_BYTES, B, C_fill,
-                  C_gpu, m, k, n);
+    vk_run_matmul(c, pipeline, A_q8, a_blocks * Q8_0_BLOCK_BYTES, B,
+                  (VkDeviceSize)k * n * 4, C_fill, C_gpu, m, k, n);
 
     double max_abs = 0.0, max_rel = 0.0;
     for (uint32_t i = 0; i < m * n; i++) {
@@ -985,6 +1147,152 @@ static int test_matmul_q8_0(struct vk_ctx *c, VkPipeline pipeline,
     return pass;
 }
 
+/* Fill a Q4_K weight matrix with deterministic pseudo-random superblocks.
+ * scales/mins/qs are raw PRNG bytes (full bit-pattern coverage); d/dmin are
+ * fp16 encodings of small floats, with periodic zero and fp16-denormal
+ * scales to exercise all branches of the in-shader fp16 converter. */
+static void fill_q4_k_blocks(uint8_t *A, size_t nblocks)
+{
+    for (size_t b = 0; b < nblocks; b++) {
+        uint8_t *p = A + b * Q4_K_SUPERBLOCK_BYTES;
+        float dv, mv;
+        if (b % 7 == 3) {
+            dv = 0.0f; /* zero superblock scale */
+        } else if (b % 11 == 5) {
+            dv = 1e-6f; /* fp16 denormal */
+        } else {
+            dv = 0.001f + fabsf(rng_float()) * 0.5f;
+        }
+        mv = (b % 5 == 2) ? 0.0f : 0.001f + fabsf(rng_float()) * 0.25f;
+        wr_u16le(p, fp32_to_fp16(dv));
+        wr_u16le(p + 2, fp32_to_fp16(mv));
+        for (int t = 4; t < Q4_K_SUPERBLOCK_BYTES; t++)
+            p[t] = (uint8_t)(rng_next() & 0xFF);
+    }
+}
+
+/* Quantize the k*n fp32 matrix B_f32 into per-column Q8_0 block chains
+ * (block b of column j at out[(j*nb8 + b) * 34]). */
+static void quantize_cols_q8_0(const float *B_f32, uint8_t *out,
+                               uint32_t k, uint32_t n)
+{
+    uint32_t nb8 = k / QK8_0;
+    float *col = malloc((size_t)k * 4);
+    for (uint32_t j = 0; j < n; j++) {
+        for (uint32_t r = 0; r < k; r++)
+            col[r] = B_f32[(size_t)r * n + j];
+        quantize_row_q8_0(col, (block_q8_0 *)(out + (size_t)j * nb8 *
+                                                Q8_0_BLOCK_BYTES), (int)k);
+    }
+    free(col);
+}
+
+static int test_matmul_q4_k_q8_0(struct vk_ctx *c, VkPipeline pipeline,
+                                 uint32_t m, uint32_t k, uint32_t n)
+{
+    uint32_t nb = k / QK_K, nb8 = k / QK8_0;
+    size_t a_bytes = (size_t)m * nb * Q4_K_SUPERBLOCK_BYTES;
+    size_t b_bytes = (size_t)n * nb8 * Q8_0_BLOCK_BYTES;
+    uint8_t *A = malloc(a_bytes);
+    float *B_f32 = malloc((size_t)k * n * 4);
+    uint8_t *B = malloc(b_bytes);
+    float *C_gpu = malloc((size_t)m * n * 4);
+    float *C_ref = malloc((size_t)m * n * 4);
+    float *C_fill = malloc((size_t)m * n * 4);
+
+    fill_q4_k_blocks(A, (size_t)m * nb);
+    for (uint32_t i = 0; i < k * n; i++)
+        B_f32[i] = rng_float() * 2.0f;
+    quantize_cols_q8_0(B_f32, B, k, n);
+    for (uint32_t i = 0; i < m * n; i++)
+        C_fill[i] = -999.0f;
+
+    matmul_q4_k_q8_0_ref(A, B, C_ref, m, k, n);
+    vk_run_matmul(c, pipeline, A, a_bytes, B, b_bytes, C_fill, C_gpu,
+                  m, k, n);
+
+    double max_abs = 0.0, max_rel = 0.0;
+    for (uint32_t i = 0; i < m * n; i++) {
+        double err = fabs((double)C_gpu[i] - (double)C_ref[i]);
+        double denom = fabs((double)C_ref[i]) > 1e-6 ? fabs((double)C_ref[i]) : 1.0;
+        if (err > max_abs)
+            max_abs = err;
+        if (err / denom > max_rel)
+            max_rel = err / denom;
+    }
+
+    /* integer-exact accumulation + identical float op order => 0 error */
+    int pass = max_abs == 0.0;
+    printf("matmul_q4_k_q8_0 %3ux%-3ux%-3u : max_abs_err=%.3g max_rel_err=%.3g -> %s\n",
+           m, k, n, max_abs, max_rel, pass ? "PASS" : "FAIL");
+
+    free(A); free(B_f32); free(B); free(C_gpu); free(C_ref); free(C_fill);
+    return pass;
+}
+
+/* Fill a Q6_K weight matrix with deterministic pseudo-random superblocks:
+ * ql/qh/scales raw PRNG bytes, d fp16 of a small float (periodic zero and
+ * fp16-denormal scales, as in fill_q4_k_blocks). */
+static void fill_q6_k_blocks(uint8_t *A, size_t nblocks)
+{
+    for (size_t b = 0; b < nblocks; b++) {
+        uint8_t *p = A + b * Q6_K_SUPERBLOCK_BYTES;
+        float dv;
+        if (b % 7 == 3) {
+            dv = 0.0f;
+        } else if (b % 11 == 5) {
+            dv = 1e-6f; /* fp16 denormal */
+        } else {
+            dv = 0.001f + fabsf(rng_float()) * 0.5f;
+        }
+        for (int t = 0; t < 208; t++)
+            p[t] = (uint8_t)(rng_next() & 0xFF);
+        wr_u16le(p + 208, fp32_to_fp16(dv));
+    }
+}
+
+static int test_matmul_q6_k_q8_0(struct vk_ctx *c, VkPipeline pipeline,
+                                 uint32_t m, uint32_t k, uint32_t n)
+{
+    uint32_t nb = k / QK_K, nb8 = k / QK8_0;
+    size_t a_bytes = (size_t)m * nb * Q6_K_SUPERBLOCK_BYTES;
+    size_t b_bytes = (size_t)n * nb8 * Q8_0_BLOCK_BYTES;
+    uint8_t *A = malloc(a_bytes);
+    float *B_f32 = malloc((size_t)k * n * 4);
+    uint8_t *B = malloc(b_bytes);
+    float *C_gpu = malloc((size_t)m * n * 4);
+    float *C_ref = malloc((size_t)m * n * 4);
+    float *C_fill = malloc((size_t)m * n * 4);
+
+    fill_q6_k_blocks(A, (size_t)m * nb);
+    for (uint32_t i = 0; i < k * n; i++)
+        B_f32[i] = rng_float() * 2.0f;
+    quantize_cols_q8_0(B_f32, B, k, n);
+    for (uint32_t i = 0; i < m * n; i++)
+        C_fill[i] = -999.0f;
+
+    matmul_q6_k_q8_0_ref(A, B, C_ref, m, k, n);
+    vk_run_matmul(c, pipeline, A, a_bytes, B, b_bytes, C_fill, C_gpu,
+                  m, k, n);
+
+    double max_abs = 0.0, max_rel = 0.0;
+    for (uint32_t i = 0; i < m * n; i++) {
+        double err = fabs((double)C_gpu[i] - (double)C_ref[i]);
+        double denom = fabs((double)C_ref[i]) > 1e-6 ? fabs((double)C_ref[i]) : 1.0;
+        if (err > max_abs)
+            max_abs = err;
+        if (err / denom > max_rel)
+            max_rel = err / denom;
+    }
+
+    int pass = max_abs == 0.0;
+    printf("matmul_q6_k_q8_0 %3ux%-3ux%-3u : max_abs_err=%.3g max_rel_err=%.3g -> %s\n",
+           m, k, n, max_abs, max_rel, pass ? "PASS" : "FAIL");
+
+    free(A); free(B_f32); free(B); free(C_gpu); free(C_ref); free(C_fill);
+    return pass;
+}
+
 int main(void)
 {
     g_rng_state = 0x5EED1234567890ABULL;
@@ -1001,6 +1309,14 @@ int main(void)
                                             vk_spv_matmul_q8_0_word_count);
     printf("pipeline matmul_q8_0: created OK (%u words)\n",
            vk_spv_matmul_q8_0_word_count);
+    VkPipeline pipe_q4k = vk_create_pipeline(&c, vk_spv_matmul_q4_k_q8_0,
+                                             vk_spv_matmul_q4_k_q8_0_word_count);
+    printf("pipeline matmul_q4_k_q8_0: created OK (%u words)\n",
+           vk_spv_matmul_q4_k_q8_0_word_count);
+    VkPipeline pipe_q6k = vk_create_pipeline(&c, vk_spv_matmul_q6_k_q8_0,
+                                             vk_spv_matmul_q6_k_q8_0_word_count);
+    printf("pipeline matmul_q6_k_q8_0: created OK (%u words)\n",
+           vk_spv_matmul_q6_k_q8_0_word_count);
 
     int pass = 1;
     /* odd sizes on purpose: exercises the m*n vs workgroup bounds check */
@@ -1012,6 +1328,16 @@ int main(void)
     pass &= test_matmul_q8_0(&c, pipe_q8, 64, 256, 64);
     pass &= test_matmul_q8_0(&c, pipe_q8, 1, 32, 1);
     pass &= test_matmul_q8_0(&c, pipe_q8, 100, 96, 100);
+    /* k must be a multiple of 256 (Q4_K superblock); m*n mixes odd sizes */
+    pass &= test_matmul_q4_k_q8_0(&c, pipe_q4k, 3, 256, 5);
+    pass &= test_matmul_q4_k_q8_0(&c, pipe_q4k, 1, 256, 1);
+    pass &= test_matmul_q4_k_q8_0(&c, pipe_q4k, 16, 512, 9);
+    pass &= test_matmul_q4_k_q8_0(&c, pipe_q4k, 33, 768, 7);
+    /* Q6_K: k % 256 == 0 as well */
+    pass &= test_matmul_q6_k_q8_0(&c, pipe_q6k, 5, 256, 3);
+    pass &= test_matmul_q6_k_q8_0(&c, pipe_q6k, 1, 256, 1);
+    pass &= test_matmul_q6_k_q8_0(&c, pipe_q6k, 9, 512, 16);
+    pass &= test_matmul_q6_k_q8_0(&c, pipe_q6k, 17, 1280, 6);
 
     printf("%s\n", pass ? "ALL TESTS PASSED" : "TESTS FAILED");
     return pass ? 0 : 1;

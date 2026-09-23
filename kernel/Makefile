@@ -267,6 +267,13 @@ KERNEL_C_SOURCES = \
     lib/math.c \
     lib/compat_stubs.c
 
+# GPU-DRVR block (WS-C, Volta v0.6.0, branch volta-vktransport):
+# virtio-gpu control-plane driver + Venus protocol layer.
+# Own-workstream objects only; appended here to keep the main list intact.
+KERNEL_C_SOURCES += \
+    drivers/gpu/virtio_gpu.c \
+    drivers/gpu/venus.c
+
 # Add gcov runtime stubs when coverage is enabled
 ifeq ($(COVERAGE),1)
     KERNEL_C_SOURCES += lib/gcov_stubs.c
@@ -318,6 +325,8 @@ ifeq ($(ARCH),x86_64)
         $(ARCH_DIR)/hal_timer.c \
         $(ARCH_DIR)/lapic_timer.c \
         $(ARCH_DIR)/smp.c
+    # WS-A (volta-ipi): per-CPU LAPIC timers + IPI wakeups
+    ARCH_C_SOURCES += $(ARCH_DIR)/ipi.c
 endif
 
 ifeq ($(ARCH),aarch64)
@@ -633,3 +642,38 @@ test-ethercat: test/test_ethercat.c
 	@rm -f test/test_ethercat
 
 .PHONY: all clean iso iso-prod iso-full iso-quick test coverage sign sign-check test-modbus test-pmm test-slab test-ethercat
+
+# ----------------------------------------------------------------------------
+# UEFI direct boot section (WS-E, v0.6.0 "Volta") — BOOTX64.EFI + esp.img
+#
+# Builds a GRUB-free UEFI boot path: the loader is compiled freestanding
+# (ms_abi UEFI calls, no PIC, large code model so every absolute reference
+# is R_X86_64_64), linked flat at ImageBase 0x400000 with relocations
+# preserved, converted to PE32+ by ../tools/mkuefi.py (the sandbox objcopy
+# has no efi-app-x86_64 target), and packed into a FAT16 ESP image by
+# ../tools/mkesp.py (no mtools/mkfs.vfat in the sandbox).
+# ----------------------------------------------------------------------------
+ifeq ($(ARCH),x86_64)
+UEFI_LOADER = $(ARCH_DIR)/uefi_loader
+UEFI_CFLAGS = -ffreestanding -nostdlib -fno-builtin -fno-stack-protector \
+    -fshort-wchar -mno-red-zone -maccumulate-outgoing-args -fno-pic \
+    -mcmodel=large -O2 -Wall -Wextra
+
+$(UEFI_LOADER).o: $(UEFI_LOADER).c
+	$(CC) $(UEFI_CFLAGS) -c $< -o $@
+
+$(UEFI_LOADER).elf: $(UEFI_LOADER).o $(ARCH_DIR)/uefi_loader.ld
+	$(LD) -m elf_x86_64 -nostdlib --emit-relocs -T $(ARCH_DIR)/uefi_loader.ld -o $@ $(UEFI_LOADER).o
+
+BOOTX64.EFI: $(UEFI_LOADER).elf ../tools/mkuefi.py
+	python3 ../tools/mkuefi.py $< $@
+
+# FAT ESP image: EFI/BOOT/BOOTX64.EFI (firmware fallback path) + embodios.elf
+esp.img: BOOTX64.EFI embodios.elf ../tools/mkesp.py
+	python3 ../tools/mkesp.py $@ BOOTX64.EFI:EFI/BOOT/BOOTX64.EFI embodios.elf:embodios.elf
+
+uefi: esp.img
+	@ls -lh esp.img BOOTX64.EFI
+
+.PHONY: uefi
+endif

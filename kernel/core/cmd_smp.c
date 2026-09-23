@@ -29,22 +29,32 @@ static void cmd_cpus(void)
     uint32_t detected = smp_num_cpus();
 
     console_printf("\nCPUs: %u detected, %u online\n", detected, online);
-    console_printf("%-4s %-8s %-6s %-8s %-10s %-12s\n",
-                   "CPU", "APIC ID", "Role", "State", "WorkItems", "Polls/WorkCyc");
-    console_printf("--------------------------------------------------------------\n");
+    console_printf("%-4s %-8s %-6s %-14s %-10s %-8s %-8s %s\n",
+                   "CPU", "APIC ID", "Role", "State", "WorkItems",
+                   "IPI-Wake", "AP-Ticks", "Polls");
+    console_printf("--------------------------------------------------------------------------\n");
 
     for (uint32_t i = 0; i < online; i++) {
         struct smp_cpu_info info;
         if (smp_get_cpu_info(i, &info) != 0) {
             continue;
         }
-        console_printf("%-4u %-8u %-6s %-8s %-10llu %llu\n",
+        const char *state;
+        if (!info.online) {
+            state = "offline";
+        } else if (info.bsp) {
+            state = "online";
+        } else {
+            state = info.parked_if1 ? "parked IF=1" : "polling IF=0";
+        }
+        console_printf("%-4u %-8u %-6s %-14s %-10llu %-8llu %-8llu %llu\n",
                        info.cpu_id, info.apic_id,
                        info.bsp ? "BSP" : "AP",
-                       info.online ? (info.bsp ? "online" : "online/idle") : "offline",
+                       state,
                        (unsigned long long)info.work_count,
-                       (unsigned long long)(info.bsp ? info.work_cycles
-                                                    : info.polls));
+                       (unsigned long long)info.ipi_wakeups,
+                       (unsigned long long)info.ap_ticks,
+                       (unsigned long long)info.polls);
     }
     console_printf("\n");
 }

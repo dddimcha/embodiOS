@@ -9,6 +9,13 @@
 #include "../../include/embodios/console.h"
 #include "../../include/embodios/interrupt.h"
 #include "../../include/embodios/lapic_timer.h"
+#include "../../include/embodios/ipi.h"
+
+/* LAPIC vector stubs (interrupt.S, WS-A): IPI wakeup, AP local tick,
+ * spurious vector. Installed explicitly in idt_init below. */
+extern void isr240(void);
+extern void isr241(void);
+extern void isr255(void);
 
 /* IDT entry structure */
 struct idt_entry {
@@ -79,6 +86,12 @@ void idt_init(void)
             }
         }
     }
+
+    /* LAPIC vectors (WS-A): IPI wakeup + AP local tick + spurious.
+     * Present on UP boots too (harmless: never delivered there). */
+    idt_set_gate(IPI_WAKEUP_VECTOR, (uint64_t)isr240, 0x08, 0x8E);
+    idt_set_gate(LAPIC_AP_TICK_VECTOR, (uint64_t)isr241, 0x08, 0x8E);
+    idt_set_gate(0xFF, (uint64_t)isr255, 0x08, 0x8E);
 
     /* Load IDT */
     __asm__ volatile("lidt %0" : : "m"(idtp));
@@ -166,6 +179,22 @@ void interrupt_handler(struct interrupt_frame* frame)
                      (unsigned long long)vector,
                      exception_names[vector & 31],
                      (void*)frame->rip);
+    }
+
+    /* LAPIC vectors (WS-A). Spurious first: it requires no EOI at all.
+     * The wakeup vector and AP local tick EOI the LAPIC inside their
+     * handlers and never touch the PIC or the BSP scheduler chain. */
+    if (vector == 0xFF) {
+        ipi_spurious_handler();
+        return;
+    }
+    if (vector == IPI_WAKEUP_VECTOR) {
+        ipi_wakeup_handler();
+        return;
+    }
+    if (vector == LAPIC_AP_TICK_VECTOR) {
+        lapic_timer_ap_tick();
+        return;
     }
 
     if (vector >= 32 && vector < 48) {
