@@ -147,3 +147,6 @@ memory_analysis.txt
 /benchmark_metrics.py
 /e2e_*.py
 tools/host_test_vulkan
+kernel/BOOTX64.EFI
+kernel/arch/x86_64/uefi_loader.elf
+kernel/arch/x86_64/uefi_loader.o

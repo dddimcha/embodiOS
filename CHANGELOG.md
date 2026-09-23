@@ -5,6 +5,90 @@ All notable changes to EMBODIOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-23 — codename Volta
+
+Distributed inference over a real TCP network, SMP maturity (per-CPU LAPIC
+timers + IPI wakeup), full k-quants GPU shader coverage, virtio-gpu/Venus
+transport, 1.5B-class models verified on bare metal, and direct UEFI boot
+without GRUB.
+
+### Added
+- **Per-CPU LAPIC timers + IPI wakeup (SMP)** (`arch/x86_64/ipi.c`,
+  `smp.c`): every AP gets its own HPET-calibrated LAPIC timer LVT (vector
+  0xF1); BSP wakes parked APs with a dedicated IPI (vector 0xF0). APs now
+  park in `sti; hlt` with **IF=1** instead of spinning on a mailbox with
+  interrupts disabled — the `cpus` command shows `parked IF=1` with
+  per-CPU `WorkItems / IPI-Wake / AP-Ticks / Polls` counters (Polls stays
+  0). Includes the `smp_trampoline.S` stack-segment fix. Gates: `-smp 4`
+  → 4/4 CPUs online with `smpwork` scaling across all cores; `-smp 1` UP
+  mode and `-append poll` legacy mode unaffected.
+- **Q4_K/Q6_K SPIR-V matmul shaders** (`tools/spirv_gen.py`,
+  `ai/vk_shaders.h`): hand-assembled `matmul_q4_k_q8_0` (1599 words) and
+  `matmul_q6_k_q8_0` (1759 words) with in-shader dequant, both verified
+  **bit-exact** against the CPU reference under lavapipe. Dispatch wired
+  into `vk_device.c` (returns `VK_DEV_NO_DRIVER` until a GPU transport
+  is present). The GPU backend now covers f32, Q8_0, Q4_K and Q6_K —
+  the full quantization set used by the verified models.
+- **virtio-gpu transport + Venus capset layer**
+  (`drivers/gpu/virtio_gpu.c`): modern virtio-gpu probe via vendor
+  capability MMIO (legacy transitional device 0x1010 fallback), control
+  and cursor virtqueues, `GET_DISPLAY_INFO`, capset enumeration; the
+  Venus (capset id 4) layer is spec-complete. New `gpuinfo` shell
+  command. This is the transport the Vulkan device layer will use on
+  virtio-gpu/Venus-capable hypervisors.
+- **Qwen2.5-1.5B + GLM-Edge-1.5B verified on bare metal**: Qwen2.5-1.5B
+  Instruct Q4_K_M (1.12 GB GGUF, `qwen2` arch with attention Q/K/V bias)
+  loads in 153.9 s and answers "What is the capital of France?" with
+  "Paris"; GLM-Edge-1.5B Chat runs with **zero code changes** (glm arch
+  already in-tree). Full verification report: `docs/models.md`.
+- **4 GiB boot identity map** (`boot.S`, `BOOT_IDENTITY_GB = 4`): with a
+  >1 GiB model embedded in `.rodata`, `.bss` (boot page tables, kernel
+  stacks) lands above the 1 GiB mark; the first stack access after the
+  far jump triple-faulted. One PDT of 2 MiB pages per GiB; runtime
+  `identity_map_2mb_range()` extension above 4 GiB unaffected.
+- **Direct UEFI boot without GRUB** (`arch/x86_64/uefi_loader.c`,
+  `tools/mkuefi.py`, `tools/mkesp.py`): `mkuefi.py` emits a PE32+
+  `BOOTX64.EFI`; the `ms_abi` loader locates `embodios.elf` via the UEFI
+  Simple File System protocol, `AllocatePages` for the kernel image,
+  parses ELF64 program headers, synthesizes a multiboot2 info structure
+  at 0x9000 (cmdline type-1 + memory-map type-6 tags), calls
+  `ExitBootServices`, drops 64→32 bit and jumps to `_start`.
+  `make uefi` produces `kernel/esp.img` (FAT16 ESP); OVMF pflash gate
+  `scripts/test_uefi.sh` is 7/7 PASS and the UEFI chat smoke answers
+  "Paris" (1.38 tok/s). Docs: `docs/uefi-boot.md`.
+- **exo distributed inference over a real TCP network** — two-instance
+  ring demo: `exochat [max_tokens] <prompt>` shell command triggers
+  ring generation from the serial console; `tcpsockets` dumps the TCP
+  socket table for debugging; `exoshard <model> <layers> even` gives a
+  deterministic layer split (15/15 for SmolLM-135M across two nodes).
+  Ring numerics match local inference exactly (same prompt → same
+  output on both paths).
+- **Persistent exo tensor connections** (`exo/exo_transport.c`
+  rewrite): outbound connection cache (4 slots, validated against the
+  TCP socket table, stale entries dropped), inbound frame accumulator
+  (6 connections × 48+16384 byte buffer) with header/payload reassembly,
+  listener auto-heal on accept failure, and `tcp_write_all` retry on
+  `NET_ERR_UNREACHABLE` **and** `VIRTIO_ERR_TIMEOUT` (sequence numbers
+  are not bumped on failure; the receiver's in-order guard dedups).
+
+### Fixed
+- **TCP hardening — five bugs found by the two-node ring demo**
+  (`net/tcpip.c`, `drivers/net/virtio_net.c`):
+  1. **No SYN retransmission**: the first SYN was dropped on an ARP miss
+     and never retried → SYN_SENT now retries every 500 ms (max 8) from
+     `tcpip_check_timeouts()` with a console warning on exhaustion.
+  2. **TIME_WAIT never expired** for `timeout_ms = 0` sockets → socket
+     table exhaustion at ring position 12 → 1 s TIME_WAIT expiry with
+     full socket cleanup.
+  3. **virtio_net TX completion timeout too short**: 100 ms → 2000 ms —
+     under TCG the host can stall a vCPU for longer than 100 ms, which
+     surfaced as `VIRTIO_ERR_TIMEOUT` (-4) on RESULT sends.
+  4. **Connect-per-token churn**: one TCP connection per ring hop caused
+     timing races ("bad message header (magic)") at hop boundaries →
+     persistent connections (see above).
+  5. **`SOCKET_BUFFER_SIZE` too small**: 4096 → 16384 — a 2048-dim f32
+     hidden vector is 8 KiB + 48-byte exo header.
+
 ## [0.5.0] - 2026-09-20 — codename Tesla
 
 Product-level hardening: real-time tick, closed-loop control demo, GPU compute

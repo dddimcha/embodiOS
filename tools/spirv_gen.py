@@ -11,6 +11,14 @@ Shaders generated:
                     34-byte block, row-major over m x k), B and C fp32.
                     Dequantization (incl. fp16->fp32 bit conversion) happens
                     in-shader. k must be a multiple of 32.
+  (c) matmul_q4_k_q8_0 : A is ggml Q4_K superblocks (144 B per 256 values:
+                    d/dmin fp16 + 12 B packed 6-bit scales/mins + 128 B
+                    nibbles), B is ggml Q8_0 blocks (activations quantized on
+                    the fly, block chain per B column), C fp32. k must be a
+                    multiple of 256.
+  (d) matmul_q6_k_q8_0 : A is ggml Q6_K superblocks (210 B per 256 values:
+                    ql[128] + qh[64] + scales[16] int8 + d fp16), B and C as
+                    in (c). k must be a multiple of 256.
 
 Output: kernel/ai/vk_shaders.h with `static const uint32_t` arrays so both the
 host validation binary (tools/host_test_vulkan.c) and the kernel-side driver
@@ -62,6 +70,7 @@ OP_F_NEGATE = 127
 OP_I_ADD = 128
 OP_F_ADD = 129
 OP_I_SUB = 130
+OP_F_SUB = 131
 OP_I_MUL = 132
 OP_F_MUL = 133
 OP_U_DIV = 134
@@ -369,7 +378,7 @@ class FunctionBuilder:
 # Shared prologue: module scaffolding + buffers + push constants + entry block
 # ----------------------------------------------------------------------------
 class ShaderCtx:
-    def __init__(self, a_is_u32_words):
+    def __init__(self, a_is_u32_words, b_is_u32_words=False):
         m = Module()
         self.m = m
         m.add_capability(CAP_SHADER)
@@ -404,7 +413,16 @@ class ShaderCtx:
         m.decorate(self.var_a, DEC_BINDING, 0)
         m.decorate(self.var_a, DEC_NON_WRITABLE)
 
-        self.var_b = m.global_variable(t_ptr_buf_f32, SC_STORAGE_BUFFER, "bufB")
+        # B element type: f32 for fp32 activations; u32 word view when B is
+        # Q8_0 blocks (34-byte blocks need manual byte extraction, same as A).
+        if b_is_u32_words:
+            t_rta_b = m.type_runtime_array(self.t_u32, 4)
+            t_buf_b = m.type_struct([t_rta_b], [0], block=True)
+            t_ptr_buf_b = m.type_pointer(SC_STORAGE_BUFFER, t_buf_b)
+        else:
+            t_ptr_buf_b = t_ptr_buf_f32
+
+        self.var_b = m.global_variable(t_ptr_buf_b, SC_STORAGE_BUFFER, "bufB")
         m.decorate(self.var_b, DEC_DESCRIPTOR_SET, 0)
         m.decorate(self.var_b, DEC_BINDING, 1)
         m.decorate(self.var_b, DEC_NON_WRITABLE)
@@ -613,16 +631,18 @@ def _fp16_to_fp32(ctx, fb, h):
     return fb.result(f32, OP_SELECT, has_sign, neg, mag)
 
 
-def _load_u16_le(ctx, fb, byte_off):
-    """Load a little-endian u16 at an arbitrary byte offset of SSBO A."""
+def _load_u16_le(ctx, fb, byte_off, buf=None):
+    """Load a little-endian u16 at an arbitrary byte offset of an SSBO
+    (default: A). The buffer must be declared with a u32-word view."""
     m = ctx.m
     u32 = ctx.t_u32
+    buf = ctx.var_a if buf is None else buf
     c2 = m.const_u32(2)
     c3 = m.const_u32(3)
     c4 = m.const_u32(4)
     cmask = m.const_u32(0xFFFF)
     woff = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, byte_off, c2)
-    pw = fb.result(ctx.t_ptr_ssbo_u32, OP_ACCESS_CHAIN, ctx.var_a, ctx.c0, woff)
+    pw = fb.result(ctx.t_ptr_ssbo_u32, OP_ACCESS_CHAIN, buf, ctx.c0, woff)
     w = fb.result(u32, OP_LOAD, pw)
     bsel = fb.result(u32, OP_BITWISE_AND, byte_off, c2)
     sh = fb.result(u32, OP_SHIFT_LEFT_LOGICAL, bsel, c3)
@@ -630,16 +650,35 @@ def _load_u16_le(ctx, fb, byte_off):
     return fb.result(u32, OP_BITWISE_AND, shifted, cmask)
 
 
-def _load_i8(ctx, fb, byte_off):
-    """Load a signed i8 at an arbitrary byte offset of SSBO A. Returns i32."""
+def _load_u8(ctx, fb, byte_off, buf=None):
+    """Load an unsigned u8 at an arbitrary byte offset of an SSBO (u32 view)."""
+    m = ctx.m
+    u32 = ctx.t_u32
+    buf = ctx.var_a if buf is None else buf
+    c2 = m.const_u32(2)
+    c3 = m.const_u32(3)
+    cmask = m.const_u32(0xFF)
+    woff = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, byte_off, c2)
+    pw = fb.result(ctx.t_ptr_ssbo_u32, OP_ACCESS_CHAIN, buf, ctx.c0, woff)
+    w = fb.result(u32, OP_LOAD, pw)
+    bsel = fb.result(u32, OP_BITWISE_AND, byte_off, c3)
+    sh = fb.result(u32, OP_SHIFT_LEFT_LOGICAL, bsel, c3)
+    shifted = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, w, sh)
+    return fb.result(u32, OP_BITWISE_AND, shifted, cmask)
+
+
+def _load_i8(ctx, fb, byte_off, buf=None):
+    """Load a signed i8 at an arbitrary byte offset of an SSBO (u32 view).
+    Returns i32."""
     m = ctx.m
     u32, i32 = ctx.t_u32, ctx.t_i32
+    buf = ctx.var_a if buf is None else buf
     c2 = m.const_u32(2)
     c3 = m.const_u32(3)
     cmask = m.const_u32(0xFF)
     c24 = m.const_i32(24)
     woff = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, byte_off, c2)
-    pw = fb.result(ctx.t_ptr_ssbo_u32, OP_ACCESS_CHAIN, ctx.var_a, ctx.c0, woff)
+    pw = fb.result(ctx.t_ptr_ssbo_u32, OP_ACCESS_CHAIN, buf, ctx.c0, woff)
     w = fb.result(u32, OP_LOAD, pw)
     bsel = fb.result(u32, OP_BITWISE_AND, byte_off, c3)
     sh = fb.result(u32, OP_SHIFT_LEFT_LOGICAL, bsel, c3)
@@ -765,6 +804,512 @@ def build_matmul_q8_0():
 
 
 # ----------------------------------------------------------------------------
+# (c) matmul_q4_k_q8_0: A = ggml Q4_K superblocks (144 B per 256 values),
+#     B = ggml Q8_0 blocks (34 B per 32 values, one block chain per column j,
+#     block b of column j at byte offset (j*(k/32) + b) * 34), C fp32.
+#
+# Mirrors the accumulation structure of vec_dot_q4_k_q8_1_scalar() in
+# kernel/ai/simd_kernels_scalar.c with Q8_0 activations instead of Q8_1:
+#   per superblock: per 32-element group j8:
+#     isum  = sum_l q_l * yq_l          (exact int32; q_l = unsigned nibble)
+#     iysum = sum_l yq_l                (exact int32)
+#     sumi  += (float)sc * yd * (float)isum        (same op order as scalar)
+#     summs += yd * (float)(mn * iysum)  (Q8_0 has no fp16 sum; the mins term
+#                                         uses yd * sum(yq) — documented in
+#                                         docs/gpu-backend.md)
+#   acc += xd * sumi - xdmin * summs
+# All integer sums are exact, all float ops run in the same order as the CPU
+# reference, so lavapipe (IEEE fp32) is bit-exact against the host reference.
+# ----------------------------------------------------------------------------
+
+QK_K = 256
+Q4_K_SUPERBLOCK_BYTES = 144
+
+
+def build_matmul_q4_k_q8_0():
+    ctx = ShaderCtx(a_is_u32_words=True, b_is_u32_words=True)
+    m = ctx.m
+    t_ptr_fn_i32 = m.type_pointer(SC_FUNCTION, ctx.t_i32)
+    fb, lb, ids = ctx.begin_main(local_ptr_types=[ctx.t_ptr_fn_f32,
+                                                  ctx.t_ptr_fn_u32,
+                                                  ctx.t_ptr_fn_f32,
+                                                  ctx.t_ptr_fn_f32,
+                                                  ctx.t_ptr_fn_u32,
+                                                  t_ptr_fn_i32,
+                                                  t_ptr_fn_i32,
+                                                  ctx.t_ptr_fn_u32])
+    acc, sb, sumi, summs, j8, isum, iysum, ll = ids["locals"]
+    u32, i32, f32, boolt = ctx.t_u32, ctx.t_i32, ctx.t_f32, ctx.t_bool
+    idx, k, n = ids["idx"], ids["k"], ids["n"]
+
+    c1, c2 = ctx.c1, ctx.c2
+    c4 = m.const_u32(4)
+    c5 = m.const_u32(5)
+    c6 = m.const_u32(6)
+    c8 = m.const_u32(8)
+    c16 = m.const_u32(16)
+    c32 = m.const_u32(32)
+    c34 = m.const_u32(Q8_0_BLOCK_BYTES)
+    c144 = m.const_u32(Q4_K_SUPERBLOCK_BYTES)
+    c0xF = m.const_u32(0xF)
+    c63 = m.const_u32(63)
+    ci0 = m.const_i32(0)
+
+    (sbh, sbc, sbbd, sbct, sbx,
+     jh, jc, jbd, jct, jx,
+     lh, lc, lbd, lct, lx) = (fb.new_label() for _ in range(15))
+
+    # work: i = idx/n; j = idx%n; nb = k>>8; row_base = i*nb*144
+    fb.begin_block(lb["work"])
+    i = fb.result(u32, OP_U_DIV, idx, n)
+    in_ = fb.result(u32, OP_I_MUL, i, n)
+    j = fb.result(u32, OP_I_SUB, idx, in_)
+    nb = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, k, c8)
+    inb = fb.result(u32, OP_I_MUL, i, nb)
+    row_base = fb.result(u32, OP_I_MUL, inb, c144)
+    nb8 = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, k, c5)
+    jnb8 = fb.result(u32, OP_I_MUL, j, nb8)
+    col_base = fb.result(u32, OP_I_MUL, jnb8, c34)
+    fb.emit(OP_STORE, acc, ctx.f0)
+    fb.emit(OP_STORE, sb, ctx.c0)
+    fb.emit(OP_BRANCH, sbh)
+
+    # superblock loop header / condition
+    fb.begin_block(sbh)
+    fb.emit(OP_LOOP_MERGE, sbx, sbct, NONE)
+    fb.emit(OP_BRANCH, sbc)
+
+    fb.begin_block(sbc)
+    sbv = fb.result(u32, OP_LOAD, sb)
+    sbcond = fb.result(boolt, OP_U_LESS_THAN, sbv, nb)
+    fb.emit(OP_BRANCH_CONDITIONAL, sbcond, sbbd, sbx)
+
+    # superblock body: base, xd, xdmin; enter group loop
+    fb.begin_block(sbbd)
+    sb144 = fb.result(u32, OP_I_MUL, sbv, c144)
+    sb_base = fb.result(u32, OP_I_ADD, row_base, sb144)
+    hd = _load_u16_le(ctx, fb, sb_base)
+    xd = _fp16_to_fp32(ctx, fb, hd)
+    sb_base2 = fb.result(u32, OP_I_ADD, sb_base, c2)
+    hdm = _load_u16_le(ctx, fb, sb_base2)
+    xdmin = _fp16_to_fp32(ctx, fb, hdm)
+    sc_base = fb.result(u32, OP_I_ADD, sb_base, c4)  # 12 packed scale bytes
+    fb.emit(OP_STORE, sumi, ctx.f0)
+    fb.emit(OP_STORE, summs, ctx.f0)
+    fb.emit(OP_STORE, j8, ctx.c0)
+    fb.emit(OP_BRANCH, jh)
+
+    # group loop header / condition (8 groups of 32)
+    fb.begin_block(jh)
+    fb.emit(OP_LOOP_MERGE, jx, jct, NONE)
+    fb.emit(OP_BRANCH, jc)
+
+    fb.begin_block(jc)
+    j8v = fb.result(u32, OP_LOAD, j8)
+    jcond = fb.result(boolt, OP_U_LESS_THAN, j8v, c8)
+    fb.emit(OP_BRANCH_CONDITIONAL, jcond, jbd, jx)
+
+    # group body: unpack 6-bit scale/min (get_scale_min_k4, branch-free),
+    # load y-block scale, enter element loop
+    fb.begin_block(jbd)
+    is_lo = fb.result(boolt, OP_U_LESS_THAN, j8v, c4)
+    qj_off = fb.result(u32, OP_I_ADD, sc_base, j8v)
+    qj = _load_u8(ctx, fb, qj_off)
+    j8p4 = fb.result(u32, OP_I_ADD, j8v, c4)
+    qj4_off = fb.result(u32, OP_I_ADD, sc_base, j8p4)
+    qj4 = _load_u8(ctx, fb, qj4_off)
+    j8m4 = fb.result(u32, OP_I_SUB, j8v, c4)  # wraps for j8<4; clamped below
+    j8m4c = fb.result(u32, OP_SELECT, is_lo, ctx.c0, j8m4)
+    qjm4_off = fb.result(u32, OP_I_ADD, sc_base, j8m4c)
+    qjm4 = _load_u8(ctx, fb, qjm4_off)
+    # j8 < 4:  d = q[j] & 63; m = q[j+4] & 63
+    d_lo = fb.result(u32, OP_BITWISE_AND, qj, c63)
+    m_lo = fb.result(u32, OP_BITWISE_AND, qj4, c63)
+    # j8 >= 4: d = (q[j+4] & 0xF) | ((q[j-4] >> 6) << 4)
+    #          m = (q[j+4] >> 4)   | ((q[j]   >> 6) << 4)
+    qj4_lo = fb.result(u32, OP_BITWISE_AND, qj4, c0xF)
+    qjm4_6 = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, qjm4, c6)
+    qjm4_6s = fb.result(u32, OP_SHIFT_LEFT_LOGICAL, qjm4_6, c4)
+    d_hi = fb.result(u32, OP_BITWISE_OR, qj4_lo, qjm4_6s)
+    qj4_hi = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, qj4, c4)
+    qj_6 = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, qj, c6)
+    qj_6s = fb.result(u32, OP_SHIFT_LEFT_LOGICAL, qj_6, c4)
+    m_hi = fb.result(u32, OP_BITWISE_OR, qj4_hi, qj_6s)
+    sc = fb.result(u32, OP_SELECT, is_lo, d_lo, d_hi)
+    mn = fb.result(u32, OP_SELECT, is_lo, m_lo, m_hi)
+    # y block byte offset: col_base + (sb*8 + j8) * 34
+    sb8 = fb.result(u32, OP_I_MUL, sbv, c8)
+    yidx = fb.result(u32, OP_I_ADD, sb8, j8v)
+    y34 = fb.result(u32, OP_I_MUL, yidx, c34)
+    yb = fb.result(u32, OP_I_ADD, col_base, y34)
+    hyd = _load_u16_le(ctx, fb, yb, ctx.var_b)
+    yd = _fp16_to_fp32(ctx, fb, hyd)
+    fb.emit(OP_STORE, isum, ci0)
+    fb.emit(OP_STORE, iysum, ci0)
+    fb.emit(OP_STORE, ll, ctx.c0)
+    fb.emit(OP_BRANCH, lh)
+
+    # element loop header / condition (32 per group)
+    fb.begin_block(lh)
+    fb.emit(OP_LOOP_MERGE, lx, lct, NONE)
+    fb.emit(OP_BRANCH, lc)
+
+    fb.begin_block(lc)
+    lv = fb.result(u32, OP_LOAD, ll)
+    lcond = fb.result(boolt, OP_U_LESS_THAN, lv, c32)
+    fb.emit(OP_BRANCH_CONDITIONAL, lcond, lbd, lx)
+
+    # element body: q = nibble; isum += q*yq; iysum += yq
+    fb.begin_block(lbd)
+    j8h = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, j8v, c1)
+    j8h32 = fb.result(u32, OP_I_MUL, j8h, c32)
+    qs_base = fb.result(u32, OP_I_ADD, sb_base, c16)
+    qs_off0 = fb.result(u32, OP_I_ADD, qs_base, j8h32)
+    qs_off = fb.result(u32, OP_I_ADD, qs_off0, lv)
+    qb = _load_u8(ctx, fb, qs_off)
+    q_hi_n = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, qb, c4)
+    q_lo_n = fb.result(u32, OP_BITWISE_AND, qb, c0xF)
+    j8l = fb.result(u32, OP_BITWISE_AND, j8v, c1)
+    is_hi = fb.result(boolt, OP_I_NOT_EQUAL, j8l, ctx.c0)
+    q_u = fb.result(u32, OP_SELECT, is_hi, q_hi_n, q_lo_n)
+    q_i = fb.result(i32, OP_BITCAST, q_u)
+    yb2 = fb.result(u32, OP_I_ADD, yb, c2)
+    yq_off = fb.result(u32, OP_I_ADD, yb2, lv)
+    yq = _load_i8(ctx, fb, yq_off, ctx.var_b)
+    prod = fb.result(i32, OP_I_MUL, q_i, yq)
+    isumv = fb.result(i32, OP_LOAD, isum)
+    isum2 = fb.result(i32, OP_I_ADD, isumv, prod)
+    fb.emit(OP_STORE, isum, isum2)
+    iysumv = fb.result(i32, OP_LOAD, iysum)
+    iysum2 = fb.result(i32, OP_I_ADD, iysumv, yq)
+    fb.emit(OP_STORE, iysum, iysum2)
+    fb.emit(OP_BRANCH, lct)
+
+    fb.begin_block(lct)
+    lv2 = fb.result(u32, OP_LOAD, ll)
+    lv3 = fb.result(u32, OP_I_ADD, lv2, c1)
+    fb.emit(OP_STORE, ll, lv3)
+    fb.emit(OP_BRANCH, lh)
+
+    # element loop exit: apply group scale and mins term
+    fb.begin_block(lx)
+    scf = fb.result(f32, OP_CONVERT_U_TO_F, sc)
+    t1 = fb.result(f32, OP_F_MUL, scf, yd)
+    isumf = fb.result(f32, OP_CONVERT_S_TO_F, fb.result(i32, OP_LOAD, isum))
+    t2 = fb.result(f32, OP_F_MUL, t1, isumf)
+    sumiv = fb.result(f32, OP_LOAD, sumi)
+    sumi2 = fb.result(f32, OP_F_ADD, sumiv, t2)
+    fb.emit(OP_STORE, sumi, sumi2)
+    mni = fb.result(i32, OP_BITCAST, mn)
+    iysumf_i = fb.result(i32, OP_LOAD, iysum)
+    mmsum = fb.result(i32, OP_I_MUL, mni, iysumf_i)
+    mmsumf = fb.result(f32, OP_CONVERT_S_TO_F, mmsum)
+    t3 = fb.result(f32, OP_F_MUL, yd, mmsumf)
+    summsv = fb.result(f32, OP_LOAD, summs)
+    summs2 = fb.result(f32, OP_F_ADD, summsv, t3)
+    fb.emit(OP_STORE, summs, summs2)
+    fb.emit(OP_BRANCH, jct)
+
+    fb.begin_block(jct)
+    j8v2 = fb.result(u32, OP_LOAD, j8)
+    j8v3 = fb.result(u32, OP_I_ADD, j8v2, c1)
+    fb.emit(OP_STORE, j8, j8v3)
+    fb.emit(OP_BRANCH, jh)
+
+    # group loop exit: acc = (acc + xd*sumi) - xdmin*summs
+    # NOTE: written as (acc + a) - b on purpose. lavapipe canonicalizes
+    # acc + (a - b) into (acc + a) - b (observed as data-dependent 1-2 ulp
+    # diffs during validation); emitting the canonical form directly keeps
+    # the shader bit-exact against the CPU reference.
+    fb.begin_block(jx)
+    sumif = fb.result(f32, OP_LOAD, sumi)
+    a_term = fb.result(f32, OP_F_MUL, xd, sumif)
+    accv = fb.result(f32, OP_LOAD, acc)
+    accp = fb.result(f32, OP_F_ADD, accv, a_term)
+    summsf = fb.result(f32, OP_LOAD, summs)
+    b_term = fb.result(f32, OP_F_MUL, xdmin, summsf)
+    acc2 = fb.result(f32, OP_F_SUB, accp, b_term)
+    fb.emit(OP_STORE, acc, acc2)
+    fb.emit(OP_BRANCH, sbct)
+
+    fb.begin_block(sbct)
+    sbv2 = fb.result(u32, OP_LOAD, sb)
+    sbv3 = fb.result(u32, OP_I_ADD, sbv2, c1)
+    fb.emit(OP_STORE, sb, sbv3)
+    fb.emit(OP_BRANCH, sbh)
+
+    # superblock loop exit: C[idx] = acc
+    fb.begin_block(sbx)
+    accf = fb.result(f32, OP_LOAD, acc)
+    pc = fb.result(ctx.t_ptr_ssbo_f32, OP_ACCESS_CHAIN, ctx.var_c, ctx.c0, idx)
+    fb.emit(OP_STORE, pc, accf)
+    fb.emit(OP_BRANCH, lb["ret"])
+
+    fb.begin_block(lb["ret"])
+    fb.emit(OP_RETURN)
+
+    ctx.finish(fb)
+    return m
+
+
+# ----------------------------------------------------------------------------
+# (d) matmul_q6_k_q8_0: A = ggml Q6_K superblocks (210 B per 256 values:
+#     ql[128] + qh[64] + scales[16] int8 + d fp16), B = ggml Q8_0 blocks
+#     (block chain per column, as in matmul_q4_k_q8_0), C fp32.
+#
+# Mirrors vec_dot_q6_k_q8_1_scalar() in kernel/ai/simd_kernels_scalar.c with
+# Q8_0 activations. Per superblock: per half h (2) and group g (4, 32 elems):
+#   q_l = (nibble of ql) | ((qh >> 2g & 3) << 4) - 32   (exact int)
+#   acc0 = sum_{l<16} q_l*yq_l,  acc1 = sum_{l>=16} q_l*yq_l   (exact int32)
+#   sumi += (float)sc[2g]   * yd * (float)acc0
+#   sumi += (float)sc[2g+1] * yd * (float)acc1
+#   acc += d * sumi
+# (Integer sums are order-independent; the scalar kernel's interleaved
+# 8-accumulator order and this split 16/16 order produce identical ints.)
+# ----------------------------------------------------------------------------
+
+Q6_K_SUPERBLOCK_BYTES = 210
+
+
+def build_matmul_q6_k_q8_0():
+    ctx = ShaderCtx(a_is_u32_words=True, b_is_u32_words=True)
+    m = ctx.m
+    t_ptr_fn_i32 = m.type_pointer(SC_FUNCTION, ctx.t_i32)
+    fb, lb, ids = ctx.begin_main(local_ptr_types=[ctx.t_ptr_fn_f32,
+                                                  ctx.t_ptr_fn_u32,
+                                                  ctx.t_ptr_fn_f32,
+                                                  ctx.t_ptr_fn_u32,
+                                                  ctx.t_ptr_fn_u32,
+                                                  t_ptr_fn_i32,
+                                                  t_ptr_fn_i32,
+                                                  ctx.t_ptr_fn_u32])
+    acc, sb, sumi, hh_v, gg_v, acc0, acc1, ll = ids["locals"]
+    u32, i32, f32, boolt = ctx.t_u32, ctx.t_i32, ctx.t_f32, ctx.t_bool
+    idx, k, n = ids["idx"], ids["k"], ids["n"]
+
+    c1, c2 = ctx.c1, ctx.c2
+    c4 = m.const_u32(4)
+    c5 = m.const_u32(5)
+    c8 = m.const_u32(8)
+    c16 = m.const_u32(16)
+    c32 = m.const_u32(32)
+    c64 = m.const_u32(64)
+    c128 = m.const_u32(128)
+    c192 = m.const_u32(192)
+    c208 = m.const_u32(208)
+    c210 = m.const_u32(Q6_K_SUPERBLOCK_BYTES)
+    c34 = m.const_u32(Q8_0_BLOCK_BYTES)
+    c0xF = m.const_u32(0xF)
+    c0x3 = m.const_u32(0x3)
+    ci0 = m.const_i32(0)
+    ci32 = m.const_i32(32)
+
+    (sbh, sbc, sbbd, sbct, sbx,
+     hh, hc, hbd, hct, hx,
+     gh, gc, gbd, gct, gx,
+     l0h, l0c, l0bd, l0ct, l0x,
+     l1h, l1c, l1bd, l1ct, l1x) = (fb.new_label() for _ in range(25))
+
+    # work: i = idx/n; j = idx%n; nb = k>>8; row/col byte bases
+    fb.begin_block(lb["work"])
+    i = fb.result(u32, OP_U_DIV, idx, n)
+    in_ = fb.result(u32, OP_I_MUL, i, n)
+    j = fb.result(u32, OP_I_SUB, idx, in_)
+    nb = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, k, c8)
+    inb = fb.result(u32, OP_I_MUL, i, nb)
+    row_base = fb.result(u32, OP_I_MUL, inb, c210)
+    nb8 = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, k, c5)
+    jnb8 = fb.result(u32, OP_I_MUL, j, nb8)
+    col_base = fb.result(u32, OP_I_MUL, jnb8, c34)
+    fb.emit(OP_STORE, acc, ctx.f0)
+    fb.emit(OP_STORE, sb, ctx.c0)
+    fb.emit(OP_BRANCH, sbh)
+
+    # superblock loop
+    fb.begin_block(sbh)
+    fb.emit(OP_LOOP_MERGE, sbx, sbct, NONE)
+    fb.emit(OP_BRANCH, sbc)
+
+    fb.begin_block(sbc)
+    sbv = fb.result(u32, OP_LOAD, sb)
+    sbcond = fb.result(boolt, OP_U_LESS_THAN, sbv, nb)
+    fb.emit(OP_BRANCH_CONDITIONAL, sbcond, sbbd, sbx)
+
+    fb.begin_block(sbbd)
+    sb210 = fb.result(u32, OP_I_MUL, sbv, c210)
+    sb_base = fb.result(u32, OP_I_ADD, row_base, sb210)
+    doff = fb.result(u32, OP_I_ADD, sb_base, c208)
+    hd = _load_u16_le(ctx, fb, doff)
+    d = _fp16_to_fp32(ctx, fb, hd)
+    fb.emit(OP_STORE, sumi, ctx.f0)
+    fb.emit(OP_STORE, hh_v, ctx.c0)
+    fb.emit(OP_BRANCH, hh)
+
+    # half loop (2 halves of 128 elements)
+    fb.begin_block(hh)
+    fb.emit(OP_LOOP_MERGE, hx, hct, NONE)
+    fb.emit(OP_BRANCH, hc)
+
+    fb.begin_block(hc)
+    hv = fb.result(u32, OP_LOAD, hh_v)
+    hcond = fb.result(boolt, OP_U_LESS_THAN, hv, c2)
+    fb.emit(OP_BRANCH_CONDITIONAL, hcond, hbd, hx)
+
+    fb.begin_block(hbd)
+    fb.emit(OP_STORE, gg_v, ctx.c0)
+    fb.emit(OP_BRANCH, gh)
+
+    # group loop (4 groups of 32 per half)
+    fb.begin_block(gh)
+    fb.emit(OP_LOOP_MERGE, gx, gct, NONE)
+    fb.emit(OP_BRANCH, gc)
+
+    fb.begin_block(gc)
+    gv = fb.result(u32, OP_LOAD, gg_v)
+    gcond = fb.result(boolt, OP_U_LESS_THAN, gv, c4)
+    fb.emit(OP_BRANCH_CONDITIONAL, gcond, gbd, gx)
+
+    # group body prologue: byte bases, y-block scale
+    fb.begin_block(gbd)
+    hv64 = fb.result(u32, OP_I_MUL, hv, c64)
+    ql_h = fb.result(u32, OP_I_ADD, sb_base, hv64)      # + 64*h
+    gv1 = fb.result(u32, OP_BITWISE_AND, gv, c1)
+    gv1_32 = fb.result(u32, OP_I_MUL, gv1, c32)
+    ql_base = fb.result(u32, OP_I_ADD, ql_h, gv1_32)    # + (g&1)*32
+    qh_h32 = fb.result(u32, OP_I_MUL, hv, c32)
+    qh_off = fb.result(u32, OP_I_ADD, c128, qh_h32)
+    qh_base = fb.result(u32, OP_I_ADD, sb_base, qh_off)  # + 128 + 32*h
+    qh_shift = fb.result(u32, OP_I_MUL, gv, c2)          # 2*g
+    is_hi = fb.result(boolt, OP_U_GREATER_THAN_EQUAL, gv, c2)
+    # y block byte offset: col_base + (sb*8 + h*4 + g) * 34
+    sb8 = fb.result(u32, OP_I_MUL, sbv, c8)
+    h4 = fb.result(u32, OP_I_MUL, hv, c4)
+    yidx0 = fb.result(u32, OP_I_ADD, sb8, h4)
+    yidx = fb.result(u32, OP_I_ADD, yidx0, gv)
+    y34 = fb.result(u32, OP_I_MUL, yidx, c34)
+    yb = fb.result(u32, OP_I_ADD, col_base, y34)
+    hyd = _load_u16_le(ctx, fb, yb, ctx.var_b)
+    yd = _fp16_to_fp32(ctx, fb, hyd)
+    fb.emit(OP_STORE, acc0, ci0)
+    fb.emit(OP_STORE, ll, ctx.c0)
+    fb.emit(OP_BRANCH, l0h)
+
+    def emit_elem_loop(lh, lc, lbd, lct, lx, acc_local, l_init, l_limit):
+        fb.begin_block(lh)
+        fb.emit(OP_LOOP_MERGE, lx, lct, NONE)
+        fb.emit(OP_BRANCH, lc)
+
+        fb.begin_block(lc)
+        lv = fb.result(u32, OP_LOAD, ll)
+        lcond = fb.result(boolt, OP_U_LESS_THAN, lv, l_limit)
+        fb.emit(OP_BRANCH_CONDITIONAL, lcond, lbd, lx)
+
+        fb.begin_block(lbd)
+        qloff = fb.result(u32, OP_I_ADD, ql_base, lv)
+        qlb = _load_u8(ctx, fb, qloff)
+        qhboff = fb.result(u32, OP_I_ADD, qh_base, lv)
+        qhb = _load_u8(ctx, fb, qhboff)
+        lo_hi = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, qlb, c4)
+        lo_lo = fb.result(u32, OP_BITWISE_AND, qlb, c0xF)
+        lo = fb.result(u32, OP_SELECT, is_hi, lo_hi, lo_lo)
+        hi_s = fb.result(u32, OP_SHIFT_RIGHT_LOGICAL, qhb, qh_shift)
+        hi = fb.result(u32, OP_BITWISE_AND, hi_s, c0x3)
+        hi4 = fb.result(u32, OP_SHIFT_LEFT_LOGICAL, hi, c4)
+        q6 = fb.result(u32, OP_BITWISE_OR, lo, hi4)
+        q6i = fb.result(i32, OP_BITCAST, q6)
+        q_i = fb.result(i32, OP_I_SUB, q6i, ci32)
+        yb2 = fb.result(u32, OP_I_ADD, yb, c2)
+        yq_off = fb.result(u32, OP_I_ADD, yb2, lv)
+        yq = _load_i8(ctx, fb, yq_off, ctx.var_b)
+        prod = fb.result(i32, OP_I_MUL, q_i, yq)
+        accv = fb.result(i32, OP_LOAD, acc_local)
+        accn = fb.result(i32, OP_I_ADD, accv, prod)
+        fb.emit(OP_STORE, acc_local, accn)
+        fb.emit(OP_BRANCH, lct)
+
+        fb.begin_block(lct)
+        lv2 = fb.result(u32, OP_LOAD, ll)
+        lv3 = fb.result(u32, OP_I_ADD, lv2, c1)
+        fb.emit(OP_STORE, ll, lv3)
+        fb.emit(OP_BRANCH, lh)
+
+    # l = 0..15 -> acc0 ; l = 16..31 -> acc1
+    emit_elem_loop(l0h, l0c, l0bd, l0ct, l0x, acc0, ctx.c0, c16)
+
+    fb.begin_block(l0x)
+    fb.emit(OP_STORE, acc1, ci0)
+    fb.emit(OP_STORE, ll, c16)
+    fb.emit(OP_BRANCH, l1h)
+
+    emit_elem_loop(l1h, l1c, l1bd, l1ct, l1x, acc1, c16, c32)
+
+    # group exit: sumi += sc[2g]*yd*acc0 ; sumi += sc[2g+1]*yd*acc1
+    fb.begin_block(l1x)
+    hv8 = fb.result(u32, OP_I_MUL, hv, c8)
+    scb0 = fb.result(u32, OP_I_ADD, c192, hv8)
+    scb = fb.result(u32, OP_I_ADD, sb_base, scb0)
+    gv2 = fb.result(u32, OP_I_MUL, gv, c2)
+    sc0_off = fb.result(u32, OP_I_ADD, scb, gv2)
+    sc0 = _load_i8(ctx, fb, sc0_off)
+    sc1_off = fb.result(u32, OP_I_ADD, sc0_off, c1)
+    sc1 = _load_i8(ctx, fb, sc1_off)
+    for sc_id, acc_id in ((sc0, acc0), (sc1, acc1)):
+        scf = fb.result(f32, OP_CONVERT_S_TO_F, sc_id)
+        t1 = fb.result(f32, OP_F_MUL, scf, yd)
+        accf = fb.result(f32, OP_CONVERT_S_TO_F,
+                         fb.result(i32, OP_LOAD, acc_id))
+        t2 = fb.result(f32, OP_F_MUL, t1, accf)
+        sumiv = fb.result(f32, OP_LOAD, sumi)
+        sumi2 = fb.result(f32, OP_F_ADD, sumiv, t2)
+        fb.emit(OP_STORE, sumi, sumi2)
+    fb.emit(OP_BRANCH, gct)
+
+    fb.begin_block(gct)
+    gv2b = fb.result(u32, OP_LOAD, gg_v)
+    gv3 = fb.result(u32, OP_I_ADD, gv2b, c1)
+    fb.emit(OP_STORE, gg_v, gv3)
+    fb.emit(OP_BRANCH, gh)
+
+    # group loop exit -> half continue
+    fb.begin_block(gx)
+    fb.emit(OP_BRANCH, hct)
+
+    fb.begin_block(hct)
+    hv2 = fb.result(u32, OP_LOAD, hh_v)
+    hv3 = fb.result(u32, OP_I_ADD, hv2, c1)
+    fb.emit(OP_STORE, hh_v, hv3)
+    fb.emit(OP_BRANCH, hh)
+
+    # half loop exit: acc += d * sumi
+    fb.begin_block(hx)
+    sumif = fb.result(f32, OP_LOAD, sumi)
+    dterm = fb.result(f32, OP_F_MUL, d, sumif)
+    accv2 = fb.result(f32, OP_LOAD, acc)
+    acc2 = fb.result(f32, OP_F_ADD, accv2, dterm)
+    fb.emit(OP_STORE, acc, acc2)
+    fb.emit(OP_BRANCH, sbct)
+
+    fb.begin_block(sbct)
+    sbv2 = fb.result(u32, OP_LOAD, sb)
+    sbv3 = fb.result(u32, OP_I_ADD, sbv2, c1)
+    fb.emit(OP_STORE, sb, sbv3)
+    fb.emit(OP_BRANCH, sbh)
+
+    # superblock loop exit: C[idx] = acc
+    fb.begin_block(sbx)
+    accf = fb.result(f32, OP_LOAD, acc)
+    pc = fb.result(ctx.t_ptr_ssbo_f32, OP_ACCESS_CHAIN, ctx.var_c, ctx.c0, idx)
+    fb.emit(OP_STORE, pc, accf)
+    fb.emit(OP_BRANCH, lb["ret"])
+
+    fb.begin_block(lb["ret"])
+    fb.emit(OP_RETURN)
+
+    ctx.finish(fb)
+    return m
+
+
+# ----------------------------------------------------------------------------
 # Output: kernel/ai/vk_shaders.h
 # ----------------------------------------------------------------------------
 HEADER_TEMPLATE = """/* Vulkan compute shaders for embodiOS — GENERATED FILE, do not edit.
@@ -779,6 +1324,12 @@ HEADER_TEMPLATE = """/* Vulkan compute shaders for embodiOS — GENERATED FILE, 
  *   vk_spv_matmul_q8_0  : same, but A is ggml Q8_0 blocks (34 B per 32
  *                         values: u16 fp16 scale + 32 x int8), dequantized
  *                         in-shader; k must be a multiple of 32.
+ *   vk_spv_matmul_q4_k_q8_0 : A is ggml Q4_K superblocks (144 B per 256
+ *                         values), B is ggml Q8_0 blocks (block chain per
+ *                         column); both dequantized in-shader. k % 256 == 0.
+ *   vk_spv_matmul_q6_k_q8_0 : A is ggml Q6_K superblocks (210 B per 256
+ *                         values: ql[128] qh[64] scales[16] d fp16), B as
+ *                         above. k % 256 == 0.
  *
  * Validated end-to-end on lavapipe by tools/host_test_vulkan.c.
  */
@@ -840,6 +1391,8 @@ def main():
     shaders = [
         ("vk_spv_matmul_f32", build_matmul_f32().assemble()),
         ("vk_spv_matmul_q8_0", build_matmul_q8_0().assemble()),
+        ("vk_spv_matmul_q4_k_q8_0", build_matmul_q4_k_q8_0().assemble()),
+        ("vk_spv_matmul_q6_k_q8_0", build_matmul_q6_k_q8_0().assemble()),
     ]
     arrays = []
     for name, words in shaders:

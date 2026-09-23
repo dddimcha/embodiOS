@@ -51,6 +51,32 @@ int      lapic_timer_legacy_due(void);
 /* Calibration source actually used: "HPET" or "PIT" (valid after init) */
 const char *lapic_timer_calib_source(void);
 
+/* --- WS-A: per-CPU LAPIC timers on APs (IPI-based parking) --- */
+
+/* Local-tick vector for AP LAPIC timers (distinct from the BSP's 0x20:
+ * an AP tick must never enter the BSP scheduler/tick chain in idt.c) */
+#define LAPIC_AP_TICK_VECTOR  0xF1
+
+/* Calibrate and arm the calling CPU's LAPIC timer in periodic mode on
+ * LAPIC_AP_TICK_VECTOR. For APs only (called via ipi_init_ap during
+ * AP bring-up, before the BSP's own calibration exists): measures the
+ * LAPIC bus clock against the HPET (PIT channel 2 fallback) with the
+ * same helpers as the BSP path, reusing an already-measured bus-clock
+ * base when available. Programs only the local CPU's LVT timer; the
+ * global BSP tick state (tick_count, legacy decimation) is untouched.
+ * Returns 0 on success, <0 on failure (caller falls back to polling). */
+int      lapic_timer_init_ap(uint32_t hz);
+
+/* Measured LAPIC bus clock in Hz (0 before any successful calibration) */
+uint32_t lapic_timer_bus_hz(void);
+
+/* AP local-tick IRQ entry (called from interrupt_handler in idt.c for
+ * LAPIC_AP_TICK_VECTOR): LAPIC EOI + per-CPU tick accounting only. */
+void     lapic_timer_ap_tick(void);
+
+/* Per-CPU local tick count by APIC ID (diagnostics / liveness) */
+uint64_t lapic_timer_ap_ticks(uint32_t apic_id);
+
 #ifdef __cplusplus
 }
 #endif
