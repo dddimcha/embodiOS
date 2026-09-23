@@ -32,8 +32,16 @@ extern "C" {
 #define EXO_DEFAULT_CTRL_PORT   50051   /* TCP: тензорный трафик (замена gRPC) */
 #define EXO_DEFAULT_API_PORT    52415   /* HTTP: OpenAI-совместимый API (как в exo) */
 
-#define EXO_ANNOUNCE_INTERVAL_MS    2500    /* период анонсов (как в exo) */
-#define EXO_NODE_TIMEOUT_MS         30000   /* таймаут пира (как в exo) */
+#define EXO_ANNOUNCE_INTERVAL_MS    2000    /* период анонсов (~2 с, live discovery) */
+/* Таймаут пира. Под TCG один прогон шарда (блокирующий, мейн-луп не
+ * обслуживается) занимает десятки секунд — beacon'ы в это время не шлются
+ * из цикла, поэтому: (a) beacon отправляется и на каждый входящий TENSOR
+ * (exo_discovery_heartbeat из handle_tensor), (b) любой тензорный трафик
+ * от пира обновляет last_seen (exo_discovery_touch_ip из transport poll),
+ * (c) таймаут увеличен до 120 с — больше worst-case латентности позиции
+ * кольца под TCG; mid-generation сбой ловится RESULT-таймаутом (180 с),
+ * а не expire. Классическое значение exo — 30 с (быстрое железо). */
+#define EXO_NODE_TIMEOUT_MS         120000  /* таймаут пира (TCG-scaled) */
 
 #define EXO_MAX_NODES           16      /* макс. нод в кольце */
 #define EXO_NODE_ID_LEN         32      /* длина строки node_id */
@@ -185,6 +193,26 @@ const exo_node_t* exo_node_find(const char *node_id);
 int exo_discovery_add_peer(const char *node_id, uint32_t ip,
                            uint16_t ctrl_port, uint64_t ram_mb);
 
+/**
+ * Распечатать живую таблицу discovery на консоль (команда exodiscover):
+ * node_id, ip:ctrl_port, ram_free (MB), возраст последнего heartbeat (с),
+ * флаги (local/pinned).
+ */
+void exo_discovery_print_table(void);
+
+/**
+ * Heartbeat из горячего пути (handle_tensor): отправить анонс, если
+ * интервал EXO_ANNOUNCE_INTERVAL_MS истёк. Нужен, т.к. во время
+ * блокирующего прогона слоёв мейн-луп (и exo_poll) не выполняется.
+ */
+void exo_discovery_heartbeat(void);
+
+/**
+ * Обновить last_seen пира по IP (любой тензорный трафик = признак
+ * живости). Вызывается из exo_transport_poll при приёме сообщений.
+ */
+void exo_discovery_touch_ip(uint32_t ip);
+
 /* ============================================================================
  * Шардирование (exo_shard.c) — ring memory weighted partitioning
  * ============================================================================ */
@@ -216,6 +244,36 @@ int exo_shard_rebalance(void);
  * @return индекс в таблице нод или -1
  */
 int exo_ring_next(int node_idx);
+
+/**
+ * Построить кольцо из живой таблицы discovery (команда `exoring auto`):
+ * сортировка по ram_free (убывание), при равенстве — детерминированный
+ * tiebreak по node_id (strncmp), поэтому ВСЕ ноды вычисляют одно и то же
+ * кольцо. Печатает порядок кольца; ring[0] — оркестратор (max ram_free).
+ * Шарды не назначаются (это делает exoshard); если шард уже был назначен,
+ * кольцо пересобирается с сохранёнными параметрами модели.
+ * @return 0 при успехе, <0 при ошибке (пустая таблица)
+ */
+int exo_ring_auto(void);
+
+/**
+ * Автоназначение шардов (команда `exoshard auto`): RAM-weighted split
+ * (EXO_STRATEGY_RING_MEMORY_WEIGHTED) по кольцу из exo_ring_auto.
+ * model_id/n_layers берутся из загруженной GGUF (или из предыдущего
+ * назначения); если модель не загружена — ошибка (нужен warm-up `chat`).
+ * @return 0 при успехе, <0 при ошибке
+ */
+int exo_shard_auto(void);
+
+/**
+ * Пометить кольцо деградировавшим (таймаут/обрыв TENSOR/RESULT
+ * посреди генерации). Флаг сбрасывается при успешном exo_shard_assign()
+ * (новое кольцо после rebalance/re-join пира).
+ */
+void exo_ring_mark_degraded(const char *reason);
+
+/** true, если кольцо помечено деградировавшим. */
+bool exo_ring_is_degraded(void);
 
 /* ============================================================================
  * Прогон локальных слоёв (exo_node.c)

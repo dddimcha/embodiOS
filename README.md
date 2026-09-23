@@ -8,7 +8,7 @@ Boot it as a kernel, an ISO, or a USB stick, and you land in a chat session
 with a transformer running on raw hardware. No Linux. No libc. No userspace.
 No dependencies.
 
-![version](https://img.shields.io/badge/version-0.6.0-blue)
+![version](https://img.shields.io/badge/version-0.7.0-blue)
 ![build](https://img.shields.io/badge/build-passing-brightgreen)
 ![license](https://img.shields.io/badge/license-Apache--2.0-orange)
 ![platform](https://img.shields.io/badge/platform-x86__64-lightgrey)
@@ -51,7 +51,7 @@ Prebuilt `elf` + `iso` + a QUICKSTART ship in `dist/` via `./embodi release`.
   ██╔══╝  ██║╚██╔╝██║██╔══██╗██║   ██║██║  ██║██║██║   ██║╚════██║
   ███████╗██║ ╚═╝ ██║██████╔╝╚██████╔╝██████╔╝██║╚██████╔╝███████║
   ╚══════╝╚═╝     ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝ ╚═════╝ ╚══════╝
-              One binary. Any machine. No OS.        v0.6.0 Volta
+              One binary. Any machine. No OS.        v0.7.0 Maxwell
 
   [ OK ] CPU features initialized
   [ OK ] Memory: 2048 MB detected, identity-mapped
@@ -110,22 +110,34 @@ callbacks and the `motor` demo — a 1 kHz PID closed loop driving a simulated
 DC motor, with rdtsc jitter accounting (mean/stddev/p99) and an asynchronous
 LLM policy hook. See [docs/motor-demo.md](docs/motor-demo.md).
 
-### GPU compute backend (v0.5.0, extended v0.6.0)
+### GPU compute backend (v0.5.0 → v0.7.0)
 
 Vulkan compute matmul path with hand-assembled SPIR-V shaders — f32, Q8_0,
 **Q4_K and Q6_K (v0.6.0)** — all validated **bit-exact** against the CPU
 reference on lavapipe; kernel probes PCI for a Vulkan-capable device and
 falls back to SIMD when none is present. v0.6.0 also adds the **virtio-gpu
-transport** (modern vendor-capability MMIO + legacy fallback) with a
-spec-complete **Venus capset layer** and a `gpuinfo` command. See
+transport** (modern vendor-capability MMIO + legacy fallback) and — in
+**v0.7.0** — a full **Venus (VK_EXT_command_stream) compute path**: 52 Vulkan
+commands encoded freestanding with Mesa's real wire ids, blob-backed ring and
+buffers, submit-with-fence dispatch for all four shaders. Validated by
+`make -C tools venustest`, which runs the kernel's own `venus.c` against a
+lavapipe-backed mock renderer (init + matmul streams bit-exact). Needs a
+Venus-capable hypervisor (`-device virtio-gpu-gl,venus=on`) to execute
+in-guest; otherwise falls back to SIMD unchanged. See
 [docs/gpu-backend.md](docs/gpu-backend.md).
 
-### SMP maturity (v0.6.0)
+### SMP maturity (v0.6.0) + SMP-parallel inference (v0.7.0)
 
 Per-CPU LAPIC timers (each AP calibrates its own LVT against HPET) and
 **IPI wakeup**: APs park in `sti; hlt` with interrupts enabled instead of
 polling a mailbox. `-smp 4` boots 4/4 CPUs online with per-CPU state in
 `cpus`; UP and `-append poll` legacy modes unaffected.
+
+v0.7.0 puts the pool to work: every fused quantized matvec (Q8_0/Q4_K/Q5_0/
+Q6_K + the 49k×576 output head) is **row-partitioned across online CPUs**,
+woken by IPI per dispatch. Row partitioning keeps per-row FP order, so logits
+are **bit-identical at any CPU count** (same answer at `-smp 1/2/4`,
+parbench checksum stable). `parbench` prints the scaling table.
 
 ### Direct UEFI boot (v0.6.0)
 
@@ -158,7 +170,9 @@ API straight from bare metal:
 
 ```
 embodios> exo                    # start node, UDP discovery on :5678
-embodios> exoshard even          # split layers across the ring
+embodios> exodiscover            # live peer table (v0.7.0)
+embodios> exoring auto           # build ring from discovery (v0.7.0)
+embodios> exoshard auto          # RAM-weighted layer split (v0.7.0)
 embodios> exoserve 8080          # OpenAI-compatible HTTP API
 embodios> exochat 8 <prompt>     # ring generation from the console (v0.6.0)
 ```
@@ -170,14 +184,16 @@ curl -X POST localhost:18080/v1/chat/completions \
 # → {"choices":[{"message":{"content":"The capital of France is Paris."}}],...}
 ```
 
-Status (v0.6.0): **two-node ring fully working over a real TCP network** —
-two QEMU instances shard SmolLM-135M 15/15 layers and generate multi-token
-answers in per-position lockstep ("What is the capital of France?" →
-"The capital of France is Paris.", ring numerics identical to local
-inference). Getting there required fixing five real TCP bugs (SYN
-retransmission, TIME_WAIT expiry, virtio-net TX timeout, persistent
-tensor connections, 16 KiB socket buffers) — the full story and numbers
-are in [docs/benchmark-v0.6.0.md](docs/benchmark-v0.6.0.md).
+Status (v0.7.0): **self-organizing rings** — nodes discover each other
+live over UDP, compute the *identical* ring on every node (RAM-weighted,
+deterministic tiebreak), and shard automatically. Verified end-to-end with
+a **three-node ring**: 10/10/10 layers, "What is the capital of France?" →
+"The capital of France is Paris.", 22 lockstep positions, zero transport
+errors. Mid-generation node loss aborts cleanly (ring marked DEGRADED, no
+hang, no panic; the peer expires and can rejoin). Numbers and reproduction:
+[docs/benchmark-v0.7.0.md](docs/benchmark-v0.7.0.md); the v0.6.0 two-node
+story (five TCP bugs found and fixed) is in
+[docs/benchmark-v0.6.0.md](docs/benchmark-v0.6.0.md).
 
 ### Beautiful serial UX
 

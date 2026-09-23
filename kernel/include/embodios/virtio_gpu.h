@@ -228,6 +228,78 @@ struct virtio_gpu_cmd_submit {
 } __packed;
 
 /* ============================================================================
+ * Blob resources (virtio spec 1.2, 5.7.6.10; requires VIRTIO_GPU_F_RESOURCE_BLOB)
+ *
+ * Venus uses blobs for everything that must be shared guest<->host:
+ * the command ring / reply shmem (BLOB_MEM_HOST3D) and imported device
+ * memory for storage buffers (BLOB_MEM_GUEST_VRAM). A blob is mapped into
+ * the guest through RESOURCE_MAP_BLOB, which returns an offset into the
+ * device's shared-memory PCI window (VIRTIO_PCI_CAP_SHARED_MEMORY_CFG).
+ * ============================================================================ */
+
+/* enum virtio_gpu_blob_mem */
+#define VIRTIO_GPU_BLOB_MEM_GUEST       1   /* guest-allocated pages */
+#define VIRTIO_GPU_BLOB_MEM_HOST3D      2   /* host 3D (virgl/venus shmem) */
+#define VIRTIO_GPU_BLOB_MEM_GUEST_VRAM  3   /* guest pages, host VRAM view */
+
+/* enum virtio_gpu_blob_flags */
+#define VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE     1
+#define VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE    2
+#define VIRTIO_GPU_BLOB_FLAG_USE_CROSS_DEVICE 4
+
+/* VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB */
+struct virtio_gpu_resource_create_blob {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t resource_id;
+    uint32_t blob_mem;          /* VIRTIO_GPU_BLOB_MEM_* */
+    uint32_t blob_flags;        /* VIRTIO_GPU_BLOB_FLAG_* */
+    uint32_t nr_entries;        /* guest mem entries (0 for host-allocated) */
+    uint64_t blob_id;           /* context-specific (Venus: vulkan handle) */
+    uint64_t size;
+} __packed;
+
+/* VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING */
+struct virtio_gpu_mem_entry {
+    uint64_t addr;
+    uint32_t length;
+    uint32_t padding;
+} __packed;
+
+struct virtio_gpu_resource_attach_backing {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t resource_id;
+    uint32_t nr_entries;        /* mem_entry array follows as extra data */
+} __packed;
+
+/* VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB -> VIRTIO_GPU_RESP_OK_MAP_BLOB */
+struct virtio_gpu_resource_map_blob {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t resource_id;
+    uint32_t padding;
+    uint64_t offset;            /* offset into the blob */
+} __packed;
+
+struct virtio_gpu_resp_resource_map_blob {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint64_t map_info;          /* offset into the shared-memory window */
+    uint32_t padding;
+} __packed;
+
+/* VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB */
+struct virtio_gpu_resource_unmap_blob {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t resource_id;
+    uint32_t padding;
+} __packed;
+
+/* VIRTIO_GPU_CMD_RESOURCE_UNREF */
+struct virtio_gpu_resource_unref {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t resource_id;
+    uint32_t padding;
+} __packed;
+
+/* ============================================================================
  * Driver state
  * ============================================================================ */
 
@@ -252,6 +324,7 @@ typedef struct virtio_gpu_capset {
 #define VIRTIO_PCI_CAP_ISR_CFG          3
 #define VIRTIO_PCI_CAP_DEVICE_CFG       4
 #define VIRTIO_PCI_CAP_PCI_CFG          5
+#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG 8  /* blob host-memory window */
 
 /* Common configuration structure (virtio spec 4.1.4.3) */
 struct virtio_pci_common_cfg {
@@ -304,6 +377,12 @@ typedef struct virtio_gpu_dev {
     /* Capset enumeration result */
     virtio_gpu_capset_t capsets[VIRTIO_GPU_MAX_CAPSETS];
     uint32_t capsets_valid;     /* number of valid entries in capsets[] */
+
+    /* Shared-memory window (VIRTIO_PCI_CAP_SHARED_MEMORY_CFG), the PCI
+     * range blob resources are mapped into via RESOURCE_MAP_BLOB.
+     * hostmem_base == 0 when the device offers no blob host memory. */
+    uint64_t hostmem_base;      /* physical base of the window */
+    uint64_t hostmem_size;      /* window size in bytes */
 
     uint64_t fence_seq;         /* monotonically increasing fence ids */
     bool initialized;
@@ -405,5 +484,58 @@ int virtio_gpu_ctrl_send(const void *req, uint32_t req_len,
  */
 int virtio_gpu_submit_3d(uint32_t ctx_id, const void *cmds,
                          uint32_t cmds_len, uint64_t *fence_id);
+
+/**
+ * @return true if blob resources are usable (VIRTIO_GPU_F_RESOURCE_BLOB
+ *         negotiated AND a shared-memory PCI window is present)
+ */
+bool virtio_gpu_has_blob(void);
+
+/**
+ * Copy out the shared-memory window (base/size). Returns false when absent.
+ */
+bool virtio_gpu_hostmem_window(uint64_t *base, uint64_t *size);
+
+/**
+ * VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB. Host-allocated blobs
+ * (BLOB_MEM_HOST3D / BLOB_MEM_GUEST_VRAM) take no guest mem entries.
+ *
+ * @return VIRTIO_GPU_OK on success
+ */
+int virtio_gpu_resource_create_blob(uint32_t resource_id, uint32_t blob_mem,
+                                    uint32_t blob_flags, uint64_t blob_id,
+                                    uint64_t size);
+
+/**
+ * VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING (for BLOB_MEM_GUEST blobs).
+ *
+ * @param entries     array of virtio_gpu_mem_entry (copied synchronously)
+ * @param nr_entries  entry count
+ */
+int virtio_gpu_resource_attach_backing(uint32_t resource_id,
+                                       const void *entries,
+                                       uint32_t nr_entries);
+
+/**
+ * VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB.
+ *
+ * @param resource_id  blob resource
+ * @param offset       offset into the blob
+ * @param map_info     out: offset into the shared-memory window; the guest
+ *                     address of the mapped blob is hostmem_base + map_info
+ * @return VIRTIO_GPU_OK on success
+ */
+int virtio_gpu_resource_map_blob(uint32_t resource_id, uint64_t offset,
+                                 uint64_t *map_info);
+
+/**
+ * VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB.
+ */
+int virtio_gpu_resource_unmap_blob(uint32_t resource_id);
+
+/**
+ * VIRTIO_GPU_CMD_RESOURCE_UNREF (host destroys the resource).
+ */
+int virtio_gpu_resource_unref(uint32_t resource_id);
 
 #endif /* EMBODIOS_VIRTIO_GPU_H */

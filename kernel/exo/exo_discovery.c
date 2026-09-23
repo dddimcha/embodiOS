@@ -108,6 +108,13 @@ static exo_node_t* node_table_find_slot(const char *node_id)
 
 static void node_table_expire(void)
 {
+    /* Пока идёт кольцевая генерация — не expire'ить: beacon-gap под TCG
+     * сравним с таймаутом, а сбой пира посреди генерации детектирует
+     * RESULT-таймаут оркестратора (чистый abort + DEGRADED), после
+     * которого expire сразу возобновляется. */
+    if (exo_ring_busy())
+        return;
+
     uint64_t now = hal_timer_get_milliseconds();
     for (int i = 0; i < EXO_MAX_NODES; i++) {
         if (!g_nodes[i].active || g_nodes[i].is_local || g_nodes[i].pinned)
@@ -180,10 +187,15 @@ int exo_discovery_start(void)
         return EXO_ERR_NET;
     }
 
-    /* Локальная нода — слот 0 таблицы */
+    /* Локальная нода — слот 0 таблицы. ram_* квантуются до MB — ровно
+     * так, как их видят пиры из нашего beacon'а (announce шлёт MB);
+     * иначе self (578.x MB) всегда сортировался бы перед пирами
+     * (ровно 578 MB) и каждая нода ставила бы себя первой в кольце. */
     const exo_node_t *self = exo__self();
     if (self) {
         g_nodes[0] = *self;
+        g_nodes[0].ram_total = (self->ram_total >> 20) << 20;
+        g_nodes[0].ram_free  = (self->ram_free  >> 20) << 20;
         g_nodes[0].is_local = true;
         g_nodes[0].active = true;
         g_nodes[0].last_seen_ms = hal_timer_get_milliseconds();
@@ -228,10 +240,11 @@ void exo_discovery_poll(void)
         g_last_announce_ms = now;
         exo_discovery_announce();
 
-        /* Обновить ram_free локальной ноды для weighted partitioning */
+        /* Обновить ram_free локальной ноды для weighted partitioning
+         * (квантование до MB — как в beacon'е, см. exo_discovery_start) */
         const exo_node_t *self = exo__self();
         if (self && g_nodes[0].is_local) {
-            g_nodes[0].ram_free = self->ram_free;
+            g_nodes[0].ram_free = (self->ram_free >> 20) << 20;
             g_nodes[0].last_seen_ms = now;
         }
     }
@@ -269,6 +282,32 @@ void exo_discovery_poll(void)
     node_table_expire();
 }
 
+void exo_discovery_heartbeat(void)
+{
+    if (!g_started) return;
+    uint64_t now = hal_timer_get_milliseconds();
+    if (now - g_last_announce_ms < EXO_ANNOUNCE_INTERVAL_MS)
+        return;
+    g_last_announce_ms = now;
+    exo_discovery_announce();
+    const exo_node_t *self = exo__self();
+    if (self && g_nodes[0].is_local) {
+        g_nodes[0].ram_free = (self->ram_free >> 20) << 20;
+        g_nodes[0].last_seen_ms = now;
+    }
+}
+
+void exo_discovery_touch_ip(uint32_t ip)
+{
+    if (!g_started || !ip) return;
+    for (int i = 0; i < EXO_MAX_NODES; i++) {
+        if (g_nodes[i].active && !g_nodes[i].is_local &&
+            g_nodes[i].ip == ip) {
+            g_nodes[i].last_seen_ms = hal_timer_get_milliseconds();
+        }
+    }
+}
+
 /* Статический пир (команда exopeer): для транспортов без broadcast
  * (QEMU user-net/slirp изолирует гостей; пир указывается вручную,
  * напр. через hostfwd: ip=10.0.2.2, port=хост-порт второй ноды).
@@ -297,6 +336,34 @@ int exo_discovery_add_peer(const char *node_id, uint32_t ip,
         }
     }
     return EXO_ERR_INIT;
+}
+
+void exo_discovery_print_table(void)
+{
+    uint64_t now = hal_timer_get_milliseconds();
+    int n = exo_node_count();
+
+    console_printf("\nexo discovery: %d node(s), udp :%d, announce %u ms, "
+                   "timeout %u s\n", n, EXO_DISCOVERY_PORT,
+                   (unsigned)EXO_ANNOUNCE_INTERVAL_MS,
+                   (unsigned)(EXO_NODE_TIMEOUT_MS / 1000));
+    console_printf(" #  node_id            ip:port            RAMfree(MB)  age(s)  flags\n");
+    for (int i = 0; i < n; i++) {
+        const exo_node_t *nd = exo_node_get(i);
+        if (!nd) continue;
+        char ip[16], addr[24];
+        ip_to_string(nd->ip, ip, sizeof(ip));
+        snprintf(addr, sizeof(addr), "%s:%u", ip, (unsigned)nd->ctrl_port);
+        unsigned age_s = (now >= nd->last_seen_ms)
+                         ? (unsigned)((now - nd->last_seen_ms) / 1000) : 0;
+        console_printf(" %d  %-16s %-18s %-10u   %-6u  %s%s%s\n",
+                       i, nd->node_id, addr,
+                       (unsigned)(nd->ram_free >> 20), age_s,
+                       nd->is_local ? "local " : "",
+                       nd->pinned ? "pinned " : "",
+                       (nd->is_local || nd->pinned) ? "" : "live");
+    }
+    console_printf("\n");
 }
 
 int exo_node_count(void)

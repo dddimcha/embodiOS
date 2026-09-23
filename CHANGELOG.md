@@ -5,6 +5,84 @@ All notable changes to EMBODIOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-24 — codename Maxwell
+
+GPU inference over the Venus protocol, true SMP-parallel quantized matmul on
+the IPI worker pool, and exo rings that discover and shard themselves —
+three nodes, zero manual wiring.
+
+### Added
+- **Venus (Vulkan-over-virtio-gpu) compute path**
+  (`drivers/gpu/venus_cs.h` NEW, `venus.c`, `virtio_gpu.c`,
+  `ai/vk_device.c`): a freestanding VK_EXT_command_stream (VNCS/VNCR)
+  encoder/decoder for the full 52-command Vulkan subset the backend needs —
+  instance/device/queue, blob-backed buffers and ring memory
+  (`VIRTIO_GPU_RESOURCE_CREATE_BLOB`, HOST_VISIBLE|GUEST_VRAM), shader
+  modules from in-tree SPIR-V words, descriptors, compute pipelines,
+  dispatch, submit-with-fence. Wire format uses the real
+  `VkCommandTypeEXT` ids from Mesa's venus-protocol (vk.xml 1.4.357) — no
+  placeholders. Mesa ring layout (head@0/tail@64/status@128/data@192,
+  128 KiB data + 64 KiB extra), reply roundtrips via
+  `vkSetReplyCommandStreamMESA` + `vkNotifyRingMESA` wake + head-poll.
+  `vk_device_init()` now brings up a real Venus compute device when the
+  capset is present (all four shaders: f32, Q8_0, Q4_K, Q6_K), and falls
+  back to `VK_DEV_NO_DRIVER` unchanged when it is not.
+  **Validation without a Venus host** (sandbox QEMU has no Venus device):
+  `tools/host_test_venus.c` links the *real kernel* `venus.c` against a
+  mock virtio-gpu + a mock Venus renderer on lavapipe — the 41-record init
+  stream and 49-record matmul stream walk clean (structural), device
+  bring-up replays through lavapipe entirely over the ring (semantic), and
+  matmul_f32 / matmul_q4_k_q8_0 results are **bit-exact** (max_abs_err=0)
+  vs the CPU reference. Run: `make -C tools venustest`.
+- **SMP-parallel quantized inference** (`ai/parallel_inference.c`,
+  `ai/streaming_inference.c`): the fused quantized matvecs (Q8_0, Q4_K,
+  Q5_0, Q6_K + the 49152×576 output head) are row-partitioned across
+  online CPUs on the **IPI worker pool** — APs wake from `sti; hlt` via
+  IPI for every dispatched matmul (`Polls` stays 0), BSP runs its own
+  slice and joins on completion counters. Row partitioning preserves
+  per-row FP accumulation order → **bit-identical logits at any CPU
+  count** (parbench FNV `0x9D68488B` at 1/2/3/4 threads; chat answers
+  identical at `-smp 1/2/4`). Threshold `PAR_QUANT_MATVEC_MIN_MACS =
+  131072` keeps small matmuls serial (IPI+join ~10k cycles).
+- **`parbench` command** (`core/cmd_parbench.c`): fixed deterministic
+  1536×1536 Q4_K matvec at 1..N CPUs — cycles, speedup, checksum table.
+- **exo live discovery + auto ring** (`exo/exo_discovery.c`,
+  `exo_node.c`): periodic JSON beacons on UDP :5678 with continuous
+  poll/expire while exo runs; `exodiscover` prints the live peer table
+  (id, ip:port, ram_free, age). `exoring auto` builds the ring from
+  discovery — orchestrator = most `ram_free`, deterministic tiebreak by
+  node_id so **every node computes the identical ring**; `exoshard auto`
+  splits layers by RAM weight (manual `exopeer`/`exoshard` remain as
+  overrides). ram_free is MB-quantized in the table for cross-node
+  determinism.
+- **exo ring failure handling**: mid-generation TENSOR/RESULT timeout →
+  clean abort with console error, ring marked DEGRADED, listener stays
+  up, rejoin works; TCG-scale liveness (traffic refreshes peers,
+  heartbeat piggybacked on TENSOR hops, timeouts scaled); peer
+  expire/rebalance suppressed during generation (ring-busy window + grace
+  window after completion).
+- **Three-node ring demo** (`exo3node.py`): three QEMU nodes over a
+  userspace L2 hub (`-netdev dgram` endpoints + Python frame forwarder —
+  QEMU 7.2 Debian has no mcast netdev), identical ring on all nodes,
+  auto shard 10/10/10, `exochat 8 What is the capital of France?` →
+  "The capital of France is Paris.", 22 lockstep positions, zero
+  transport errors.
+
+### Fixed
+- exo ring liveness under TCG: slow nodes were expired mid-generation;
+  traffic now refreshes peer liveness and generation suppresses expiry.
+
+### Notes
+- **SMP scaling under TCG** is host-bound: the sandbox has 2 physical
+  cores, so 4 vCPUs oversubscribe — parbench shows 1.0–1.5x depending on
+  host contention (smpwork raw-integer ceiling: 1.18x). The pool is
+  correctness-first (bit-identical output); on real hardware the
+  ~10k-cycle IPI+join amortizes against ≥131k-MAC dispatches.
+- Venus in-guest execution needs a Venus-capable hypervisor
+  (`-device virtio-gpu-gl,venus=on` on QEMU ≥7.1 with virglrenderer
+  Venus support); the sandbox lacks one, so the gate is the host-side
+  lavapipe replay of the kernel's own encoder output.
+
 ## [0.6.0] - 2026-09-23 — codename Volta
 
 Distributed inference over a real TCP network, SMP maturity (per-CPU LAPIC

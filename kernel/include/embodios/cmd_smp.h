@@ -15,4 +15,13 @@
  */
 int cmd_smp_dispatch(const char* command);
 
+/**
+ * Try to handle a shell command as a parallel-matmul benchmark command
+ * (`parbench`, core/cmd_parbench.c, v0.7.0 "Maxwell" WS-B). Declared here
+ * so the shell dispatcher in core/stubs.c needs a single registration line.
+ *
+ * @return 1 if the command was handled, 0 to fall through.
+ */
+int cmd_parbench_dispatch(const char* command);
+
 #endif /* EMBODIOS_CMD_SMP_H */
