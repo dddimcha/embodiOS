@@ -2567,9 +2567,11 @@ skip_ethercat:
             ip_to_string(s->remote_ip, rip, sizeof(rip));
             const char *st = (s->state >= 0 && s->state <= 10)
                              ? tcp_states[s->state] : "?";
-            console_printf("%2d  %s   %-12s %s:%u  %s:%u\n",
+            console_printf("%2d  %s   %-12s %s:%u  %s:%u  rx_len=%u dg=%u/%u\n",
                            i, s->type == SOCK_STREAM ? "tcp" : "udp",
-                           st, lip, s->local_port, rip, s->remote_port);
+                           st, lip, s->local_port, rip, s->remote_port,
+                           (unsigned)s->rx_len, (unsigned)s->dgram_count,
+                           (unsigned)SOCKET_DGRAM_QUEUE);
         }
     } else if (strncmp(command, "exochat", 7) == 0) {
         /* exochat [max_tokens] <prompt> — один чат-ход через exo-путь:

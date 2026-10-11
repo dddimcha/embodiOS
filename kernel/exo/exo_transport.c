@@ -243,6 +243,30 @@ typedef struct {
 static exo_out_conn_t g_out[EXO_OUT_CACHE];
 static exo_in_conn_t  g_in[EXO_IN_MAX];
 
+/* Пустой слот кодируется fd < 0. Статические массивы zero-init'ятся нулями,
+ * а fd==0 — ВАЛИДНЫЙ дескриптор (первый socket_create — discovery UDP
+ * :5678). Без явной инициализации в -1 первый же exo_send_tensor()
+ * "вытеснял" слот g_out[0] и socket_close(0) убивал сокет discovery —
+ * guest переставал видеть чужие beacons до конца сессии (known issue:
+ * no re-join после mid-generation kill; idle-kill выживал, т.к. без
+ * кольцевой генерации exo_send_tensor не вызывался). */
+static bool g_conn_tabs_init = false;
+
+static void conn_tabs_init(void)
+{
+    if (g_conn_tabs_init) return;
+    for (int i = 0; i < EXO_OUT_CACHE; i++) {
+        g_out[i].fd = -1;
+        g_out[i].ip = 0;
+        g_out[i].port = 0;
+    }
+    for (int i = 0; i < EXO_IN_MAX; i++) {
+        g_in[i].fd = -1;
+        g_in[i].have = 0;
+    }
+    g_conn_tabs_init = true;
+}
+
 static void out_conn_drop(int slot)
 {
     if (g_out[slot].fd >= 0) {
@@ -303,8 +327,39 @@ static int out_conn_new(uint32_t ip, uint16_t port, int *err_out)
     return fd;
 }
 
+/* Похоронить все транспортные соединения с пиром (ip): вызывается из
+ * discovery при expire/re-announce. После рестарта пира старые half-open
+ * соединения мертвы; без этого кэшированный outgoing conn молча глотал
+ * первый TENSOR нового кольца (peer unreachable → RESULT timeout). */
+void exo_transport_drop_peer(uint32_t ip)
+{
+    conn_tabs_init();
+    if (!ip) return;
+
+    for (int i = 0; i < EXO_OUT_CACHE; i++) {
+        if (g_out[i].fd >= 0 && g_out[i].ip == ip) {
+            console_printf("[EXO] transport: dropping stale conn to peer\n");
+            out_conn_drop(i);
+        }
+    }
+    for (int i = 0; i < EXO_IN_MAX; i++) {
+        if (g_in[i].fd < 0) continue;
+        socket_t *s = tcpip_get_socket_for_testing(g_in[i].fd);
+        if (s && s->active && s->remote_ip == ip) {
+            console_printf("[EXO] transport: dropping stale inbound conn "
+                           "from peer\n");
+            socket_close(g_in[i].fd);
+            /* повторный close добивает FIN_WAIT/LAST_ACK */
+            socket_close(g_in[i].fd);
+            g_in[i].fd = -1;
+            g_in[i].have = 0;
+        }
+    }
+}
+
 int exo_transport_listen(uint16_t port)
 {
+    conn_tabs_init();
     if (g_listen_fd >= 0) return EXO_OK;
 
     int fd = socket_create(SOCK_STREAM, IP_PROTO_TCP);
@@ -328,6 +383,8 @@ int exo_send_tensor(uint32_t dst_ip, uint16_t dst_port,
         return EXO_ERR_PROTOCOL;
     if (hdr->payload_len > 0 && !payload)
         return EXO_ERR_PROTOCOL;
+
+    conn_tabs_init();
 
     uint8_t hdr_buf[48];
     size_t hdr_len = hdr_serialize(hdr, hdr_buf);
@@ -385,6 +442,8 @@ int exo_recv_tensor(int fd, exo_tensor_msg_t *hdr,
  * входящих соединений. БЕЗ блокировок — вызывается из главного цикла. */
 void exo_transport_poll(void)
 {
+    conn_tabs_init();
+
     /* accept: listen-сокет увидел SYN (SYN_RECEIVED/ESTABLISHED) */
     if (g_listen_fd >= 0) {
         socket_t *ls = tcpip_get_socket_for_testing(g_listen_fd);

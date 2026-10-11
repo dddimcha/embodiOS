@@ -214,6 +214,8 @@ typedef struct net_stats {
     uint64_t tcp_sockets_created;  /* TCP sockets created */
     uint64_t tcp_sockets_closed;   /* TCP sockets closed */
     uint64_t tcp_sockets_leaked;   /* TCP sockets leaked (created - closed) */
+    uint64_t udp_dropped;       /* UDP datagrams dropped (socket rx_buffer full) */
+    uint64_t udp_meta_dropped;  /* UDP dgram metadata evicted (queue full) */
 } net_stats_t;
 
 /* ============================================================================

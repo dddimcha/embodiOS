@@ -13,6 +13,8 @@ No dependencies.
 ![license](https://img.shields.io/badge/license-Apache--2.0-orange)
 ![platform](https://img.shields.io/badge/platform-x86__64-lightgrey)
 
+![embodiOS v0.7.0 demo — bare-metal boot to LLM chat](docs/demo-v0.7.0.gif)
+
 ---
 
 ## 60-second quickstart

@@ -23,6 +23,13 @@ uint64_t exo__next_request_id(void);
 void exo__handle_tensor_msg(int fd, const exo_tensor_msg_t *hdr,
                             const uint8_t *payload);
 
+/* --- Транспорт (exo_transport.c), вызывается из exo_discovery.c --- */
+
+/* Похоронить кэшированные transport-соединения с пиром (ip): вызывается
+ * при expire пира и при его повторном появлении в discovery (re-join
+ * после рестарта — старые half-open соединения мертвы). */
+void exo_transport_drop_peer(uint32_t ip);
+
 /* --- Кольцевая активность (exo_node.c), читается из exo_shard/discovery --- */
 
 /* true, пока идёт/недавно шла кольцевая генерация (TENSOR/RESULT трафик
