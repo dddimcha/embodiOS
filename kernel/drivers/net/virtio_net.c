@@ -535,6 +535,21 @@ void virtio_net_print_info(void)
     console_printf("  RX Errors:      %llu\n", (unsigned long long)g_net.rx_errors);
     console_printf("  TX Errors:      %llu\n", (unsigned long long)g_net.tx_errors);
     console_printf("  RX Dropped:     %llu\n", (unsigned long long)g_net.rx_dropped);
+
+    /* Ring diagnostics: RX avail/used позиции и число свободных дескрипторов
+     * (диагностика wedge: avail_idx==used->idx при free_count<size =
+     * буферы застряли в used-ring и не пополняются). */
+    rmb();
+    console_printf("  RX ring: avail_idx=%u used_idx=%u last_used=%u free_desc=%u/%u\n",
+                   g_net.rx_vq.avail ? g_net.rx_vq.avail->idx : 0,
+                   g_net.rx_vq.used ? g_net.rx_vq.used->idx : 0,
+                   g_net.rx_vq.last_used_idx, g_net.rx_vq.free_count,
+                   g_net.rx_vq.size);
+    console_printf("  TX ring: avail_idx=%u used_idx=%u last_used=%u free_desc=%u/%u\n",
+                   g_net.tx_vq.avail ? g_net.tx_vq.avail->idx : 0,
+                   g_net.tx_vq.used ? g_net.tx_vq.used->idx : 0,
+                   g_net.tx_vq.last_used_idx, g_net.tx_vq.free_count,
+                   g_net.tx_vq.size);
     console_printf("\n");
 }
 

@@ -5,6 +5,47 @@ All notable changes to EMBODIOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-09-24 — patch
+
+Fixes the one known issue shipped with v0.7.0: a peer restarted after a
+mid-generation kill was never rediscovered by the surviving orchestrator.
+
+### Fixed
+- **Root cause — discovery socket murdered by the tensor transport**
+  (`exo/exo_transport.c`): the persistent-connection tables `g_out[4]` /
+  `g_in[6]` were zero-initialized, but "empty slot" is `fd < 0` and **fd 0
+  is a valid fd** — the discovery UDP socket (:5678), created first. On the
+  first `exo_send_tensor()`, `out_conn_new()` found no free slot, took the
+  eviction path and `socket_close(0)` killed the discovery socket; every
+  beacon was demux-dropped from then on ("UDP :5678 — no matching socket").
+  Explains the symptom split exactly: idle-kill rejoin worked (no tensor
+  traffic → socket alive), mid-generation-kill rejoin never did (socket
+  died when the ring started). Fix: fd tables initialize to -1
+  (`conn_tabs_init()` from listen/send/poll).
+- **Stale-connection reaping** (`net/tcpip.c`, `exo/exo_transport.c`):
+  a bare SYN arriving on a non-LISTEN 4-tuple means the peer rebooted —
+  reap the stale connection and let the SYN reach the listener; LISTEN
+  sockets answer RST to non-SYN segments; unmatched TCP gets an RST;
+  `exo_transport_drop_peer(ip)` reaps a peer's cached connections on
+  discovery expire and on re-announce (the first post-rejoin generation
+  previously died on a stale cached connection → RESULT timeout).
+- **UDP socket-buffer consistency** (`net/tcpip.c`): payload and metadata
+  queues now evict together; `recvfrom` orphan entries self-heal.
+- Diagnostics kept: UDP drop/evict counters, virtio ring indices in `net`,
+  `tcpsockets` shows rx_len + datagram occupancy.
+
+### Verified
+- Kill test **full PASS** — `abort ✓ degraded ✓ expired ✓ rejoined ✓
+  no panic` — and the post-rejoin ring generates (`RESULT req=2` flowing,
+  new node forwarding shards). Evidence:
+  `logs/exo2node_kill_wsd_pass_*.log`.
+- Regressions: `make test` 6/6, boot smoke "Paris", two-node ring demo
+  PASS.
+
+### Added
+- `docs/demo-v0.7.0.gif` — animated boot→chat→"Paris" terminal demo,
+  now at the top of the README (recorded from a real QEMU run).
+
 ## [0.7.0] - 2026-09-24 — codename Maxwell
 
 GPU inference over the Venus protocol, true SMP-parallel quantized matmul on

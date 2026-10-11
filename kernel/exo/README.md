@@ -34,16 +34,31 @@ I/O-таймауты транспорта 10 с) → **чистый abort**: к�
 сбрасывается); **переанонсировавшийся пир снова входит в таблицу →
 rebalance → новое кольцо** (`exoring auto`/`exoshard auto` показывают его).
 
-**Known issue (Maxwell).** Re-join после kill'а пира проверен для
-idle-килла (peer истекает по EXO_NODE_TIMEOUT_MS, рестарт → re-announce →
-rediscovery + rebalance за секунды; см. probe в WS-C отчёте). После
-kill'а посреди генерации оркестратор чисто абортирует (DEGRADED, responsive,
-expire+rebalance к 1-нодному кольцу — всё проверено), но rediscovery
-перезапущенного пира на нём в этой сессии не наблюдался: подозрение на
-RX-путь virtio-net/tcpip после шторма ретраев к мёртвому пиру (TX и
-управление работают, UDP beacons не доходят). Workaround: новое кольцо
-собирается на других нодах / после перезагрузки оркестратора. TODO:
-диагностика virtio RX после peer-death storm.
+**~~Known issue (Maxwell)~~ → ИСПРАВЛЕНО (v0.7.1, ветка maxwell-rejoin).**
+Re-join после kill'а пира теперь работает и для mid-generation kill'а:
+оркестратор абортирует (DEGRADED), пир истекает, рестарт → re-announce →
+rediscovery + rebalance, и новое кольцо сразу работоспособно (kill-test
+PASS включая post-rejoin кольцевую генерацию). Корневая причина была НЕ в
+RX-пути virtio-net (beacons доходили до UDP-demux — счётчики росли), а в
+`exo_transport.c`: статические таблицы соединений `g_out[]`/`g_in[]`
+zero-init'ились нулями, а пустой слот кодировался `fd < 0`. fd==0 —
+валидный дескриптор (первый же socket_create — discovery UDP :5678), и
+первый `exo_send_tensor()` «вытеснял» фантомный слот `g_out[0]` вызовом
+`socket_close(0)` — сокет discovery умирал при старте кольцевой генерации,
+и нода до конца сессии не видела чужие beacons (idle-kill выживал, т.к.
+без генерации `exo_send_tensor` не вызывался). Попутно исправлено:
+(1) `tcpip.c` — SYN без ACK на не-LISTEN сокете с тем же 4-tuple =
+рестартнувшийся пир: старое half-open соединение reap'ится, SYN уходит
+listener'у; (2) `tcpip.c` — RST в ответ на TCP-сегмент без получателя и на
+не-SYN сегмент listener'у (мёртвые соединения у пира умирают сразу, а не
+по таймауту); (3) `exo_transport.c` + `exo_discovery.c` —
+`exo_transport_drop_peer()`: expire/re-announce пира в discovery хоронит
+его кэшированные transport-соединения (иначе первый TENSOR нового кольца
+уходил в мёртвый conn и терялся); (4) `tcpip.c` UDP — rx_buffer и очередь
+метаданных датаграмм теперь всегда консистентны (вытеснение старейшей
+датаграммы целиком; раньше payload без метаданных мог необратимо забить
+сокет). Диагностика: `net` печатает virtio ring-индексы и счётчики UDP
+drop/evict, `tcpsockets` — rx_len и заполнение dgram-очереди.
 
 **Воспроизведение** (QEMU TCG, `. $HOME/env.sh`, сборка
 `make -C kernel GGUF_MODEL=/tmp/models/smollm-135m-instruct-q4_k_m.gguf`):

@@ -7,7 +7,7 @@
  *    с таймаутом EXO_NODE_TIMEOUT_MS (30 с).
  *
  * Реализация поверх net/tcpip.c:
- *  - приём: SOCK_DGRAM-сокет, socket_bind(port=5678) + socket_recv()
+ *  - приём: SOCK_DGRAM-сокет, socket_bind(port=5678) + socket_recvfrom()
  *    (handle_udp в tcpip.c раскладывает датаграммы по local_port);
  *  - передача: tcpip_send_udp(0xFFFFFFFF, 5678, ...).
  *
@@ -121,7 +121,12 @@ static void node_table_expire(void)
             continue;
         if (now - g_nodes[i].last_seen_ms > EXO_NODE_TIMEOUT_MS) {
             console_printf("[EXO] node '%s' timed out\n", g_nodes[i].node_id);
+            uint32_t dead_ip = g_nodes[i].ip;
             g_nodes[i].active = false;
+            /* Мёртвый пир: похоронить half-open transport-соединения к нему
+             * (иначе кэшированный conn молча проглотит первый TENSOR после
+             * re-join перезапущенного пира). */
+            exo_transport_drop_peer(dead_ip);
             /* join/leave меняет кольцо — перепартицирование */
             exo_shard_rebalance();
         }
@@ -163,6 +168,9 @@ static void node_table_upsert(const char *node_id, uint32_t ip,
         console_printf("[EXO] discovered node '%s' at %s:%u ram=%u MB\n",
                        n->node_id, ip_str, (unsigned)ctrl_port,
                        (unsigned)(ram_free >> 20));
+        /* Новая (или перезапущенная после expire) нода: half-open
+         * transport-соединения к ней от прошлой инкарнации мертвы. */
+        exo_transport_drop_peer(ip);
         exo_shard_rebalance();
     }
 }

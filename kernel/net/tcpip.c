@@ -408,29 +408,70 @@ static void handle_udp(const ip_header_t *ip, const uint8_t *data, size_t len)
         if (sockets[i].active && sockets[i].type == SOCK_DGRAM &&
             sockets[i].local_port == dst_port) {
 
+            /* Переполнение: вытеснить старейшие датаграммы (метаданные и
+             * payload ВМЕСТЕ), пока новая не поместится в очередь и буфер.
+             * Раньше при полной очереди payload добавлялся в rx_buffer БЕЗ
+             * метаданных: осиротевшие байты не могли быть слиты recvfrom
+             * (dgram_count==0 → ранний return), rx_len рос до полного
+             * буфера — и сокет необратимо переставал принимать датаграммы. */
+            while (sockets[i].dgram_count > 0 &&
+                   (sockets[i].dgram_count >= SOCKET_DGRAM_QUEUE ||
+                    sockets[i].rx_len + data_len > SOCKET_BUFFER_SIZE)) {
+                uint8_t h = sockets[i].dgram_head;
+                size_t old = sockets[i].dgram_len[h];
+                if (old > sockets[i].rx_len)
+                    old = sockets[i].rx_len;  /* страховка */
+                sockets[i].rx_len -= old;
+                if (sockets[i].rx_len > 0) {
+                    memmove(sockets[i].rx_buffer,
+                            sockets[i].rx_buffer + old, sockets[i].rx_len);
+                }
+                sockets[i].dgram_head = (uint8_t)((h + 1) % SOCKET_DGRAM_QUEUE);
+                sockets[i].dgram_count--;
+                net_stats.udp_meta_dropped++;  /* вытеснено до чтения */
+            }
+
             /* Copy data to socket buffer */
-            if (sockets[i].rx_len + data_len <= SOCKET_BUFFER_SIZE) {
+            if (data_len <= SOCKET_BUFFER_SIZE &&
+                sockets[i].rx_len + data_len <= SOCKET_BUFFER_SIZE &&
+                sockets[i].dgram_count < SOCKET_DGRAM_QUEUE) {
                 memcpy(sockets[i].rx_buffer + sockets[i].rx_len,
                        data + sizeof(udp_header_t), data_len);
                 sockets[i].rx_len += data_len;
                 sockets[i].remote_ip = ntohl(ip->src_ip);
                 sockets[i].remote_port = ntohs(udp->src_port);
 
-                /* Очередь метаданных датаграмм для socket_recvfrom():
-                 * если очередь полна, старейшая датаграмма вытесняется
-                 * (её payload остаётся в rx_buffer, но без метаданных —
-                 * будет слит первой читавшей recvfrom как часть следующей). */
-                if (sockets[i].dgram_count < SOCKET_DGRAM_QUEUE) {
-                    uint8_t tail = (uint8_t)((sockets[i].dgram_head +
-                                              sockets[i].dgram_count) %
-                                             SOCKET_DGRAM_QUEUE);
-                    sockets[i].dgram_src_ip[tail]   = ntohl(ip->src_ip);
-                    sockets[i].dgram_src_port[tail] = ntohs(udp->src_port);
-                    sockets[i].dgram_len[tail]      = (uint16_t)data_len;
-                    sockets[i].dgram_count++;
-                }
+                uint8_t tail = (uint8_t)((sockets[i].dgram_head +
+                                          sockets[i].dgram_count) %
+                                         SOCKET_DGRAM_QUEUE);
+                sockets[i].dgram_src_ip[tail]   = ntohl(ip->src_ip);
+                sockets[i].dgram_src_port[tail] = ntohs(udp->src_port);
+                sockets[i].dgram_len[tail]      = (uint16_t)data_len;
+                sockets[i].dgram_count++;
+            } else {
+                net_stats.udp_dropped++;  /* не влезла даже в пустой буфер */
             }
             break;
+        }
+    }
+    /* DIAG: нет слушателя на dst_port (первые 8 уникальных портов) */
+    {
+        bool matched = false;
+        for (int i = 0; i < MAX_SOCKETS; i++) {
+            if (sockets[i].active && sockets[i].type == SOCK_DGRAM &&
+                sockets[i].local_port == dst_port) { matched = true; break; }
+        }
+        if (!matched) {
+            static uint16_t nomatch_ports[8];
+            static uint8_t nomatch_n = 0;
+            bool known = false;
+            for (int k = 0; k < nomatch_n; k++)
+                if (nomatch_ports[k] == dst_port) { known = true; break; }
+            if (!known && nomatch_n < 8) {
+                nomatch_ports[nomatch_n++] = dst_port;
+                console_printf("tcpip: UDP :%u — no matching socket, dropped\n",
+                               dst_port);
+            }
         }
     }
 }
@@ -461,6 +502,19 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
             break;
         }
     }
+    /* Пир перезагрузился и переиспользовал тот же 4-tuple (напр. ephemeral
+     * 49152 после ребута): SYN без ACK на не-LISTEN сокете — это НОВОЕ
+     * соединение, а не сегмент старого. Старое соединение мертво (peer
+     * death): похоронить его и пропустить SYN к listener'у. Без этого SYN
+     * попадал в ESTABLISHED-состояние и молча игнорировался — re-join
+     * перезапущенной ноды не мог поднять tensor transport. */
+    if (i >= 0 &&
+        (tcp->flags & (TCP_SYN | TCP_ACK)) == TCP_SYN) {
+        console_printf("tcpip: SYN on stale connection (fd %d, state %d) — "
+                       "peer restarted, reaping\n", i, sockets[i].state);
+        socket_close(i);
+        i = -1;
+    }
     if (i < 0) {
         for (int j = 0; j < MAX_SOCKETS; j++) {
             if (sockets[j].active && sockets[j].type == SOCK_STREAM &&
@@ -470,6 +524,17 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                 break;
             }
         }
+    }
+    if (i < 0) {
+        /* Сегменту некуда деваться: ответить RST (кроме ответа на RST),
+         * чтобы пир немедленно похоронил полуоткрытое соединение и
+         * переподключился, вместо молчаливого дропа и таймаутов. */
+        if (!(tcp->flags & TCP_RST)) {
+            tcp_send_packet(src_ip_h, src_port_h, dst_port,
+                            ntohl(tcp->ack_num), ntohl(tcp->seq_num) + 1,
+                            TCP_RST | TCP_ACK, NULL, 0);
+        }
+        return;
     }
     if (i >= 0) {
 
@@ -483,8 +548,8 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
             /* Handle TCP state machine */
             switch (sockets[i].state) {
             case TCP_LISTEN:
-                /* In LISTEN state, ignore RST */
                 if (flags & TCP_SYN) {
+                    /* In LISTEN state, ignore RST; SYN → handshake */
                     sockets[i].remote_ip = ntohl(ip->src_ip);
                     sockets[i].remote_port = ntohs(tcp->src_port);
                     sockets[i].ack_num = seq + 1;
@@ -502,6 +567,14 @@ static void handle_tcp(const ip_header_t *ip, const uint8_t *data, size_t len)
                          * ретрансмит SYN от пира повторит попытку */
                         sockets[i].state = TCP_LISTEN;
                     }
+                } else if (!(flags & TCP_RST)) {
+                    /* Не-SYN сегмент на listener'е: данные/ACK несуществующего
+                     * соединения (пир шлёт по кэшированному полуоткрытому conn
+                     * после нашего рестарта) — ответить RST, чтобы пир
+                     * немедленно похоронил соединение и переподключился
+                     * (иначе молчаливый дроп + длинные таймауты). */
+                    tcp_send_packet(src_ip_h, src_port_h, dst_port,
+                                    ack, seq + 1, TCP_RST | TCP_ACK, NULL, 0);
                 }
                 break;
 
@@ -1186,7 +1259,12 @@ int socket_recvfrom(int fd, void *buffer, size_t len,
         return n;
     }
 
-    if (sockets[fd].dgram_count == 0) return 0;
+    if (sockets[fd].dgram_count == 0) {
+        /* Самолечение от осиротевших байт (десинхрон rx_buffer/очереди
+         * метаданных): payload без метаданных недоставим — сбросить. */
+        sockets[fd].rx_len = 0;
+        return 0;
+    }
 
     /* Старейшая датаграмма в очереди */
     uint8_t head = sockets[fd].dgram_head;
@@ -1245,6 +1323,14 @@ int socket_close(int fd)
 {
     if (fd < 0 || fd >= MAX_SOCKETS)
         return NET_ERR_INVALID;
+
+    /* UDP-сокеты живут вечно (discovery :5678 и т.п.): их закрытие —
+     * всегда подозрительно (см. known issue: g_out/g_in zero-init убивал
+     * discovery socket). TCP-чурн не логируем — слишком шумно. */
+    if (sockets[fd].active && sockets[fd].type == SOCK_DGRAM) {
+        console_printf("tcpip: UDP socket :%u closed (fd=%d)\n",
+                       sockets[fd].local_port, fd);
+    }
 
     /* For TCP sockets in ESTABLISHED or CLOSE_WAIT state, perform proper close */
     if (sockets[fd].type == SOCK_STREAM && sockets[fd].active) {
@@ -1348,6 +1434,9 @@ void tcpip_print_info(void)
         console_printf("  ICMP Echo Requests: %lu\n", net_stats.icmp_echo_req);
         console_printf("  ICMP Echo Replies: %lu\n", net_stats.icmp_echo_reply);
         console_printf("  UDP Datagrams: %lu\n", net_stats.udp_datagrams);
+        console_printf("  UDP Dropped (buf full): %lu\n", net_stats.udp_dropped);
+        console_printf("  UDP Meta Evicted (queue full): %lu\n",
+                       net_stats.udp_meta_dropped);
     }
 }
 
