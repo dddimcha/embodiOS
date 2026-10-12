@@ -1,11 +1,14 @@
-/* EMBODIOS ARM64 GICv2 Driver (GIC-400, QEMU virt machine)
+/* EMBODIOS ARM64 GICv2 Driver (GIC-400)
  *
- * Distributor  (GICD) @ 0x08000000
- * CPU interface (GICC) @ 0x08010000
+ * Base addresses come from board.h (v0.9.0 board selection):
+ *   virt: GICD 0x08000000, GICC 0x08010000, UART0 INTID 33
+ *   pi3 : GICD 0x40001000, GICC 0x40002000, UART0 INTID 89
+ *   pi4 : GICD 0xFF841000, GICC 0xFF842000, UART0 INTID 153
+ *   pi5 : GICD 0x107FFF9000, GICC 0x107FFFA000, UART0 INTID 153
  *
  * INTIDs of interest:
  *   30  - EL1 physical timer (PPI, CNTP)     -> timer tick chain
- *   33  - PL011 UART0 (SPI 1)                -> optional RX (unused, polled)
+ *   xx  - PL011 UART0 (board-dependent SPI)  -> optional RX (unused, polled)
  *  1023 - spurious
  *
  * The IRQ dispatcher drives the same tick chain as x86_64 IRQ0:
@@ -14,12 +17,11 @@
  */
 
 #include "embodios/types.h"
+#include "board.h"
 
 /* ------------------------------------------------------------------------
- * GIC register map (GICv2 / GIC-400)
+ * GIC register map (GICv2 / GIC-400); GICD_BASE/GICC_BASE from board.h
  * ------------------------------------------------------------------------ */
-#define GICD_BASE        0x08000000UL
-#define GICC_BASE        0x08010000UL
 
 #define GICD_CTLR        (GICD_BASE + 0x000)
 #define GICD_ISENABLER0  (GICD_BASE + 0x100)   /* 1 bit per INTID, 32/reg  */
@@ -34,9 +36,26 @@
 #define GICC_IAR         (GICC_BASE + 0x0C)
 #define GICC_EOIR        (GICC_BASE + 0x10)
 
-#define INTID_TIMER_PHYS_EL1  30     /* CNTP PPI */
-#define INTID_UART0           33     /* PL011 SPI 1 */
+#define INTID_TIMER_PHYS_EL1  30               /* CNTP PPI */
+#define INTID_UART0           GIC_UART_INTID   /* PL011 SPI, per-board */
 #define INTID_SPURIOUS        1023
+
+/* ------------------------------------------------------------------------
+ * pi3: BCM2836 ARM-local interrupt controller (0x40000000)
+ *
+ * QEMU <= 8.0 raspi3b does NOT model the BCM2837 GIC-400; writes to
+ * 0x40001000 take a synchronous external abort. What QEMU (and real
+ * hardware) always provides is the ARM-local block: the per-core timer
+ * IRQ routing registers route the generic timer straight to core0's IRQ
+ * line with no GIC in the path. Real Pi 3 also exposes this block
+ * (Linux: brcm,bcm2836-l1-intc), so this path works on both.
+ * Register map (BCM2835/QA7): +0x40 CORE0_TIMER_IRQ_CONTROL,
+ * +0x60 CORE0_IRQ_SOURCE; bits 0..3 = CNTPS/CNTPNS/CNTHP/CNTV IRQ.
+ * ------------------------------------------------------------------------ */
+#define LOCAL_INTC_BASE            0x40000000UL
+#define LOCAL_CORE0_TIMER_IRQCTL   (LOCAL_INTC_BASE + 0x40)
+#define LOCAL_CORE0_IRQ_SOURCE     (LOCAL_INTC_BASE + 0x60)
+#define LOCAL_IRQ_CNTPNS           (1u << 1)   /* EL1 phys timer (CNTP) */
 
 #define GICC_PMR_UNMASK_ALL   0xF0   /* allow priorities 0x00-0xE0 */
 
@@ -68,6 +87,17 @@ static void gic_enable_intid(uint32_t intid, uint8_t priority)
     v |= ((uint32_t)priority << shift);
     gic_write32(preg, v);
 
+    /* SPIs (INTID >= 32): route to CPU0 explicitly. PPI/SGI target
+     * registers are read-only on GICv2 and fixed per-CPU. */
+    if (intid >= 32) {
+        uintptr_t treg = GICD_ITARGETSR0 + (intid & ~3UL);
+        uint32_t tshift = (intid & 3) * 8;
+        uint32_t t = gic_read32(treg);
+        t &= ~(0xFFu << tshift);
+        t |= (0x01u << tshift);     /* CPU0 */
+        gic_write32(treg, t);
+    }
+
     gic_write32(GICD_ICPENDR0 + reg * 4, (1u << bit));  /* clear pending */
     gic_write32(GICD_ISENABLER0 + reg * 4, (1u << bit));
 }
@@ -87,6 +117,14 @@ void gic_init(void)
     __asm__ volatile("msr vbar_el1, %0" :: "r"(exception_vectors));
     __asm__ volatile("isb");
 
+#if defined(BOARD_PI3)
+    /* No GIC-400 on QEMU raspi3b (see note above): route the EL1 physical
+     * timer (CNTPNS) to core0 IRQ via the ARM-local interrupt controller. */
+    gic_write32(LOCAL_CORE0_TIMER_IRQCTL, LOCAL_IRQ_CNTPNS);
+    uart_puts("INTC [pi3]: ARM-local intc, CNTPNS timer -> core0 IRQ\n");
+    return;
+#endif
+
     /* Distributor off while configuring */
     gic_write32(GICD_CTLR, 0);
 
@@ -105,7 +143,9 @@ void gic_init(void)
     /* Distributor on */
     gic_write32(GICD_CTLR, 1);
 
-    uart_puts("GICv2: distributor + CPU interface enabled (timer PPI 30, UART SPI 33)\n");
+    uart_puts("GICv2 [");
+    uart_puts(BOARD_NAME);
+    uart_puts("]: distributor + CPU interface enabled (timer PPI 30)\n");
 }
 
 /* ------------------------------------------------------------------------
@@ -118,6 +158,18 @@ extern void timer_interrupt_handler(void);  /* kernel/timer.c */
 void irq_dispatch(uint64_t *frame)
 {
     (void)frame;
+
+#if defined(BOARD_PI3)
+    /* ARM-local intc path: no IAR/EOIR protocol; the CNTPNS source bit is
+     * level-driven by the generic timer and clears when hal_timer
+     * reprograms CNTP_TVAL inside timer_tick(). */
+    uint32_t src = gic_read32(LOCAL_CORE0_IRQ_SOURCE);
+    if (src & LOCAL_IRQ_CNTPNS) {
+        timer_tick();               /* HAL tick: ticks++, reprogram CNTP */
+        timer_interrupt_handler();  /* core tick: seconds, scheduler_tick */
+    }
+    return;
+#endif
 
     uint32_t iar = gic_read32(GICC_IAR);
     uint32_t intid = iar & 0x3FF;

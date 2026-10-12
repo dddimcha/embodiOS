@@ -1,7 +1,35 @@
 /* EMBODIOS ARM64 MMU Setup
- * Minimal setup for HVF (macOS Hypervisor) compatibility
- * Maps device memory with correct attributes to avoid ISV assertion
+ *
+ * Identity map, EL1, 4KB granule, T0SZ=25 (39-bit VA, 512GB), IPS=40-bit.
+ * Walk starts at L1 (each L1 entry = 1GB block or pointer to an L2 table of
+ * 512 x 2MB blocks).
+ *
+ * Per-board device-memory windows (AttrIdx0 = Device-nGnRnE, XN):
+ *
+ *   virt: L1[0] -> L2, all 512 entries device (0x00000000-0x3FFFFFFF:
+ *         UART 0x09000000, GIC 0x08000000). L1[1..3] normal 1GB blocks.
+ *         Byte-identical behavior to v0.8.0.
+ *
+ *   pi3 : kernel runs at 0x80000, so RAM must be normal, not device.
+ *         L1[0] -> L2a: 0x00000000-0x3EFFFFFF normal (504 x 2MB),
+ *                       0x3F000000-0x3FFFFFFF device (8 x 2MB: peripherals,
+ *                       UART0 0x3F201000, mailbox 0x3F00B880).
+ *         L1[1] -> L2b: 0x40000000-0x401FFFFF device (GIC-400 0x40001000/
+ *                       0x40002000), 0x40200000-0x7FFFFFFF normal.
+ *         L1[2..3] normal 1GB blocks.
+ *
+ *   pi4 : L1[0..2] normal 1GB blocks (kernel at 0x80000).
+ *         L1[3] -> L2: 0xC0000000-0xFBFFFFFF normal (480 x 2MB),
+ *                      0xFC000000-0xFFFFFFFF device (32 x 2MB: peripherals
+ *                      0xFE000000, GIC-400 0xFF840000, local 0xFF800000).
+ *
+ *   pi5 : L1[0..3] normal 1GB blocks (kernel at 0x80000, RAM 0-4GB).
+ *         L1[65] -> L2: 0x107C000000-0x107FFFFFFF device (32 x 2MB = 64MB
+ *                       soc/RP1 window: UART0 0x107D001000, GIC-400
+ *                       0x107FFF9000, mailbox 0x107C013880), rest invalid.
  */
+
+#include "board.h"
 
 .section .bss
 .align 12   /* 4KB aligned for page tables */
@@ -9,6 +37,9 @@
 /* Page tables - with T0SZ=25 (39-bit VA), walk starts at L1 */
 l1_table:   .space 4096
 l2_table:   .space 4096
+#if defined(BOARD_PI3)
+l2_table2:  .space 4096
+#endif
 
 .section .data
 .align 4
@@ -20,13 +51,14 @@ mmu_enabled:
 
 .global mmu_init
 
-/*
- * Minimal identity map for HVF (macOS Hypervisor):
- *   0x00000000-0x3FFFFFFF: Device memory (UART, GIC)
- *   0x40000000-0xFFFFFFFF: Normal memory (kernel, RAM)
- *
- * IMPORTANT: No UART access before MMU enable (causes HVF assertion)
- */
+/* Descriptor attribute templates (ORed with the block base address):
+ *   DEVICE: Block(01) | AttrIdx0 (nGnRnE) | AF | UXN | PXN
+ *   NORMAL: Block(01) | AttrIdx1 (WB)     | AF | SH-inner
+ * The existing code uses 0x0401|bits[53:54] and 0x0705; keep identical. */
+#define DESC_DEVICE_FLAGS   0x0401          /* Block | AttrIdx=0 | AF */
+#define DESC_NORMAL_FLAGS   0x0705          /* Block | AttrIdx=1 | SH | AF */
+#define DESC_XN             (3 << 52)       /* UXN | PXN */
+
 mmu_init:
     stp x29, x30, [sp, #-16]!
     mov x29, sp
@@ -51,18 +83,183 @@ mmu_init:
     subs x1, x1, #1
     b.ne 3b
 
+#if defined(BOARD_PI3)
+    /* ---- pi3 ---- */
+
+    adrp x13, l2_table2
+    add x13, x13, :lo12:l2_table2
+
+    /* Zero L2b */
+    mov x0, x13
+    mov x1, #512
+3:  str xzr, [x0], #8
+    subs x1, x1, #1
+    b.ne 3b
+
+    /* L1[0] -> L2a */
+    mov x0, x12
+    orr x0, x0, #3          /* Valid | Table */
+    str x0, [x11]
+
+    /* L1[1] -> L2b */
+    mov x0, x13
+    orr x0, x0, #3
+    str x0, [x11, #8]
+
+    /* L1[2],[3]: normal 1GB blocks */
+    mov x0, #0x80000000
+    mov x1, #DESC_NORMAL_FLAGS
+    orr x0, x0, x1
+    str x0, [x11, #16]
+    mov x0, #0xC0000000
+    mov x1, #DESC_NORMAL_FLAGS
+    orr x0, x0, x1
+    str x0, [x11, #24]
+
+    /* L2a entries 0..503: 0x00000000-0x3EFFFFFF normal RAM (kernel @0x80000) */
+    mov x0, #0
+    mov x2, x12
+    mov x3, #504
+4:  mov x1, x0
+    mov x4, #DESC_NORMAL_FLAGS
+    orr x1, x1, x4
+    str x1, [x2], #8
+    add x0, x0, #0x200000
+    subs x3, x3, #1
+    b.ne 4b
+
+    /* L2a entries 504..511: 0x3F000000-0x3FFFFFFF device (peripherals) */
+    mov x3, #8
+5:  mov x1, x0
+    mov x4, #DESC_DEVICE_FLAGS
+    orr x1, x1, x4
+    mov x4, #DESC_XN
+    orr x1, x1, x4
+    str x1, [x2], #8
+    add x0, x0, #0x200000
+    subs x3, x3, #1
+    b.ne 5b
+
+    /* L2b entry 0: 0x40000000-0x401FFFFF device (GIC-400) */
+    mov x1, #0x40000000
+    mov x4, #DESC_DEVICE_FLAGS
+    orr x1, x1, x4
+    mov x4, #DESC_XN
+    orr x1, x1, x4
+    str x1, [x13], #8
+
+    /* L2b entries 1..511: 0x40200000-0x7FFFFFFF normal */
+    mov x0, #0x40200000
+    mov x3, #511
+6:  mov x1, x0
+    mov x4, #DESC_NORMAL_FLAGS
+    orr x1, x1, x4
+    str x1, [x13], #8
+    add x0, x0, #0x200000
+    subs x3, x3, #1
+    b.ne 6b
+
+#elif defined(BOARD_PI4)
+    /* ---- pi4 ---- */
+
+    /* L1[0..2]: normal 1GB blocks (RAM incl. kernel @0x80000) */
+    mov x0, #0x0
+    mov x1, #DESC_NORMAL_FLAGS
+    orr x0, x0, x1
+    str x0, [x11]
+    mov x0, #0x40000000
+    mov x1, #DESC_NORMAL_FLAGS
+    orr x0, x0, x1
+    str x0, [x11, #8]
+    mov x0, #0x80000000
+    mov x1, #DESC_NORMAL_FLAGS
+    orr x0, x0, x1
+    str x0, [x11, #16]
+
+    /* L1[3] -> L2 */
+    mov x0, x12
+    orr x0, x0, #3
+    str x0, [x11, #24]
+
+    /* L2 entries 0..479: 0xC0000000-0xFBFFFFFF normal */
+    mov x0, #0xC0000000
+    mov x2, x12
+    mov x3, #480
+4:  mov x1, x0
+    mov x4, #DESC_NORMAL_FLAGS
+    orr x1, x1, x4
+    str x1, [x2], #8
+    add x0, x0, #0x200000
+    subs x3, x3, #1
+    b.ne 4b
+
+    /* L2 entries 480..511: 0xFC000000-0xFFFFFFFF device
+     * (peripherals 0xFE000000, GIC-400 0xFF840000, local 0xFF800000) */
+    mov x3, #32
+5:  mov x1, x0
+    mov x4, #DESC_DEVICE_FLAGS
+    orr x1, x1, x4
+    mov x4, #DESC_XN
+    orr x1, x1, x4
+    str x1, [x2], #8
+    add x0, x0, #0x200000
+    subs x3, x3, #1
+    b.ne 5b
+
+#elif defined(BOARD_PI5)
+    /* ---- pi5 ---- */
+
+    /* L1[0..3]: normal 1GB blocks (RAM 0-4GB, kernel @0x80000) */
+    mov x0, #0x0
+    mov x1, #DESC_NORMAL_FLAGS
+    orr x0, x0, x1
+    str x0, [x11]
+    mov x0, #0x40000000
+    mov x1, #DESC_NORMAL_FLAGS
+    orr x0, x0, x1
+    str x0, [x11, #8]
+    mov x0, #0x80000000
+    mov x1, #DESC_NORMAL_FLAGS
+    orr x0, x0, x1
+    str x0, [x11, #16]
+    mov x0, #0xC0000000
+    mov x1, #DESC_NORMAL_FLAGS
+    orr x0, x0, x1
+    str x0, [x11, #24]
+
+    /* L1[65] -> L2 (covers 0x1040000000-0x107FFFFFFF) */
+    mov x0, x12
+    orr x0, x0, #3
+    str x0, [x11, #(65 * 8)]
+
+    /* L2 entries 480..511: 0x107C000000-0x107FFFFFFF device (64MB soc/RP1
+     * window: UART0 0x107D001000, GIC 0x107FFF9000, mailbox 0x107C013880).
+     * Entries 0..479 stay invalid (unused DRAM alias space). */
+    mov x0, #0x7C000000
+    mov x1, #(0x10 << 28)   /* 0x100000000 */
+    orr x0, x0, x1          /* 0x107C000000 */
+    mov x2, x12
+    add x2, x2, #(480 * 8)
+    mov x3, #32
+4:  mov x1, x0
+    mov x4, #DESC_DEVICE_FLAGS
+    orr x1, x1, x4
+    mov x4, #DESC_XN
+    orr x1, x1, x4
+    str x1, [x2], #8
+    add x0, x0, #0x200000
+    subs x3, x3, #1
+    b.ne 4b
+
+#else
+    /* ---- virt (default; byte-identical to v0.8.0) ---- */
+
     /* L1[0] -> L2 table for 0x00000000-0x3FFFFFFF (device memory) */
     mov x0, x12
     orr x0, x0, #3          /* Valid | Table */
     str x0, [x11]
 
-    /* L1[1]: 1GB block at 0x40000000 - Normal memory
-     * Bits: Valid=1, Block=0, AttrIdx=1, AF=1, SH=Inner
-     *   [1:0] = 01 (block)
-     *   [4:2] = 001 (AttrIdx 1 = normal)
-     *   [9:8] = 11 (SH inner)
-     *   [10]  = 1 (AF)
-     */
+    /* L1[1]: 1GB block at 0x40000000 - Normal memory */
     mov x0, #0x40000000
     mov x1, #0x0705         /* Block | AttrIdx=1 | SH=inner | AF */
     orr x0, x0, x1
@@ -82,7 +279,6 @@ mmu_init:
 
     /* Fill L2 table: 512 x 2MB blocks for first 1GB
      * All as device memory (UART at 0x09000000)
-     * Device: AttrIdx=0, AF=1, UXN, PXN
      */
     mov x0, #0              /* Start address */
     mov x2, x12             /* L2 table pointer */
@@ -99,6 +295,7 @@ mmu_init:
     add x0, x0, #0x200000   /* +2MB */
     subs x3, x3, #1
     b.ne 4b
+#endif
 
     /* Set MAIR_EL1:
      * Attr0 = 0x00 (Device-nGnRnE)

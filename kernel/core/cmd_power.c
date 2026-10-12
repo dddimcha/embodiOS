@@ -31,11 +31,24 @@
 
 #if defined(__aarch64__)
 
+#include "../arch/aarch64/board.h"
+
 /* aarch64 (QEMU virt): power control via PSCI over HVC. QEMU's PSCI
  * implementation (TCG, no EL3 firmware needed) handles SYSTEM_OFF and
- * SYSTEM_RESET for hvc calls issued at EL1. */
+ * SYSTEM_RESET for hvc calls issued at EL1.
+ *
+ * On Raspberry Pi boards there is no PSCI implementation below us at EL1
+ * (the Pi firmware does not handle HVC): the call returns immediately and
+ * the machine keeps running. For BOARD_HAS_MAILBOX targets we fall back to
+ * the VideoCore property-mailbox reset (bcm_mbox_reset(), provided by the
+ * mailbox driver; weakly linked here so the build works without it) and
+ * finally park the core in a wfi loop. */
 #define PSCI_FN_SYSTEM_OFF   0x84000008UL
 #define PSCI_FN_SYSTEM_RESET 0x84000009UL
+
+/* Weak hook: strong definition comes from the BCM mailbox driver (WS-B).
+ * Returns only if the firmware ignored the reset request. */
+__attribute__((weak)) void bcm_mbox_reset(void);
 
 static inline void psci_call(unsigned long fn)
 {
@@ -69,6 +82,17 @@ void power_shutdown(void)
     psci_call(PSCI_FN_SYSTEM_OFF);
     pm_delay();
 
+#if BOARD_HAS_MAILBOX
+    /* No PSCI on Pi firmware: there is no standard mailbox power-off either,
+     * so the best we can do is a firmware reboot. */
+    if (bcm_mbox_reset) {
+        console_printf("PSCI unavailable; requesting firmware reset via mailbox...\n");
+        console_flush();
+        bcm_mbox_reset();
+        pm_delay();
+    }
+#endif
+
     console_printf("PSCI poweroff failed (no response). System halted.\n");
     for (;;)
         pm_hlt();
@@ -82,6 +106,15 @@ void power_reboot(void)
 
     psci_call(PSCI_FN_SYSTEM_RESET);
     pm_delay();
+
+#if BOARD_HAS_MAILBOX
+    if (bcm_mbox_reset) {
+        console_printf("PSCI unavailable; requesting firmware reset via mailbox...\n");
+        console_flush();
+        bcm_mbox_reset();
+        pm_delay();
+    }
+#endif
 
     console_printf("PSCI reset failed (no response). System halted.\n");
     for (;;)

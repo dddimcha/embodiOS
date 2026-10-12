@@ -609,3 +609,79 @@ int gpio_setup_uart0(void)
     console_printf("[GPIO] UART0 configured (GPIO 14-15)\n");
     return GPIO_OK;
 }
+
+/* ============================================================================
+ * WS-B (pi-periph), v0.9.0 "Galvani": one-shot UART0 pin mux for Pi 5 (RP1)
+ * Author: Dmitry Dimcha <dddimcha@gmail.com>
+ *
+ * Self-contained (does not depend on gpio_init()/g_gpio state): used by the
+ * PL011 driver at early board init, before any driver framework is up.
+ *
+ * RP1 register map (RP1 datasheet RP-008370-DS-1):
+ *   io_bank0    @ RP1 bus 0x400D0000 -> CPU phys PERIPH_BASE + 0xD0000
+ *   pads_bank0  @ RP1 bus 0x400F0000 -> CPU phys PERIPH_BASE + 0xF0000
+ *   GPIOx status @ io_bank0 + 8*x, GPIOx_CTRL @ io_bank0 + 8*x + 4
+ *   PAD_GPIOx   @ pads_bank0 + 0x04 + 4*x
+ *   CTRL.FSEL = bits [4:0]; PAD bits: OD=7, IE=6, DRIVE=5:4, PUE=3, PDE=2.
+ *
+ * UART0 on GPIO14/15 is ALT4 on RP1 (NOT ALT0):
+ *   - rp1.dtsi rp1_uart0_14_15: function="uart0", txd bias-disable,
+ *     rxd bias-pull-up
+ *     (github.com/raspberrypi/linux rpi-6.6.y arch/arm64/boot/dts/broadcom)
+ *   - Pi 5 `pinctrl` dump: "14: a4 pn // PIN8/GPIO14 = TXD0",
+ *     "15: a4 pu // PIN10/GPIO15 = RXD0"
+ *     (github.com/raspberrypi/bookworm-feedback issue #201)
+ *   NOTE: the legacy gpio_setup_uart0() above still programs ALT0 with the
+ *   BCM2835 3-bit model — that is incorrect on RP1 and must be revisited
+ *   when the full driver is brought up on Pi 5 (tracked in WS-B report).
+ * ============================================================================ */
+
+/* TEMPORARY: shim in lieu of WS-A's kernel/arch/aarch64/board.h.
+ * Integrator: replace with the real board.h include and delete
+ * kernel/include/arch-aarch64-board-shim/. */
+#include "board.h"
+
+#if defined(__aarch64__) && defined(BOARD_PI5)
+
+#define RP1_IO_BANK0        (PERIPH_BASE + 0x0D0000UL)
+#define RP1_PADS_BANK0      (PERIPH_BASE + 0x0F0000UL)
+#define RP1_GPIO_CTRL(pin)  (RP1_IO_BANK0 + 8UL * (pin) + 4UL)
+#define RP1_PAD(pin)        (RP1_PADS_BANK0 + 0x04UL + 4UL * (pin))
+
+#define RP1_FSEL_UART0      4u          /* ALT4 = UART0 TXD0/RXD0 */
+#define RP1_PAD_OD          (1u << 7)
+#define RP1_PAD_IE          (1u << 6)
+#define RP1_PAD_DRIVE_4MA   (1u << 4)
+#define RP1_PAD_PUE         (1u << 3)
+#define RP1_PAD_PDE         (1u << 2)
+#define RP1_PAD_SCHMITT     (1u << 1)
+
+static void rp1_write32(uintptr_t addr, uint32_t value)
+{
+    __asm__ volatile("str %w[val], [%[ptr]]"
+                     : : [val] "r" (value), [ptr] "r" ((volatile uint32_t *)addr)
+                     : "memory");
+}
+
+void bcm_gpio_uart0_pins_pi5(void)
+{
+    /* Function select first (FSEL field is bits [4:0], other fields reset
+     * to "no override" which is what an alt function needs). */
+    rp1_write32(RP1_GPIO_CTRL(14), RP1_FSEL_UART0);   /* UART0_TXD0 */
+    rp1_write32(RP1_GPIO_CTRL(15), RP1_FSEL_UART0);   /* UART0_RXD0 */
+
+    /* Pads: output enabled, 4 mA drive, schmitt on; TXD no bias, RXD
+     * input-enabled with pull-up (per rp1.dtsi rp1_uart0_14_15). */
+    rp1_write32(RP1_PAD(14), RP1_PAD_DRIVE_4MA | RP1_PAD_SCHMITT);
+    rp1_write32(RP1_PAD(15), RP1_PAD_IE | RP1_PAD_DRIVE_4MA |
+                             RP1_PAD_PUE | RP1_PAD_SCHMITT);
+}
+
+#else
+
+void bcm_gpio_uart0_pins_pi5(void)
+{
+    /* Not a Pi 5 build — nothing to do. */
+}
+
+#endif

@@ -5,6 +5,80 @@ All notable changes to EMBODIOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-10-13 — codename Galvani
+
+embodiOS leaves the emulator: the aarch64 kernel now boots on real
+Raspberry Pi hardware as `kernel8.img`, selected at compile time with
+`BOARD=pi3|pi4|pi5`. Full bring-up guide for real boards:
+[docs/RASPBERRY_PI.md](docs/RASPBERRY_PI.md). x86_64 and qemu-virt are
+unchanged and fully regression-gated.
+
+### Added
+- **Multi-board Raspberry Pi port** (`BOARD=pi3|pi4|pi5` compile-time,
+  `-DBOARD_PI3/4/5`; default stays `virt`): Pi 3 (BCM2837), Pi 4
+  (BCM2711), Pi 5 (BCM2712 + RP1).
+- **Board address contract** (`arch/aarch64/board.h` + `board.c`): single
+  source of truth for per-board `PERIPH_BASE` / `UART0` / `GICD` / `GICC`
+  / `MAILBOX` / `LINK_BASE`, verified against BCM2711 ARM Peripherals
+  §6.5.1, the GIC-400 TRM §3.2, and Linux `bcm2712.dtsi`; one-line board
+  identity dump at boot.
+- **EL2 → EL1 drop + DTB handoff** (`boot.S`): real Pi firmware enters at
+  EL2 with the DTB pointer in `x0`; the pointer is saved in `.data`
+  before the BSS clear, then HCR/CPTR/HSTR/CNTHCTL/SCTLR/SPSR/ELR are
+  configured and the kernel `eret`s to EL1h. QEMU paths (enter at EL1)
+  are unaffected.
+- **Per-board MMU device windows** (`mmu.S`, `kernel_pi.ld`): Pi boards
+  link at `0x80000` (`kernel8.img`); Device-nGnRnE windows cover each
+  board's peripheral block, GIC-400, and (pi5) the 64 MB soc/RP1 window
+  at `0x107C000000`. The `virt` map is byte-identical to v0.8.0.
+- **VideoCore mailbox property interface**
+  (`drivers/mailbox/bcm_mailbox.c`): firmware revision, board model, UART
+  clock rate, framebuffer allocation, and PM-watchdog reset.
+- **PL011 UART with mailbox-derived clock**: GPIO14/15 → ALT0 with the
+  BCM2835 pull-off sequence (pi3/pi4); baud divisor from the mailbox UART
+  clock with a 48 MHz firmware-default fallback so boot continues if the
+  mailbox is silent (QEMU raspi3b answers with 3 MHz). Pi 5 routes
+  GPIO14/15 → ALT4 through RP1 (`drivers/gpio/bcm_gpio.c`).
+- **HDMI framebuffer console** (`drivers/video/mailbox_fb.c`,
+  `font8x16.c`): 1024x768x32 framebuffer via a single combined mailbox
+  request, 128x48-cell text console, ANSI-stripped, mirrored with the
+  serial line (serial stays authoritative).
+- **PM-watchdog reset**: `shutdown`/`reboot` on Pi boards reset via the
+  VideoCore property mailbox / PM watchdog (`PM_RSTC`/`PM_WDOG`, password
+  `0x5A000000`) — there is no PSCI under Pi firmware.
+- **PMM VideoCore reserve**: the top 64 MB of ARM-visible RAM is kept
+  away from the page allocator on Pi boards (mailbox framebuffer / GPU
+  heap, matching the default `gpu_mem=64` split).
+- **SD-card packaging** (`make -C kernel ARCH=aarch64 BOARD=piN sdcard`,
+  `scripts/make_sdcard.sh`): stages `dist/sdcard/pi<N>/kernel8.img` +
+  `config.txt` (`arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,
+  `arm_boost=1`, `disable_overscan=1`, plus `enable_gic=1` on pi4 to keep
+  the GIC-400 enabled).
+
+### Verified (aarch64, QEMU 7.2 TCG `-M raspi3b -m 1G`)
+- Full gate **PASS** — boot, shell, chat ("Paris", 8 tokens at
+  **2.78 tok/s** under TCG), `simdtest`, motor, `shutdown`
+  (log: `v090_pi3_gate.log`).
+- `simdtest` **PASS** — scalar and NEON bit-identical, hashes unchanged
+  from x86_64 and qemu-virt: Q8_0 `0xF648E55E42C8B617`, Q4_K
+  `0x87DFC84480B155A5` — bit-exact cross-machine proof.
+- Mailbox path live: firmware revision, framebuffer allocation, and the
+  `FB:`/`MBOX:` boot lines print on raspi3b.
+
+### Verified (regression)
+- x86_64 and qemu-virt (`-M virt`): zero regressions; virt chat gate
+  re-run PASS at **21.29 tok/s** under TCG (`v090_virt_gate2.log`).
+
+### Known issues
+- `shutdown` on QEMU raspi3b does not exit QEMU (no PSCI; the watchdog
+  reset is a no-op in the emulation) — kill QEMU manually. On real Pi
+  hardware the watchdog performs a board **reset**, not a power-off.
+- Pi 5 GPIO14/15 UART (RP1 ALT4) is programmed but not hardware-verified;
+  use the 3-pin debug UART header.
+- pi4/pi5 builds are compile-clean and statically verified but await
+  real-hardware validation (QEMU 7.2 emulates only raspi3b) — see the
+  hardware test protocol in [docs/RASPBERRY_PI.md](docs/RASPBERRY_PI.md).
+
 ## [0.8.0] - 2026-10-12 — codename Faraday
 
 The first EMBODIOS release that boots on ARM64: the same `embodios.elf`

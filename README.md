@@ -8,7 +8,7 @@ Boot it as a kernel, an ISO, or a USB stick, and you land in a chat session
 with a transformer running on raw hardware. No Linux. No libc. No userspace.
 No dependencies.
 
-![version](https://img.shields.io/badge/version-0.8.0-blue)
+![version](https://img.shields.io/badge/version-0.9.0-blue)
 ![build](https://img.shields.io/badge/build-passing-brightgreen)
 ![license](https://img.shields.io/badge/license-Apache--2.0-orange)
 ![platform](https://img.shields.io/badge/platform-x86__64%20%C2%B7%20aarch64-lightgrey)
@@ -36,6 +36,8 @@ one package install on macOS, Debian/Ubuntu, or Arch.
 |--------|---------|--------|
 | QEMU direct kernel (PVH) | `qemu-system-x86_64 -kernel kernel/embodios.elf -nographic` | ✅ Verified |
 | **QEMU aarch64 (virt)** | `qemu-system-aarch64 -M virt -cpu cortex-a53 -m 2G -nographic -kernel kernel/embodios.elf` | ✅ Verified (v0.8.0) |
+| **QEMU aarch64 (raspi3b)** | `qemu-system-aarch64 -M raspi3b -m 1G -kernel dist/sdcard/pi3/kernel8.img -serial stdio -display none` | ✅ Verified (v0.9.0) |
+| **Raspberry Pi 3/4/5** | `make -C kernel ARCH=aarch64 BOARD=pi4 sdcard` → flash `dist/sdcard/pi4/` | 🔬 Real-hardware validation welcome (v0.9.0) |
 | QEMU via CLI | `./embodi run` | ✅ Verified |
 | Bootable ISO (BIOS, multiboot2) | `./embodi iso && ./embodi run --iso` | ✅ Verified |
 | Bootable ISO (UEFI, OVMF) | `./embodi run --iso --uefi` | ✅ Verified |
@@ -54,7 +56,7 @@ Prebuilt `elf` + `iso` + a QUICKSTART ship in `dist/` via `./embodi release`.
   ██╔══╝  ██║╚██╔╝██║██╔══██╗██║   ██║██║  ██║██║██║   ██║╚════██║
   ███████╗██║ ╚═╝ ██║██████╔╝╚██████╔╝██████╔╝██║╚██████╔╝███████║
   ╚══════╝╚═╝     ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝ ╚═════╝ ╚══════╝
-              One binary. Any machine. No OS.        v0.8.0 Faraday
+              One binary. Any machine. No OS.        v0.9.0 Galvani
 
   [ OK ] CPU features initialized
   [ OK ] Memory: 2048 MB detected, identity-mapped
@@ -177,6 +179,35 @@ is the next release. That's the direction that matters here: prosthetic
 devices, where an RT motor loop, an LLM policy, and CAN/EtherCAT (already
 landed) live in one bare-metal binary. exo/net/SMP are x86_64-only for
 now and degrade gracefully on aarch64.
+
+### Raspberry Pi (v0.9.0 "Galvani")
+
+The hardware phase is here: embodiOS now boots as `kernel8.img` on real
+Raspberry Pi boards — same one-binary story, loaded by the Pi firmware at
+`0x80000`, with the PL011 serial console **and** a mirrored HDMI
+framebuffer console (VideoCore mailbox, 1024x768). Build one board image:
+
+```bash
+make -C kernel ARCH=aarch64 BOARD=pi4 sdcard   # pi3 | pi4 | pi5
+```
+
+then copy `dist/sdcard/pi4/{kernel8.img,config.txt}` onto a FAT32 SD card
+next to the official firmware blobs — full walkthrough, wiring, and boot
+log in [docs/RASPBERRY_PI.md](docs/RASPBERRY_PI.md).
+
+| Board | SoC | QEMU gate | Real hardware |
+|-------|-----|-----------|---------------|
+| Pi 3 (BCM2837) | `BOARD=pi3` | ✅ raspi3b: chat, `simdtest`, motor PASS | 🔬 Validation welcome |
+| Pi 4 (BCM2711) | `BOARD=pi4` | — (QEMU 7.2 has no raspi4b) | 🔬 Validation welcome |
+| Pi 5 (BCM2712+RP1) | `BOARD=pi5` | — | 🔬 Validation welcome |
+
+Per-board address contracts live in `kernel/arch/aarch64/board.h`
+(verified against the BCM2711 datasheet, GIC-400 TRM, and bcm2712.dtsi).
+The raspi3b QEMU gate proves chat (2.78 tok/s under TCG), bit-exact NEON
+`simdtest` hashes, and the RT motor loop; **real-hardware reports are the
+last open v0.9.x milestone** — if you have a Pi on your desk, the
+10-minute test protocol in [docs/RASPBERRY_PI.md](docs/RASPBERRY_PI.md)
+tells you exactly what to run and report.
 
 ### Verified models
 
@@ -319,6 +350,7 @@ to shell is under a second either way.
 ## Documentation
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — get from zero to chat in minutes
+- [docs/RASPBERRY_PI.md](docs/RASPBERRY_PI.md) — boot on a real Pi 3/4/5: build, flash, wire, report
 - [docs/PORTING_GLM_EXO.md](docs/PORTING_GLM_EXO.md) — porting GLM & exo playbook
 - [kernel/exo/README.md](kernel/exo/README.md) — distributed inference internals
 - [models/README.md](models/README.md) — model downloads, manifest, checksums
