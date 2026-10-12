@@ -8,6 +8,15 @@
  * to master. The Q5_0 and Q6_K fused variants are new (on master those types
  * fall back to dequantize+float-dot; they are only selected explicitly).
  *
+ * v0.8.0 (WS-2): on aarch64 the *_scalar entry points are now TRUE scalar
+ * reference code on every architecture, and the NEON implementations are
+ * exported under explicit *_neon names (selected by simd_dispatch.c and
+ * parity-checked by core/cmd_simdtest.c). NEON stays bit-exact vs scalar:
+ * the per-block integer products/sums are exact (int8*int8 -> int16 ->
+ * int32, order-independent mod 2^32) and the surrounding float scaling
+ * expressions are character-identical C in both variants, so the compiler
+ * applies the same contraction/rounding to each.
+ *
  * Host-compilable: only depends on embodios/simd_kernels.h (+ arm_neon.h on
  * aarch64 / emmintrin.h on x86_64 for the baseline variants).
  */
@@ -39,9 +48,31 @@ static inline void get_scale_min_k4(int j, const uint8_t* q, uint8_t* d, uint8_t
  * Q8_0 x Q8_1
  * ========================================================================== */
 
-#if defined(__aarch64__)
-/* ARM NEON fused Q8_0 x Q8_1 dot product (moved from streaming_inference.c) */
+/* Scalar reference — identical C on every architecture (true scalar, no
+ * intrinsics) so cmd_simdtest can parity-check the SIMD backends against it */
 float vec_dot_q8_0_q8_1_scalar(const block_q8_0* x, const block_q8_1* y, int nb) {
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; i++) {
+        float d0 = emb_fp16_to_fp32(x[i].d);
+        float d1 = emb_fp16_to_fp32((uint16_t)y[i].d);
+        int32_t isum = 0;
+
+        for (int j = 0; j < QK8_0; j++) {
+            isum += (int32_t)x[i].qs[j] * (int32_t)y[i].qs[j];
+        }
+
+        sumf += d0 * d1 * (float)isum;
+    }
+
+    return sumf;
+}
+
+#if defined(__aarch64__)
+/* ARM NEON fused Q8_0 x Q8_1 dot product (moved from streaming_inference.c).
+ * Bit-exact vs vec_dot_q8_0_q8_1_scalar: int products/sums are exact and the
+ * float scaling expression per block is identical C. */
+float vec_dot_q8_0_q8_1_neon(const block_q8_0* x, const block_q8_1* y, int nb) {
     float sumf = 0.0f;
 
     for (int i = 0; i < nb; i++) {
@@ -62,25 +93,6 @@ float vec_dot_q8_0_q8_1_scalar(const block_q8_0* x, const block_q8_1* y, int nb)
         }
 
         int32_t isum = vaddvq_s32(sum_vec);
-        sumf += d0 * d1 * (float)isum;
-    }
-
-    return sumf;
-}
-#else
-/* Scalar fallback */
-float vec_dot_q8_0_q8_1_scalar(const block_q8_0* x, const block_q8_1* y, int nb) {
-    float sumf = 0.0f;
-
-    for (int i = 0; i < nb; i++) {
-        float d0 = emb_fp16_to_fp32(x[i].d);
-        float d1 = emb_fp16_to_fp32((uint16_t)y[i].d);
-        int32_t isum = 0;
-
-        for (int j = 0; j < QK8_0; j++) {
-            isum += (int32_t)x[i].qs[j] * (int32_t)y[i].qs[j];
-        }
-
         sumf += d0 * d1 * (float)isum;
     }
 
@@ -138,9 +150,52 @@ float vec_dot_q8_0_q8_1_sse(const block_q8_0* x, const block_q8_1* y, int nb) {
  * For each Q4_K block we consume 8 Q8_1 blocks (256/32 = 8).
  * ========================================================================== */
 
-#if defined(__aarch64__)
-/* ARM NEON Q4_K x Q8_1 (moved from streaming_inference.c) */
+/* Scalar reference for Q4_K x Q8_1 (moved from streaming_inference.c) —
+ * identical C on every architecture */
 float vec_dot_q4_k_q8_1_scalar(const block_q4_K* x, const block_q8_1* y, int nb) {
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; i++) {
+        const block_q4_K* xb = &x[i];
+        float xd = emb_fp16_to_fp32(xb->d);
+        float xdmin = emb_fp16_to_fp32(xb->dmin);
+
+        float sumi = 0.0f;
+        float summs = 0.0f;
+
+        for (int j = 0; j < QK_K / 32; j++) {
+            const block_q8_1* yb = &y[i * 8 + j];
+            float yd = emb_fp16_to_fp32((uint16_t)yb->d);
+
+            uint8_t sc, m;
+            get_scale_min_k4(j, xb->scales, &sc, &m);
+
+            summs += emb_fp16_to_fp32((uint16_t)yb->s) * (float)m;
+
+            /* Q4_K byte offset: groups 0,1 use bytes 0-31, groups 2,3 use 32-63, etc */
+            const uint8_t* qs = xb->qs + (j / 2) * 32;
+            int use_high = j & 1;
+
+            int32_t group_sum = 0;
+            for (int k = 0; k < 32; k++) {
+                int x_val = use_high ? (qs[k] >> 4) : (qs[k] & 0xF);
+                group_sum += x_val * yb->qs[k];
+            }
+
+            sumi += (float)sc * yd * (float)group_sum;
+        }
+
+        sumf += xd * sumi - xdmin * summs;
+    }
+
+    return sumf;
+}
+
+#if defined(__aarch64__)
+/* ARM NEON Q4_K x Q8_1 (moved from streaming_inference.c).
+ * Bit-exact vs vec_dot_q4_k_q8_1_scalar: group sums are exact int32 and the
+ * per-group float scaling is the identical expression in the same order. */
+float vec_dot_q4_k_q8_1_neon(const block_q4_K* x, const block_q8_1* y, int nb) {
     float sumf = 0.0f;
 
     for (int i = 0; i < nb; i++) {
@@ -189,46 +244,6 @@ float vec_dot_q4_k_q8_1_scalar(const block_q4_K* x, const block_q8_1* y, int nb)
             sum32 = vpadalq_s16(sum32, prod1_hi);
 
             int32_t group_sum = vaddvq_s32(sum32);
-
-            sumi += (float)sc * yd * (float)group_sum;
-        }
-
-        sumf += xd * sumi - xdmin * summs;
-    }
-
-    return sumf;
-}
-#else
-/* Scalar fallback for Q4_K x Q8_1 (moved from streaming_inference.c) */
-float vec_dot_q4_k_q8_1_scalar(const block_q4_K* x, const block_q8_1* y, int nb) {
-    float sumf = 0.0f;
-
-    for (int i = 0; i < nb; i++) {
-        const block_q4_K* xb = &x[i];
-        float xd = emb_fp16_to_fp32(xb->d);
-        float xdmin = emb_fp16_to_fp32(xb->dmin);
-
-        float sumi = 0.0f;
-        float summs = 0.0f;
-
-        for (int j = 0; j < QK_K / 32; j++) {
-            const block_q8_1* yb = &y[i * 8 + j];
-            float yd = emb_fp16_to_fp32((uint16_t)yb->d);
-
-            uint8_t sc, m;
-            get_scale_min_k4(j, xb->scales, &sc, &m);
-
-            summs += emb_fp16_to_fp32((uint16_t)yb->s) * (float)m;
-
-            /* Q4_K byte offset: groups 0,1 use bytes 0-31, groups 2,3 use 32-63, etc */
-            const uint8_t* qs = xb->qs + (j / 2) * 32;
-            int use_high = j & 1;
-
-            int32_t group_sum = 0;
-            for (int k = 0; k < 32; k++) {
-                int x_val = use_high ? (qs[k] >> 4) : (qs[k] & 0xF);
-                group_sum += x_val * yb->qs[k];
-            }
 
             sumi += (float)sc * yd * (float)group_sum;
         }

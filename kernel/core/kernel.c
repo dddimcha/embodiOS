@@ -30,7 +30,7 @@
 /* Kernel version info */
 /* Single source of truth for the kernel version. create_iso.sh
    extracts this via grep to keep the ISO manifest in sync. */
-const char* kernel_version = "v0.7.0";
+const char* kernel_version = "v0.8.0";
 const char* kernel_build = __DATE__ " " __TIME__;
 
 /* External symbols from linker script */
@@ -463,8 +463,13 @@ void kernel_main(void)
     console_printf("[DEBUG] Calling constructors from %p to %p\n",
                    __init_array_start, __init_array_end);
     for (void (**ctor)(void) = __init_array_start; ctor < __init_array_end; ctor++) {
-        /* Skip obviously invalid pointers (NULL or > 16MB kernel space) */
-        if (*ctor == NULL || (uintptr_t)*ctor > 0x2000000 || (uintptr_t)*ctor < 0x100000) {
+        /* Skip obviously invalid pointers: valid constructors live in the
+         * kernel image's text (between _kernel_start and _kernel_end).
+         * (The old hardcoded 0x100000..0x2000000 x86 range wrongly
+         * rejected every constructor on aarch64, base 0x40000000.) */
+        if (*ctor == NULL ||
+            (uintptr_t)*ctor < (uintptr_t)_kernel_start ||
+            (uintptr_t)*ctor >= (uintptr_t)_kernel_end) {
             console_printf("[DEBUG] Skipping invalid constructor at %p\n", *ctor);
             continue;
         }
@@ -519,6 +524,16 @@ void kernel_main(void)
             console_printf("Interrupts: DISABLED (cmdline 'poll' -> legacy polling mode)\n");
         }
     }
+#elif defined(__aarch64__)
+    {
+        extern void hal_timer_enable(void);
+        hal_timer_enable();        /* program CNTP_TVAL_EL1/CNTP_CTL_EL1 */
+        scheduler_register_timer();/* scheduler_tick on every timer IRQ */
+        arch_enable_interrupts();  /* DAIF.I clear; GIC unmasked in arch_interrupt_init */
+        interrupts_enabled = true;
+        console_printf("Interrupts: ENABLED (generic timer PPI 30 @ %u Hz, preemptive scheduling)\n",
+                       (unsigned)hal_timer_get_frequency());
+    }
 #endif
 
     /* Main kernel loop */
@@ -551,7 +566,11 @@ void kernel_loop(void)
              * fallback mode hlt would never wake. */
             if (interrupts_enabled) {
                 idle_hlt_count++;
+#if defined(__x86_64__)
                 __asm__ volatile("hlt");
+#else
+                __asm__ volatile("wfi");
+#endif
             }
             continue;
         }

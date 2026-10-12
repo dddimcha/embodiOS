@@ -85,15 +85,15 @@ void arch_interrupt_init(void)
 {
     /*
      * ARM64 GIC (Generic Interrupt Controller) initialization
-     * For QEMU virt machine, GIC-400 is at 0x08000000
-     *
-     * TODO: Full GIC implementation includes:
-     * - GICD (Distributor) configuration
-     * - GICC (CPU Interface) configuration
-     * - Configure timer interrupts
-     * - Set up exception vectors
+     * For QEMU virt machine, GIC-400 is at 0x08000000 (GICD) /
+     * 0x08010000 (GICC). gic_init() installs the exception vector table
+     * (VBAR_EL1) and enables the distributor + CPU interface; individual
+     * IRQ lines (timer PPI 30, UART SPI 33) are unmasked there.
+     * Interrupts stay globally masked (DAIF) until arch_enable_interrupts()
+     * at the end of kernel_main.
      */
-    uart_puts("GIC: Not yet implemented (single-threaded mode)\n");
+    extern void gic_init(void);
+    gic_init();
 }
 /* SMP initialization stub (single-core for now) */
 void arch_smp_init(void)
