@@ -13,7 +13,7 @@ No dependencies.
 ![license](https://img.shields.io/badge/license-Apache--2.0-orange)
 ![platform](https://img.shields.io/badge/platform-x86__64%20%C2%B7%20aarch64-lightgrey)
 
-![embodiOS v0.7.0 demo — bare-metal boot to LLM chat](docs/demo-v0.7.0.gif)
+![embodiOS v0.9.0 "Galvani" — Raspberry Pi 3 (QEMU raspi3b), HDMI framebuffer console: boot to LLM chat](docs/demo-v0.9.0.gif)
 
 ---
 
