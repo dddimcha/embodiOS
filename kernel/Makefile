@@ -4,6 +4,23 @@
 ARCH ?= x86_64
 ARCH_DIR = arch/$(ARCH)
 
+# Board selection (aarch64 only): virt (default) | pi3 | pi4 | pi5
+ifeq ($(ARCH),aarch64)
+BOARD ?= virt
+ifeq ($(BOARD),pi3)
+    BOARD_DEFINE := BOARD_PI3
+else ifeq ($(BOARD),pi4)
+    BOARD_DEFINE := BOARD_PI4
+else ifeq ($(BOARD),pi5)
+    BOARD_DEFINE := BOARD_PI5
+else ifeq ($(BOARD),virt)
+    BOARD_DEFINE := BOARD_VIRT
+else
+    $(error Unknown BOARD '$(BOARD)' - expected virt|pi3|pi4|pi5)
+endif
+$(info aarch64 board: $(BOARD) (-D$(BOARD_DEFINE)))
+endif
+
 # Tools - defaults
 CC ?= gcc
 CXX ?= g++
@@ -153,6 +170,9 @@ endif
 
 ifeq ($(ARCH),aarch64)
     # ARM64-specific flags
+    # board.h lives in arch/aarch64 (not include/arch) — expose it to core/*
+    CFLAGS += -I $(ARCH_DIR)
+    CXXFLAGS += -I $(ARCH_DIR)
     ifneq ($(AARCH64_ELF_GCC),)
         # aarch64-elf cross-compiler flags (produces ELF for bare-metal)
         # -mno-outline-atomics: inline atomic ops instead of calling libgcc helpers
@@ -173,6 +193,18 @@ ifeq ($(ARCH),aarch64)
         CXXFLAGS += -march=armv8-a+simd -mtune=cortex-a57 -mno-outline-atomics
         ASFLAGS = -march=armv8-a
         LDFLAGS = -m aarch64elf
+    endif
+    # Board selection (BOARD ?= virt, see top of file). The define must reach
+    # both C and preprocessed assembly (.S) translation units.
+    CFLAGS += -D$(BOARD_DEFINE)
+    CXXFLAGS += -D$(BOARD_DEFINE)
+    ASFLAGS += -D$(BOARD_DEFINE)
+    # Per-board linker script: Pi boards link at 0x80000 (kernel8.img),
+    # QEMU virt keeps 0x40000000.
+    ifeq ($(BOARD),virt)
+        KERNEL_LD_SCRIPT = $(ARCH_DIR)/kernel.ld
+    else
+        KERNEL_LD_SCRIPT = $(ARCH_DIR)/kernel_pi.ld
     endif
 endif
 
@@ -277,6 +309,19 @@ KERNEL_C_SOURCES += \
     drivers/gpu/virtio_gpu.c \
     drivers/gpu/venus.c
 
+# PI-PERIPH block (WS-B, v0.9.0 "Galvani", branch v090-piperiph):
+# VideoCore mailbox property driver, mailbox framebuffer console (+font),
+# BCM GPIO (pi5 UART0 pin mux).  aarch64-only sources; on virt builds they
+# compile to stubs (BOARD_HAS_MAILBOX=0).  Source-list addition ONLY —
+# BOARD selection machinery belongs to WS-A.
+ifeq ($(ARCH),aarch64)
+KERNEL_C_SOURCES += \
+    drivers/mailbox/bcm_mailbox.c \
+    drivers/video/mailbox_fb.c \
+    drivers/video/font8x16.c \
+    drivers/gpio/bcm_gpio.c
+endif
+
 # Add gcov runtime stubs when coverage is enabled
 ifeq ($(COVERAGE),1)
     KERNEL_C_SOURCES += lib/gcov_stubs.c
@@ -342,6 +387,7 @@ ifeq ($(ARCH),aarch64)
     endif
     ARCH_C_SOURCES = \
         $(ARCH_DIR)/cpu.c \
+        $(ARCH_DIR)/board.c \
         $(ARCH_DIR)/early_init.c \
         $(ARCH_DIR)/hal_timer.c
     ifeq ($(BUILD_OS),Darwin)
@@ -438,14 +484,14 @@ ai/vulkan_test.o: ai/vulkan_test.c ai/vk_shaders.h
 
 ALL_OBJS += $(GPU_OBJS)
 
-embodios.elf: $(ALL_OBJS) $(ARCH_DIR)/kernel.ld
+embodios.elf: $(ALL_OBJS) $(ARCH_DIR)/kernel.ld $(KERNEL_LD_SCRIPT)
 ifeq ($(ARCH),aarch64)
 ifeq ($(BUILD_OS),Darwin)
 	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS)
 else
-	# Bare-metal QEMU virt: always link with the aarch64 linker script
-	# (load base 0x40000000, kernel entry _start from boot.S)
-	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
+	# Bare-metal aarch64: link with the per-board linker script
+	# (virt: base 0x40000000 via kernel.ld; pi*: base 0x80000 via kernel_pi.ld)
+	$(LD) $(LDFLAGS) -T $(KERNEL_LD_SCRIPT) -o $@ $(ALL_OBJS)
 endif
 else
 ifneq (,$(findstring x86_64-elf,$(LD)))
@@ -459,6 +505,27 @@ endif
 
 embodios.bin: embodios.elf
 	$(OBJCOPY) -O binary $< $@
+
+# ----------------------------------------------------------------------------
+# Raspberry Pi packaging (aarch64, BOARD=pi3|pi4|pi5)
+# kernel8.img is the raw binary the Pi firmware loads at 0x80000; the sdcard
+# target stages dist/sdcard/pi<N>/{kernel8.img,config.txt} via
+# ../scripts/make_sdcard.sh.
+# ----------------------------------------------------------------------------
+ifeq ($(ARCH),aarch64)
+ifneq ($(BOARD),virt)
+kernel8.img: embodios.elf
+	$(OBJCOPY) -O binary $< $@
+	@ls -lh $@
+
+all: kernel8.img
+
+sdcard: kernel8.img
+	bash ../scripts/make_sdcard.sh $(BOARD) kernel8.img
+
+.PHONY: sdcard
+endif
+endif
 
 # Sign kernel for UEFI Secure Boot
 sign: embodios.elf
@@ -503,6 +570,7 @@ endif
 # Clean
 clean:
 	rm -f $(ALL_OBJS) embodios.elf embodios.bin embodios.iso embodios.elf.signed
+	rm -f kernel8.img
 	rm -f ai/tinystories_model_flag.o ai/tokenizer_flag.o ai/gguf_model_flag.o ai/gguf_model.o
 
 # Test target - run kernel unit tests in QEMU

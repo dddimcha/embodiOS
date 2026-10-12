@@ -26,11 +26,14 @@
 #if defined(__x86_64__)
 #include "../../include/arch/x86_64/paging.h"
 #endif
+#if defined(__aarch64__)
+#include "board.h"   /* BOARD_HAS_MAILBOX, per-board memory layout */
+#endif
 
 /* Kernel version info */
 /* Single source of truth for the kernel version. create_iso.sh
    extracts this via grep to keep the ISO manifest in sync. */
-const char* kernel_version = "v0.8.0";
+const char* kernel_version = "v0.9.0";
 const char* kernel_build = __DATE__ " " __TIME__;
 
 /* External symbols from linker script */
@@ -351,6 +354,14 @@ void kernel_main(void)
     size_t total_ram = 1UL * 1024 * 1024 * 1024;
     size_t kernel_size = (uintptr_t)mem_start - (uintptr_t)_kernel_start;
     size_t mem_size = total_ram - kernel_size;
+#if defined(__aarch64__) && defined(BOARD_HAS_MAILBOX) && BOARD_HAS_MAILBOX
+    /* Reserve the top 64MB of ARM-visible RAM on Pi boards: the VideoCore
+     * window (mailbox framebuffer, GPU heap) lives there and MUST NOT be
+     * handed out by the PMM (framebuffer corruption). Matches the default
+     * gpu_mem=64 split; firmware allocates FB from the top downwards. */
+    if (mem_size > 64UL * 1024 * 1024)
+        mem_size -= 64UL * 1024 * 1024;
+#endif
     pmm_init(mem_start, mem_size);
 #endif
     vmm_init();

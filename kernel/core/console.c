@@ -71,12 +71,31 @@ static int arch_console_getchar(void) {
 static void arch_console_flush(void) { /* No-op for VGA */ }
 #elif defined(__aarch64__)
 #include <arch/uart.h>
+/* WS-B (pi-periph) hook: mirror console output to the mailbox framebuffer
+ * console on Pi boards.  Serial (PL011) remains the authoritative console;
+ * fbcon_putchar() is a no-op until mailbox_fb_init() succeeds.
+ * TEMPORARY shim include — integrator: replace with real board.h. */
+#include "board.h"
+#if defined(BOARD_HAS_MAILBOX) && BOARD_HAS_MAILBOX
+#include <embodios/mailbox_fb.h>
+#define CONSOLE_HAS_FB_MIRROR 1
+#endif
 extern char uart_getchar(void);
 extern void uart_flush(void);
 static void arch_console_init(void) { uart_init(); }
-static void arch_console_putchar(char c) { uart_putchar(c); }
+static void arch_console_putchar(char c) {
+    uart_putchar(c);
+#if CONSOLE_HAS_FB_MIRROR
+    fbcon_putchar(c);
+#endif
+}
 static void arch_console_write_batch(const char* buf, size_t len) {
-    for (size_t i = 0; i < len; i++) uart_putchar(buf[i]);
+    for (size_t i = 0; i < len; i++) {
+        uart_putchar(buf[i]);
+#if CONSOLE_HAS_FB_MIRROR
+        fbcon_putchar(buf[i]);
+#endif
+    }
 }
 static int arch_console_getchar(void) { return (int)uart_getchar(); }
 static void arch_console_flush(void) { uart_flush(); }

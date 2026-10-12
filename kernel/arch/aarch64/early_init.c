@@ -1,6 +1,7 @@
 /* EMBODIOS ARM64 Early Initialization */
 
 #include "embodios/types.h"
+#include "board.h"
 
 /* External UART functions from uart.c */
 extern void uart_init(void);
@@ -46,6 +47,9 @@ void arch_early_init(void)
     uart_puts("=== EMBODIOS ARM64 ===\n");
     uart_puts("Bare-metal AI Operating System\n");
     uart_puts("\n");
+
+    /* Board identity + key base addresses (board.c) */
+    board_print_info();
 
     /* Print current exception level */
     uart_puts("Exception Level: EL");
