@@ -2,11 +2,14 @@
  * Runtime dispatch for the quantized vec_dot SIMD kernels.
  *
  * simd_kernels_init() runs once at boot (called from kernel_main right after
- * arch_cpu_init()): it verifies AVX2 usability (CPUID.7:EBX.AVX2 *and* OS
- * support via XCR0 XMM+YMM state — CPUID alone is not enough, executing AVX2
- * without XCR0 configured raises #UD) and installs the fastest safe kernel
- * per format. Callers (streaming_inference matmul paths) always go through
- * the function pointers, so the dispatch is transparent.
+ * arch_cpu_init()): on x86_64 it verifies AVX2 usability (CPUID.7:EBX.AVX2
+ * *and* OS support via XCR0 XMM+YMM state — CPUID alone is not enough,
+ * executing AVX2 without XCR0 configured raises #UD) and installs the fastest
+ * safe kernel per format. On aarch64 NEON/AdvSIMD is architecturally
+ * guaranteed (ARMv8-A baseline, kernel built with -march=armv8-a+simd), so
+ * the NEON kernels are installed unconditionally. Callers
+ * (streaming_inference matmul paths) always go through the function pointers,
+ * so the dispatch is transparent.
  *
  * Fallback ladder per format:
  *   Q8_0: AVX2 -> SSE2 (x86_64) / NEON (aarch64) / scalar
@@ -26,6 +29,7 @@ vec_dot_q5_0_fn g_vec_dot_q5_0_q8_1 = vec_dot_q5_0_q8_1_scalar;
 vec_dot_q6_k_fn g_vec_dot_q6_k_q8_1 = vec_dot_q6_k_q8_1_scalar;
 
 static int g_avx2_active = 0;
+static int g_neon_active = 0;
 static const char* g_backend = "scalar";
 static int g_initialized = 0;
 
@@ -54,12 +58,24 @@ void simd_kernels_init(void)
         g_backend = "AVX2";
     }
 #elif defined(__aarch64__)
-    /* NEON entry points are the *_scalar symbols on aarch64 */
+    /* Route Q4_K and Q8_0 to the real NEON kernels (v0.8.0 WS-2 — previously
+     * the "NEON" label aliased the *_scalar symbols). NEON is baseline on
+     * ARMv8-A; if a kernel pointer is ever NULL the scalar reference stays
+     * installed for that format (indirection through locals also keeps the
+     * check free of -Waddress noise). */
+    const vec_dot_q8_0_fn neon_q8_0 = vec_dot_q8_0_q8_1_neon;
+    const vec_dot_q4_k_fn neon_q4_k = vec_dot_q4_k_q8_1_neon;
+    if (neon_q8_0) g_vec_dot_q8_0_q8_1 = neon_q8_0;
+    if (neon_q4_k) g_vec_dot_q4_k_q8_1 = neon_q4_k;
+    g_neon_active = (g_vec_dot_q8_0_q8_1 == neon_q8_0) &&
+                    (g_vec_dot_q4_k_q8_1 == neon_q4_k);
     g_backend = "NEON";
 #endif
 
     if (g_avx2_active) {
         console_printf("SIMD: AVX2 enabled (Q4_K/Q5_0/Q6_K/Q8_0 fused vec_dot)\n");
+    } else if (g_neon_active) {
+        console_printf("SIMD: NEON enabled (Q4_K/Q8_0 fused vec_dot)\n");
     } else {
         console_printf("SIMD: scalar fallback (AVX2 not available, backend=%s)\n",
                        g_backend);

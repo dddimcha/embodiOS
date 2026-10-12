@@ -118,13 +118,24 @@ static inline uint16_t emb_fp32_to_fp16(float f) {
 
 /* ---------------------------------------------------------------------------
  * Scalar reference kernels (simd_kernels_scalar.c).
- * On aarch64 the q4_k/q8_0 "scalar" entry points are NEON implementations
- * (same numerics class as before the refactor).
+ * True scalar C on every architecture — these are the dispatch fallback AND
+ * the parity-test reference (core/cmd_simdtest.c).
  * ------------------------------------------------------------------------- */
 float vec_dot_q8_0_q8_1_scalar(const block_q8_0* x, const block_q8_1* y, int nb);
 float vec_dot_q4_k_q8_1_scalar(const block_q4_K* x, const block_q8_1* y, int nb);
 float vec_dot_q5_0_q8_1_scalar(const block_q5_0* x, const block_q8_1* y, int nb);
 float vec_dot_q6_k_q8_1_scalar(const block_q6_K* x, const block_q8_1* y, int nb);
+
+/* ---------------------------------------------------------------------------
+ * ARM NEON kernels (aarch64 only, simd_kernels_scalar.c).
+ * Bit-exact vs the scalar references above (exact int accumulation + the
+ * identical per-block float scaling expression in the same order).
+ * Selected by simd_kernels_init() on __aarch64__.
+ * ------------------------------------------------------------------------- */
+#if defined(__aarch64__) || defined(SIMD_KERNELS_HOST_TEST)
+float vec_dot_q8_0_q8_1_neon(const block_q8_0* x, const block_q8_1* y, int nb);
+float vec_dot_q4_k_q8_1_neon(const block_q4_K* x, const block_q8_1* y, int nb);
+#endif
 
 /* x86_64 SSE2 baseline for Q8_0 (was the fastest shipping path on master) */
 #if defined(__x86_64__) || defined(_M_X64)
@@ -163,6 +174,22 @@ int simd_avx2_active(void);
 
 /* Name of the active backend for logging: "AVX2", "SSE2", "NEON", "scalar" */
 const char* simd_backend_name(void);
+
+/* ---------------------------------------------------------------------------
+ * Shell self-test (kernel/core/cmd_simdtest.c, v0.8.0 WS-2)
+ *
+ * "simdtest" runs a deterministic LCG-generated set of Q8_0/Q4_K vec_dot
+ * workloads through the scalar reference and the dispatched SIMD backend,
+ * FNV-1a-64-hashes both outputs (must be bit-identical) and prints
+ * PASS/FAIL + cycle counts (cpu_get_timestamp: cntvct_el0 on aarch64).
+ *
+ * Registration in core/stubs.c is done by the integrator (one line):
+ *   } else if (strncmp(command, "simdtest", 8) == 0 &&
+ *              (command[8] == '\0' || command[8] == ' ')) {
+ *       cmd_simdtest_dispatch(command + 8);  (* core/cmd_simdtest.c *)
+ *   }
+ * ------------------------------------------------------------------------- */
+void cmd_simdtest_dispatch(const char* args);
 
 #ifdef __cplusplus
 }

@@ -56,11 +56,17 @@ void q4_k_matvec_neon(const void* weight_data, const fixed_t* input,
             const struct block_q4_k* block = &row_blocks[block_idx];
             size_t input_offset = block_idx * QK_K;
 
-            /* Extract scale */
-            fixed_t d = ((int32_t)block->d) << (FIXED_SHIFT - 8);
+            /* Extract scale (raw 16 stored bits, same convention as the
+             * x86_64/generic variants — NOT an fp16 numeric conversion) */
+            uint16_t dbits;
+            __builtin_memcpy(&dbits, &block->d, sizeof(dbits));
+            fixed_t d = ((int32_t)dbits) << (FIXED_SHIFT - 8);
 
-            /* Process 8 values at a time with NEON */
-            for (size_t i = 0; i < QK_K && (input_offset + i) < cols; i += 8) {
+            /* Process 8 values at a time with NEON (full chunks only —
+             * the old guard `(input_offset + i) < cols` read past the row
+             * end when cols % 8 != 0) */
+            size_t i = 0;
+            for (; i + 8 <= QK_K && (input_offset + i + 8) <= cols; i += 8) {
                 /* Load 8 input values */
                 int32x4_t vinput_low = vld1q_s32(&input[input_offset + i]);
                 int32x4_t vinput_high = vld1q_s32(&input[input_offset + i + 4]);
@@ -101,6 +107,13 @@ void q4_k_matvec_neon(const void* weight_data, const fixed_t* input,
                 sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
             }
 
+            /* Scalar tail when cols is not a multiple of 8 */
+            for (; i < QK_K && (input_offset + i) < cols; i++) {
+                uint8_t packed = block->qs[i/2];
+                int8_t q = (i % 2 == 0) ? (packed & 0x0F) : (packed >> 4);
+                sum += (int64_t)q * (int64_t)input[input_offset + i];
+            }
+
             /* Apply block scale */
             sum = (sum * d) >> FIXED_SHIFT;
         }
@@ -123,11 +136,15 @@ void q5_k_matvec_neon(const void* weight_data, const fixed_t* input,
             const struct block_q5_k* block = &row_blocks[block_idx];
             size_t input_offset = block_idx * QK_K;
 
-            /* Extract scale - simplified version without decode_k_scales */
-            fixed_t d = ((int32_t)block->d) << (FIXED_SHIFT - 8);
+            /* Extract scale - simplified version without decode_k_scales
+             * (raw 16 stored bits, same convention as x86_64/generic) */
+            uint16_t dbits;
+            __builtin_memcpy(&dbits, &block->d, sizeof(dbits));
+            fixed_t d = ((int32_t)dbits) << (FIXED_SHIFT - 8);
 
-            /* Process 8 values at a time with NEON */
-            for (size_t i = 0; i < QK_K && (input_offset + i) < cols; i += 8) {
+            /* Process 8 values at a time with NEON (full chunks only) */
+            size_t i = 0;
+            for (; i + 8 <= QK_K && (input_offset + i + 8) <= cols; i += 8) {
                 /* Load 8 input values */
                 int32x4_t vinput_low = vld1q_s32(&input[input_offset + i]);
                 int32x4_t vinput_high = vld1q_s32(&input[input_offset + i + 4]);
@@ -170,6 +187,18 @@ void q5_k_matvec_neon(const void* weight_data, const fixed_t* input,
                 sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
             }
 
+            /* Scalar tail when cols is not a multiple of 8 */
+            for (; i < QK_K && (input_offset + i) < cols; i++) {
+                int byte_idx = (int)i / 2;
+                int nibble_shift = ((int)i % 2) * 4;
+                uint8_t q_low = (block->qs[byte_idx] >> nibble_shift) & 0x0F;
+                int qh_byte = (int)i / 8;
+                int qh_bit = (int)i % 8;
+                uint8_t q_high = (block->qh[qh_byte] >> qh_bit) & 0x01;
+                int8_t q = (int8_t)(q_low | (q_high << 4));
+                sum += (int64_t)q * (int64_t)input[input_offset + i];
+            }
+
             /* Apply block scale */
             sum = (sum * d) >> FIXED_SHIFT;
         }
@@ -192,8 +221,11 @@ void q6_k_matvec_neon(const void* weight_data, const fixed_t* input,
             const struct block_q6_k* block = &row_blocks[block_idx];
             size_t input_offset = block_idx * QK_K;
 
-            /* Extract global scale */
-            fixed_t d = ((int32_t)block->d) << (FIXED_SHIFT - 8);
+            /* Extract global scale (raw 16 stored bits, same convention as
+             * x86_64/generic) */
+            uint16_t dbits;
+            __builtin_memcpy(&dbits, &block->d, sizeof(dbits));
+            fixed_t d = ((int32_t)dbits) << (FIXED_SHIFT - 8);
 
             /* Q6_K has 16 groups of 16 values, each with its own 8-bit scale */
             for (int group = 0; group < 16; group++) {
@@ -201,8 +233,9 @@ void q6_k_matvec_neon(const void* weight_data, const fixed_t* input,
                 int8_t scale = block->scales[group];
                 fixed_t sc = (d * (int32_t)scale) >> 7;
 
-                /* Process 8 values at a time with NEON */
-                for (int j = 0; j < 16 && (input_offset + group * 16 + j) < cols; j += 8) {
+                /* Process 8 values at a time with NEON (full chunks only) */
+                int j = 0;
+                for (; j + 8 <= 16 && (input_offset + group * 16 + j + 8) <= cols; j += 8) {
                     size_t base_idx = group * 16 + j;
 
                     /* Load 8 input values */
@@ -248,6 +281,19 @@ void q6_k_matvec_neon(const void* weight_data, const fixed_t* input,
                     sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
                 }
 
+                /* Scalar tail when cols is not a multiple of 8 */
+                for (; j < 16 && (input_offset + group * 16 + j) < cols; j++) {
+                    int idx = group * 16 + j;
+                    int ql_byte = idx / 2;
+                    int ql_shift = (idx % 2) * 4;
+                    uint8_t q_low = (block->ql[ql_byte] >> ql_shift) & 0x0F;
+                    int qh_byte = idx / 4;
+                    int qh_shift = (idx % 4) * 2;
+                    uint8_t q_high = (block->qh[qh_byte] >> qh_shift) & 0x03;
+                    int8_t q = (int8_t)((q_low | (q_high << 4)) - 32);
+                    sum += (int64_t)q * (int64_t)input[input_offset + idx];
+                }
+
                 /* Apply group scale */
                 sum = (sum * sc) >> 5;
             }
@@ -276,15 +322,16 @@ void q8_0_matvec_neon(const void* weight_data, const fixed_t* input,
 
             int64_t block_sum = 0;
 
-            /* Process 8 values at a time with NEON */
-            for (size_t i = 0; i < QK8_0 && (input_offset + i) < cols; i += 8) {
+            /* Process 8 values at a time with NEON (full chunks only) */
+            size_t i = 0;
+            for (; i + 8 <= QK8_0 && (input_offset + i + 8) <= cols; i += 8) {
                 /* Load 8 input values (32-bit each) */
                 int32x4_t vinput_low = vld1q_s32(&input[input_offset + i]);
                 int32x4_t vinput_high = vld1q_s32(&input[input_offset + i + 4]);
 
                 /* Load 8 quantized values (8-bit each) and convert to 32-bit */
                 int8_t q_vals[8];
-                for (int j = 0; j < 8 && (i + j) < QK8_0; j++) {
+                for (int j = 0; j < 8; j++) {
                     q_vals[j] = block->qs[i + j];
                 }
 
@@ -307,8 +354,16 @@ void q8_0_matvec_neon(const void* weight_data, const fixed_t* input,
                 block_sum += vgetq_lane_s64(prod_high, 0) + vgetq_lane_s64(prod_high, 1);
             }
 
-            /* Apply block scale: (block_sum * d) >> 7 to match scalar dequantization */
-            sum += (block_sum * d) >> 7;
+            /* Scalar tail when cols is not a multiple of 8 */
+            for (; i < QK8_0 && (input_offset + i) < cols; i++) {
+                block_sum += (int64_t)block->qs[i] * (int64_t)input[input_offset + i];
+            }
+
+            /* Apply block scale: d is Q16.16 (block->d Q8.8 << 8) and
+             * block_sum carries the Q16.16 input scale, so the product is
+             * Q32.32 and must be shifted by FIXED_SHIFT — same convention as
+             * the Q4_K kernel above (the old >> 7 was inconsistent). */
+            sum += (block_sum * d) >> FIXED_SHIFT;
         }
 
         output[row] = (fixed_t)(sum >> FIXED_SHIFT);

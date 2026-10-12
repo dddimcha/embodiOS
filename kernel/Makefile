@@ -168,8 +168,9 @@ ifeq ($(ARCH),aarch64)
         LDFLAGS = -arch arm64 -static -e _start
     else
         # Linux ARM64 cross-compile flags with SIMD support
-        CFLAGS += -march=armv8-a+simd -mtune=cortex-a57
-        CXXFLAGS += -march=armv8-a+simd -mtune=cortex-a57
+        # -mno-outline-atomics: inline atomic ops instead of calling libgcc helpers
+        CFLAGS += -march=armv8-a+simd -mtune=cortex-a57 -mno-outline-atomics
+        CXXFLAGS += -march=armv8-a+simd -mtune=cortex-a57 -mno-outline-atomics
         ASFLAGS = -march=armv8-a
         LDFLAGS = -m aarch64elf
     endif
@@ -196,6 +197,7 @@ KERNEL_C_SOURCES = \
     core/cmd_storage.c \
     core/cmd_smp.c \
     core/cmd_parbench.c \
+    core/cmd_simdtest.c \
     core/cmd_power.c \
     core/rt_timer.c \
     core/cmd_motor.c \
@@ -333,14 +335,20 @@ endif
 ifeq ($(ARCH),aarch64)
     ifeq ($(BUILD_OS),Darwin)
         # Use assembly UART for HVF compatibility (avoids post-indexed stores)
-        ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S $(ARCH_DIR)/mmu.S $(ARCH_DIR)/uart_asm.S
+        ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S $(ARCH_DIR)/mmu.S $(ARCH_DIR)/uart_asm.S $(ARCH_DIR)/vectors.S
     else
-        ARCH_AS_SOURCES = $(ARCH_DIR)/boot_linux.S $(ARCH_DIR)/mmu.S $(ARCH_DIR)/uart_asm.S
+        # Bare-metal QEMU virt boot (boot_linux.S is for Linux-hosted testing only)
+        ARCH_AS_SOURCES = $(ARCH_DIR)/boot.S $(ARCH_DIR)/mmu.S $(ARCH_DIR)/vectors.S
     endif
     ARCH_C_SOURCES = \
         $(ARCH_DIR)/cpu.c \
         $(ARCH_DIR)/early_init.c \
         $(ARCH_DIR)/hal_timer.c
+    ifeq ($(BUILD_OS),Darwin)
+        ARCH_C_SOURCES += $(ARCH_DIR)/gic.c
+    else
+        ARCH_C_SOURCES += $(ARCH_DIR)/uart.c $(ARCH_DIR)/gic.c
+    endif
 endif
 
 # Object files
@@ -432,10 +440,12 @@ ALL_OBJS += $(GPU_OBJS)
 
 embodios.elf: $(ALL_OBJS) $(ARCH_DIR)/kernel.ld
 ifeq ($(ARCH),aarch64)
-ifneq ($(AARCH64_ELF_GCC),)
-	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
-else
+ifeq ($(BUILD_OS),Darwin)
 	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS)
+else
+	# Bare-metal QEMU virt: always link with the aarch64 linker script
+	# (load base 0x40000000, kernel entry _start from boot.S)
+	$(LD) $(LDFLAGS) -T $(ARCH_DIR)/kernel.ld -o $@ $(ALL_OBJS)
 endif
 else
 ifneq (,$(findstring x86_64-elf,$(LD)))

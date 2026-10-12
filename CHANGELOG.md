@@ -5,6 +5,65 @@ All notable changes to EMBODIOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-12 — codename Faraday
+
+The first EMBODIOS release that boots on ARM64: the same `embodios.elf`
+story — one binary, no OS — now runs on `qemu-system-aarch64 -M virt`,
+from reset vector to a preemptive LLM chat shell, with real NEON kernels
+in the inference hot path. x86_64 is unchanged and fully regression-gated.
+
+### Added
+- **aarch64 boot path** (`arch/aarch64/boot.S`, `uart.c`): EL1 entry on
+  QEMU `-M virt`, UART console on PL011 (`0x09000000`) with polling input.
+  Cross-compile with `aarch64-linux-gnu-`; the Makefile picks `boot.S` +
+  `uart.c` automatically for non-Darwin `ARCH=aarch64`.
+- **Exception & interrupt architecture** (`arch/aarch64/vectors.S`,
+  `gic.c`): 16-entry exception vector table installed via `VBAR_EL1`;
+  GICv2 driver (GICD `0x08000000` / GICC `0x08010000`) routing the ARM
+  Generic Timer PPI (INTID 30) and UART IRQ (INTID 33).
+- **ARM Generic Timer @100 Hz** (`CNTP_TVAL_EL0` / `CNTP_CTL_EL0`):
+  `rt_timer` periodic callbacks run in IRQ context, same contract as the
+  LAPIC path on x86_64.
+- **Preemptive scheduler + context switch on aarch64**
+  (`arch/aarch64/switch.S`): full port of the priority preemptive
+  scheduler; callee-saved frame x19–x30 switched per task. `tasktest`
+  PASS with 21 real context switches.
+- **PSCI poweroff/reset** (`hvc #0`, SYSTEM_OFF/SYSTEM_RESET): `shutdown`
+  on aarch64 exits QEMU cleanly with rc=0.
+- **NEON dispatch for quantized inference** (`ai/simd_neon.c`):
+  Q4_K/Q8_0 fused `vec_dot` now dispatch to real NEON kernels on aarch64
+  (previously scalar aliases). Three NEON kernel bugs fixed along the
+  way: fp16 bit-reinterpretation, tail guard when `cols % 8 != 0`, and
+  the FIXED_SHIFT scaling constant.
+- **New shell command `simdtest`**: scalar vs SIMD bit-parity check
+  (FNV-1a-64 over outputs) plus per-pass tick counts — the in-guest
+  proof that SIMD and scalar are bit-identical and how much faster SIMD
+  actually is.
+- **motor RT demo on aarch64**: the 100 Hz PID closed loop with jitter
+  accounting and the LLM policy hook runs unmodified on ARM64.
+
+### Verified (aarch64, QEMU TCG `-M virt -cpu cortex-a53`)
+- Boot + shell gate **PASS** — banner, prompt, `help`/`status`
+  functional (log: `v080_a64_gate.log`).
+- Chat gate **PASS** — "The capital of France is Paris.", 8 tokens at
+  **19.95 tok/s** under TCG.
+- `simdtest` **PASS** — scalar and NEON bit-identical:
+  Q8_0 `0xF648E55E42C8B617`, Q4_K `0x87DFC84480B155A5`; Q4_K NEON
+  **1.49x** faster than scalar (5827 vs 8704 ticks/pass).
+- motor + LLM gate **PASS** — 198 control ticks @100 Hz, jitter mean
+  132 µs / p99 2607 µs, LLM policy hook ON (`v080_a64_motorllm.log`).
+- Shutdown gate **PASS** — PSCI SYSTEM_OFF, QEMU exits rc=0.
+
+### Verified (x86_64 regression)
+- `make test` 6/6 PASS · boot smoke "Paris", 8 tokens · two-node exo
+  ring PASS (15+15 layers, 8 tokens / 21 lockstep positions, 0
+  transport errors).
+
+### Out of scope on aarch64 (graceful degradation)
+- exo distributed inference, the network stack, and SMP are x86_64-only
+  in this release; the corresponding commands degrade gracefully on
+  aarch64 instead of panicking.
+
 ## [0.7.1] - 2026-09-24 — patch
 
 Fixes the one known issue shipped with v0.7.0: a peer restarted after a

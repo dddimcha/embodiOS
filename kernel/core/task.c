@@ -31,9 +31,86 @@
 /* Default priority for the boot/main context and demo tasks */
 #define BOOT_TASK_PRIORITY 16
 
-/* Low-level context switch (arch/x86_64/interrupt.S) */
+/* Low-level context switch (arch/x86_64/interrupt.S, or the inline aarch64
+ * port below) */
 extern void context_switch(void **prev_sp, void *next_sp);
 extern void task_entry_trampoline(void);
+
+#if defined(__aarch64__)
+
+/* aarch64 context switch: callee-saved frame is x19..x30 (incl. fp/lr).
+ * x30 (lr) doubles as the "program counter": ret jumps back into the
+ * suspended context. DAIF is saved/restored so each task keeps its own
+ * IRQ-mask state (mirrors the rflags slot in the x86_64 frame).
+ *
+ * Frame layout (top to bottom, as pushed):
+ *   [sp+ 0] x19  [sp+ 8] x20
+ *   [sp+16] x21  [sp+24] x22
+ *   [sp+32] x23  [sp+40] x24
+ *   [sp+48] x25  [sp+56] x26
+ *   [sp+64] x27  [sp+72] x28
+ *   [sp+80] x29  [sp+88] x30
+ *   [sp+96] DAIF
+ * New tasks get a frame whose x30 slot = task_entry_trampoline and whose
+ * x19 slot = entry point; the trampoline calls the entry via x19 and then
+ * terminates the task with task_exit(). */
+__asm__(
+".text\n"
+".global context_switch\n"
+".type context_switch, %function\n"
+"context_switch:\n"
+"    mrs  x9, daif\n"
+"    sub  sp, sp, #112\n"
+"    stp  x19, x20, [sp, #0]\n"
+"    stp  x21, x22, [sp, #16]\n"
+"    stp  x23, x24, [sp, #32]\n"
+"    stp  x25, x26, [sp, #48]\n"
+"    stp  x27, x28, [sp, #64]\n"
+"    stp  x29, x30, [sp, #80]\n"
+"    str  x9, [sp, #96]\n"
+"    mov  x10, sp\n"
+"    cbz  x0, 1f\n"
+"    str  x10, [x0]\n"            /* save prev sp */
+"1:\n"
+"    mov  sp, x1\n"                /* load next sp */
+"    ldp  x19, x20, [sp, #0]\n"
+"    ldp  x21, x22, [sp, #16]\n"
+"    ldp  x23, x24, [sp, #32]\n"
+"    ldp  x25, x26, [sp, #48]\n"
+"    ldp  x27, x28, [sp, #64]\n"
+"    ldp  x29, x30, [sp, #80]\n"
+"    ldr  x9, [sp, #96]\n"
+"    add  sp, sp, #112\n"
+"    msr  daif, x9\n"
+"    ret\n"
+".size context_switch, .-context_switch\n"
+".global task_entry_trampoline\n"
+".type task_entry_trampoline, %function\n"
+"task_entry_trampoline:\n"
+"    blr  x19\n"                   /* entry point stashed in x19 slot */
+"    bl   task_exit\n"
+"2:  wfi\n"
+"    b    2b\n"
+".size task_entry_trampoline, .-task_entry_trampoline\n"
+);
+
+/* Interrupt-safe critical section helpers: schedule/queue manipulation can
+ * run both from timer IRQ context and from task context, so guard against a
+ * timer tick hitting mid-queue-update. DAIF save/restore keeps the IRQ mask
+ * as it was on entry. */
+static inline uint64_t irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile("mrs %0, daif; msr daifset, #2" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+static inline void irq_restore(uint64_t flags)
+{
+    __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
+}
+
+#else /* x86_64 */
 
 /* Interrupt-safe critical section helpers: schedule/queue manipulation can
  * run both from IRQ0 context and from task context, so guard against a
@@ -50,6 +127,8 @@ static inline void irq_restore(uint64_t flags)
 {
     __asm__ volatile("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
 }
+
+#endif
 
 /* ============================================================================
  * Task State Machine
@@ -339,6 +418,31 @@ task_t* task_create(const char *name, void (*entry)(void), uint8_t priority)
         return NULL;
     }
 
+#if defined(__aarch64__)
+    /* Set up initial stack: a context_switch frame (x19..x30 + DAIF) whose
+     * x30 (lr) slot is task_entry_trampoline and whose x19 slot carries the
+     * entry point. DAIF starts with IRQs unmasked so fresh tasks run
+     * interruptible even when first scheduled from IRQ context. */
+    {
+        uintptr_t top = ((uintptr_t)task->stack_base + TASK_STACK_SIZE) & ~(uintptr_t)0xF;
+        uint64_t *sp = (uint64_t*)top;
+        *--sp = 0;                               /* pad (frame is 112 bytes) */
+        *--sp = 0;                               /* DAIF: IRQ unmasked */
+        *--sp = (uint64_t)task_entry_trampoline; /* x30: ret target of context_switch */
+        *--sp = 0;                               /* x29 */
+        *--sp = 0;                               /* x28 */
+        *--sp = 0;                               /* x27 */
+        *--sp = 0;                               /* x26 */
+        *--sp = 0;                               /* x25 */
+        *--sp = 0;                               /* x24 */
+        *--sp = 0;                               /* x23 */
+        *--sp = 0;                               /* x22 */
+        *--sp = 0;                               /* x21 */
+        *--sp = (uint64_t)entry;                 /* x20 (unused pairing slot) */
+        *--sp = (uint64_t)entry;                 /* x19 -> entry (trampoline) */
+        task->stack_pointer = sp;
+    }
+#else
     /* Set up initial stack: a context_switch frame whose return address is
      * task_entry_trampoline and whose rbx slot carries the entry point.
      * rflags starts with IF=1 so fresh tasks run interruptible even when
@@ -356,6 +460,7 @@ task_t* task_create(const char *name, void (*entry)(void), uint8_t priority)
         *--sp = 0x202;                           /* rflags: IF=1 */
         task->stack_pointer = sp;
     }
+#endif
 
     uint64_t flags = irq_save();
 
@@ -1268,7 +1373,11 @@ void scheduler_tasktest(void)
     while (tasktest_done < 2) {
         schedule();
         if (irq_on) {
+#if defined(__x86_64__)
             __asm__ volatile("hlt");
+#else
+            __asm__ volatile("wfi");
+#endif
         }
     }
 

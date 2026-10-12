@@ -31,34 +31,29 @@ static uint64_t arm_timer_get_counter_freq(void)
     return freq;
 }
 
-/* Read ARM Generic Timer counter value */
+/* Read ARM Generic Timer counter value (physical counter, matches CNTP) */
 static uint64_t arm_timer_get_counter(void)
 {
     uint64_t val;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(val));
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(val));
     return val;
 }
 
-/* Configure ARM Generic Timer */
+/* Configure ARM Generic Timer (EL1 physical timer, CNTP -> GIC PPI INTID 30) */
 static void arm_timer_configure_hw(uint64_t interval_ticks)
 {
-    uint64_t cval;
-
-    /* Calculate compare value */
-    cval = arm_timer_get_counter() + interval_ticks;
-
-    /* Set compare value */
-    __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(cval));
-
-    /* Enable timer: bit 0 = enable, bit 1 = not masked */
-    __asm__ volatile("msr cntv_ctl_el0, %0" :: "r"((uint64_t)1));
+    /* Program relative down-counter, then enable unmasked */
+    __asm__ volatile("msr cntp_tval_el0, %0" :: "r"(interval_ticks));
+    /* CNTP_CTL_EL0: bit 0 = enable, bit 1 = IMASK (0 = not masked) */
+    __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"((uint64_t)1));
+    __asm__ volatile("isb");
 }
 
 /* Disable ARM Generic Timer */
 static void arm_timer_disable_hw(void)
 {
     /* Disable timer: bit 0 = 0 (disabled) */
-    __asm__ volatile("msr cntv_ctl_el0, %0" :: "r"((uint64_t)0));
+    __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"((uint64_t)0));
 }
 
 /* HAL timer initialization */
@@ -231,11 +226,17 @@ void arch_timer_init(void)
     hal_timer_register(&aarch64_timer_ops);
 }
 
-/* Timer interrupt handler (called from timer IRQ) */
+/* Timer interrupt handler (called from GIC IRQ dispatch, INTID 30) */
+extern void rt_timer_poll(uint64_t now_ticks);
+
 void timer_tick(void)
 {
     if (timer_state.enabled) {
         timer_state.ticks++;
+
+        /* rt_timer periodic-callback layer polls at the tick rate
+         * (mirrors the x86_64 PIT-fallback path). */
+        rt_timer_poll(timer_state.ticks);
 
         /* Reconfigure timer for next tick */
         if (timer_state.counter_freq > 0) {
@@ -243,4 +244,63 @@ void timer_tick(void)
             arm_timer_configure_hw(interval);
         }
     }
+}
+
+/* ========================================================================
+ * TSC-compatible high-resolution counter API (embodios/tsc.h)
+ *
+ * arch/x86_64/tsc.c provides these for x86_64; on aarch64 the generic
+ * timer counter (cntpct_el0 @ cntfrq_el0 Hz) plays the same role for
+ * rt_timer jitter accounting, benchmarks and the motor demo.
+ * ======================================================================== */
+
+int tsc_init(void)
+{
+    return 0;
+}
+
+uint64_t tsc_get_frequency(void)
+{
+    if (timer_state.counter_freq == 0) {
+        timer_state.counter_freq = arm_timer_get_counter_freq();
+    }
+    return timer_state.counter_freq;
+}
+
+uint64_t tsc_calibrate(void)
+{
+    return tsc_get_frequency();
+}
+
+uint64_t tsc_to_microseconds(uint64_t cycles)
+{
+    uint64_t freq = tsc_get_frequency();
+    if (freq == 0) {
+        return 0;
+    }
+    return (cycles * 1000000ULL) / freq;
+}
+
+uint64_t tsc_to_nanoseconds(uint64_t cycles)
+{
+    uint64_t freq = tsc_get_frequency();
+    if (freq == 0) {
+        return 0;
+    }
+    return (cycles * 1000000000ULL) / freq;
+}
+
+uint64_t microseconds_to_tsc(uint64_t us)
+{
+    uint64_t freq = tsc_get_frequency();
+    if (freq == 0) {
+        return 0;
+    }
+    return (us * freq) / 1000000ULL;
+}
+
+bool tsc_is_stable(void)
+{
+    /* The ARM generic timer runs at a fixed frequency */
+    return true;
 }

@@ -2,16 +2,16 @@
 
 **One binary. Any machine. No OS.**
 
-`embodios.elf` is a bare-metal x86_64 kernel with a quantized LLM compiled
+`embodios.elf` is a bare-metal x86_64 **and aarch64** kernel with a quantized LLM compiled
 straight into it — one file that *is* the operating system and the model.
 Boot it as a kernel, an ISO, or a USB stick, and you land in a chat session
 with a transformer running on raw hardware. No Linux. No libc. No userspace.
 No dependencies.
 
-![version](https://img.shields.io/badge/version-0.7.0-blue)
+![version](https://img.shields.io/badge/version-0.8.0-blue)
 ![build](https://img.shields.io/badge/build-passing-brightgreen)
 ![license](https://img.shields.io/badge/license-Apache--2.0-orange)
-![platform](https://img.shields.io/badge/platform-x86__64-lightgrey)
+![platform](https://img.shields.io/badge/platform-x86__64%20%C2%B7%20aarch64-lightgrey)
 
 ![embodiOS v0.7.0 demo — bare-metal boot to LLM chat](docs/demo-v0.7.0.gif)
 
@@ -35,6 +35,7 @@ one package install on macOS, Debian/Ubuntu, or Arch.
 | Format | Command | Status |
 |--------|---------|--------|
 | QEMU direct kernel (PVH) | `qemu-system-x86_64 -kernel kernel/embodios.elf -nographic` | ✅ Verified |
+| **QEMU aarch64 (virt)** | `qemu-system-aarch64 -M virt -cpu cortex-a53 -m 2G -nographic -kernel kernel/embodios.elf` | ✅ Verified (v0.8.0) |
 | QEMU via CLI | `./embodi run` | ✅ Verified |
 | Bootable ISO (BIOS, multiboot2) | `./embodi iso && ./embodi run --iso` | ✅ Verified |
 | Bootable ISO (UEFI, OVMF) | `./embodi run --iso --uefi` | ✅ Verified |
@@ -53,7 +54,7 @@ Prebuilt `elf` + `iso` + a QUICKSTART ship in `dist/` via `./embodi release`.
   ██╔══╝  ██║╚██╔╝██║██╔══██╗██║   ██║██║  ██║██║██║   ██║╚════██║
   ███████╗██║ ╚═╝ ██║██████╔╝╚██████╔╝██████╔╝██║╚██████╔╝███████║
   ╚══════╝╚═╝     ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝ ╚═════╝ ╚══════╝
-              One binary. Any machine. No OS.        v0.7.0 Maxwell
+              One binary. Any machine. No OS.        v0.8.0 Faraday
 
   [ OK ] CPU features initialized
   [ OK ] Memory: 2048 MB detected, identity-mapped
@@ -149,6 +150,33 @@ no external tooling) plus a FAT16 ESP image. The loader finds
 info block, calls `ExitBootServices` and jumps to the kernel entry — GRUB
 is no longer in the boot path. Gate: `scripts/test_uefi.sh` 7/7 PASS,
 OVMF chat smoke verified. See [docs/uefi-boot.md](docs/uefi-boot.md).
+
+### aarch64 bring-up (v0.8.0 "Faraday")
+
+The same one-binary story now boots on ARM64 — reset vector to a
+preemptive LLM chat shell on `qemu-system-aarch64 -M virt`:
+
+```bash
+# cross toolchain: aarch64-linux-gnu-gcc + qemu-system-aarch64
+make -C kernel ARCH=aarch64 GGUF_MODEL=/path/to/model.gguf
+qemu-system-aarch64 -M virt -cpu cortex-a53 -m 2G -nographic -kernel kernel/embodios.elf
+```
+
+What's in: PL011 console, 16-entry exception vectors (`VBAR_EL1`), GICv2
+(Generic Timer PPI @100 Hz + UART IRQ), the full preemptive scheduler and
+context switch (x19–x30 frames), PSCI poweroff, **real NEON kernels** for
+Q4_K/Q8_0 fused `vec_dot` (bit-identical to scalar — prove it in-guest
+with the new `simdtest` command), and the 100 Hz `motor` RT demo with the
+LLM policy hook. Chat gate: "Paris", 8 tokens, 19.95 tok/s under TCG.
+Numbers and reproduction: [docs/benchmark-v0.8.0.md](docs/benchmark-v0.8.0.md).
+
+Honest scope note: QEMU emulates only the `virt` machine — **not a
+Raspberry Pi**. BCM2712 drivers (Pi 5 GPIO/I2C/SPI) are already in the
+repo; the hardware phase — RP1 GIC remap, `kernel8.img`, mailbox clocks —
+is the next release. That's the direction that matters here: prosthetic
+devices, where an RT motor loop, an LLM policy, and CAN/EtherCAT (already
+landed) live in one bare-metal binary. exo/net/SMP are x86_64-only for
+now and degrade gracefully on aarch64.
 
 ### Verified models
 
@@ -246,6 +274,7 @@ to shell is under a second either way.
 | `demo` | Guided tour of the kernel + model |
 | `status` / `version` | Model & system status / kernel version |
 | `benchmark` / `perf` | Full inference benchmark / last-run timings |
+| `simdtest` | Scalar vs SIMD bit-parity + timing (NEON on aarch64, SSE/AVX on x86_64) |
 | `validate` | Validate the loaded model (5 checks) |
 | `temp [0..2]` / `topp [0..1]` | Sampling temperature / nucleus threshold |
 | `chatformat` | Chat template: `auto / off / chatml / llama2 / glm` |
@@ -273,14 +302,16 @@ to shell is under a second either way.
 | Network stack | ✅ TCP/IP + virtio-net/e1000e + exo distributed inference + OpenAI API |
 | Persistent storage | ✅ virtio-blk write + `embfs` mini-FS (atomic double-buffered commits, CRC32) + persistent config across reboots |
 | Multi-core (SMP) | ✅ Real AP boot via INIT-SIPI-SIPI trampoline; parallel inference workers run on real cores (`-smp 4` verified, `cpus` shows per-core work) |
+| ARM64 port | ✅ Boots to a preemptive LLM chat shell on qemu-system-aarch64 `-M virt`: GICv2 + exception vectors, Generic Timer @100 Hz, NEON quantized kernels (bit-identical to scalar via `simdtest`), PSCI poweroff (v0.8.0) |
 | Power management | ✅ ACPI S5 shutdown, hardened reboot, `hlt` idle (~99% host CPU saved vs busy-poll) |
 
 ## Roadmap
 
-- [ ] Direct UEFI boot without GRUB (hybrid BIOS+UEFI ISO already ships)
-- [ ] Per-CPU LAPIC timers + IPI wakeups (BSP tick is LAPIC @1 kHz; APs currently poll a mailbox with IF=0)
-- [ ] Q4_K/Q6_K SPIR-V shaders (f32 + Q8_0 ship today, host bit-exact)
-- [ ] Venus/virtio-gpu command transport to activate the GPU backend under QEMU
+- [ ] Raspberry Pi 5 hardware boot — BCM2712 drivers (GPIO/I2C/SPI) already
+      in-tree; needs RP1 GIC remap, `kernel8.img` packaging, mailbox clocks.
+      QEMU `virt` bring-up shipped in v0.8.0; this is the prosthetics direction
+      (RT motor + LLM policy + CAN/EtherCAT on bare metal)
+- [ ] exo distributed inference, TCP/IP, and SMP on aarch64 (x86_64-only in v0.8.0)
 - [ ] More verified models (Qwen2.5, larger GLM variants)
 - [ ] Multi-node exo inference over a real network (two-node ring works
       under QEMU with a documented TCG caveat)

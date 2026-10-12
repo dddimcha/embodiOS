@@ -89,10 +89,53 @@ static uint32_t jitter_buf[JITTER_MAX_SAMPLES];
  * Low-level helpers
  * ============================================================================ */
 
+#if defined(__aarch64__)
+
+/* aarch64: no port I/O. The actuator byte goes to a memory location
+ * (observable from a debugger / future virtio-motor device) and every
+ * 256th byte is traced to the PL011 console so QEMU runs are auditable.
+ * Runs from tick IRQ context: the trace uses raw uart_putchar (polled),
+ * not console_printf, to stay IRQ-safe. */
+extern void uart_putchar(char c);
+
+volatile uint8_t motor_actuator_mmio;
+
+static void motor_actuator_write(uint8_t value)
+{
+    static uint32_t trace_div;
+    motor_actuator_mmio = value;
+    if (++trace_div >= 256) {
+        trace_div = 0;
+        const char *tag = "[MOTOR-ACT] ";
+        while (*tag) uart_putchar(*tag++);
+        uint8_t v = value;
+        uart_putchar((char)('0' + (v / 100) % 10));
+        uart_putchar((char)('0' + (v / 10) % 10));
+        uart_putchar((char)('0' + v % 10));
+        uart_putchar('\n');
+    }
+}
+
+#define outb(port, value) motor_actuator_write((uint8_t)(value))
+
+static inline void cpu_relax_hint(void)
+{
+    __asm__ volatile("yield" ::: "memory");
+}
+
+#else /* x86_64 */
+
 static inline void outb(uint16_t port, uint8_t value)
 {
     __asm__ volatile("outb %0, %1" :: "a"(value), "Nd"(port));
 }
+
+static inline void cpu_relax_hint(void)
+{
+    __asm__ volatile("pause" ::: "memory");
+}
+
+#endif
 
 /* Wall-clock milliseconds (rdtsc-based; hal fallback if TSC uncalibrated) */
 static uint64_t motor_now_ms(void)
@@ -309,9 +352,14 @@ static void motor_run(uint64_t ms, uint32_t hz)
                    motor.plant == PLANT_SERVO ? "rad" : "rad/s",
                    (double)motor.kp, (double)motor.ki, (double)motor.kd);
     if (hz != requested) {
+#if defined(__x86_64__)
         console_printf("MOTOR: note — requested %u Hz clamped to %u Hz (%s tick @ %u Hz)\n",
                        requested, hz,
                        lapic_timer_active() ? "LAPIC" : "PIT fallback", tick_hz);
+#else
+        console_printf("MOTOR: note — requested %u Hz clamped to %u Hz (generic timer tick @ %u Hz)\n",
+                       requested, hz, tick_hz);
+#endif
     }
 
     rt_timer_jitter_arm();
@@ -344,7 +392,7 @@ static void motor_run(uint64_t ms, uint32_t hz)
             motor_llm_policy();
         }
 
-        __asm__ volatile("pause");
+        cpu_relax_hint();
     }
 
     rt_timer_unregister(motor_control_tick);

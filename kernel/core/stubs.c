@@ -8,6 +8,7 @@
 #include "embodios/cmd_smp.h"
 #include "embodios/cmd_power.h"
 #include "embodios/motor.h"
+#include "embodios/simd_kernels.h"
 #include "embodios/streaming_inference.h"
 #include "embodios/console.h"
 #include "embodios/cpu.h"
@@ -2679,6 +2680,10 @@ skip_ethercat:
     } else if (cmd_smp_dispatch(command)) {
         /* SMP commands (cpus/smpwork) — handled in core/cmd_smp.c */
     } else if (cmd_parbench_dispatch(command)) {  /* parbench — core/cmd_parbench.c */
+    } else if (strncmp(command, "simdtest", 8) == 0 &&
+               (command[8] == '\0' || command[8] == ' ')) {
+        /* SIMD scalar-vs-vector bit-parity test — core/cmd_simdtest.c */
+        cmd_simdtest_dispatch(command + 8);
     } else if (strncmp(command, "motor", 5) == 0 &&
                (command[5] == '\0' || command[5] == ' ')) {
         /* RT motor control demo — handled in core/cmd_motor.c */

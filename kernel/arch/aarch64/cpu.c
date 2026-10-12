@@ -165,6 +165,57 @@ uint32_t smp_num_cpus(void)
     return arm64_cpu_info.cores;
 }
 
+/* --- SMP stubs: single-core BSP only on aarch64 in v0.8.0 --- */
+
+uint32_t smp_get_num_online(void)
+{
+    return 1;
+}
+
+int smp_get_cpu_info(uint32_t cpu, struct smp_cpu_info *out)
+{
+    if (cpu != 0 || !out) {
+        return -1;
+    }
+    out->cpu_id = 0;
+    out->apic_id = 0;
+    out->online = 1;
+    out->bsp = 1;
+    out->parked_if1 = 0;
+    out->work_count = 0;
+    out->work_cycles = 0;
+    out->polls = 0;
+    out->ipi_wakeups = 0;
+    out->ap_ticks = 0;
+    return 0;
+}
+
+int smp_cpu_to_apic_id(uint32_t cpu)
+{
+    return cpu == 0 ? 0 : -1;
+}
+
+int smp_work_dispatch(uint32_t cpu, smp_work_fn_t fn, void *arg)
+{
+    (void)cpu; (void)fn; (void)arg;
+    return -1;  /* no APs on aarch64 v0.8.0 */
+}
+
+int smp_work_wait(uint32_t cpu)
+{
+    (void)cpu;
+    return -1;
+}
+
+/* MMIO identity map: mmu.S already maps 0x00000000-0x3FFFFFFF as device
+ * memory at EL1, so MMIO regions (UART/GIC/virtio-mmio) are accessible.
+ * Nothing to do per-request. */
+bool arch_identity_map_mmio(uint64_t base, uint64_t size)
+{
+    (void)base; (void)size;
+    return true;
+}
+
 /* Get CPU count (alias for smp_num_cpus) */
 uint32_t cpu_count(void)
 {

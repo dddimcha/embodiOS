@@ -26,6 +26,71 @@
 #include <embodios/ui.h>
 
 /* ========================================================================
+ * Architecture-specific low-level primitives
+ * ======================================================================== */
+
+#if defined(__aarch64__)
+
+/* aarch64 (QEMU virt): power control via PSCI over HVC. QEMU's PSCI
+ * implementation (TCG, no EL3 firmware needed) handles SYSTEM_OFF and
+ * SYSTEM_RESET for hvc calls issued at EL1. */
+#define PSCI_FN_SYSTEM_OFF   0x84000008UL
+#define PSCI_FN_SYSTEM_RESET 0x84000009UL
+
+static inline void psci_call(unsigned long fn)
+{
+    register unsigned long x0 __asm__("x0") = fn;
+    register unsigned long x1 __asm__("x1") = 0;
+    register unsigned long x2 __asm__("x2") = 0;
+    register unsigned long x3 __asm__("x3") = 0;
+    __asm__ volatile("hvc #0"
+                     : "+r"(x0)
+                     : "r"(x1), "r"(x2), "r"(x3)
+                     : "memory");
+}
+
+static inline void pm_cli(void) { __asm__ volatile("msr daifset, #2" ::: "memory"); }
+static inline void pm_hlt(void) { __asm__ volatile("wfi"); }
+
+/* Simple busy-wait (~ms scale) to let a power/reset request take effect
+ * before trying the next fallback. */
+static void pm_delay(void)
+{
+    for (volatile int i = 0; i < 1000000; i++)
+        __asm__ volatile("nop");
+}
+
+void power_shutdown(void)
+{
+    console_printf("Powering off (PSCI SYSTEM_OFF)...\n");
+    console_flush();
+    pm_cli();
+
+    psci_call(PSCI_FN_SYSTEM_OFF);
+    pm_delay();
+
+    console_printf("PSCI poweroff failed (no response). System halted.\n");
+    for (;;)
+        pm_hlt();
+}
+
+void power_reboot(void)
+{
+    console_printf("Rebooting (PSCI SYSTEM_RESET)...\n");
+    console_flush();
+    pm_cli();
+
+    psci_call(PSCI_FN_SYSTEM_RESET);
+    pm_delay();
+
+    console_printf("PSCI reset failed (no response). System halted.\n");
+    for (;;)
+        pm_hlt();
+}
+
+#else /* x86_64 */
+
+/* ========================================================================
  * Local port I/O (self-contained; pci.c's outb/outw are static inline)
  * ======================================================================== */
 
@@ -184,6 +249,8 @@ void power_reboot(void)
         pm_hlt();
 }
 
+#endif /* __aarch64__ */
+
 /* ========================================================================
  * 'power' status command
  * ======================================================================== */
@@ -201,8 +268,15 @@ static void power_status(void)
     if (idle_pct > 100)
         idle_pct = 100;
 
+#if defined(__aarch64__)
+    uint64_t daif;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    const int irq_on = (int)((daif >> 7) & 1) ^ 1;  /* DAIF.I: 0 = IRQ enabled */
+#else
     uint64_t rflags;
     __asm__ volatile("pushfq; pop %0" : "=r"(rflags));
+    const int irq_on = (int)((rflags >> 9) & 1);
+#endif
 
     console_printf("\nPower status\n");
     console_printf("  Uptime:       %llu s (%llu ticks @ %u Hz)\n",
@@ -211,9 +285,9 @@ static void power_status(void)
     console_printf("  Idle (hlt):   %llu loops, ~%llu%% of ticks\n",
                    (unsigned long long)idle,
                    (unsigned long long)idle_pct);
-    console_printf("  Interrupts:   %s (IF=%d)\n",
+    console_printf("  Interrupts:   %s (IRQ %s)\n",
                    kernel_interrupts_enabled() ? "enabled" : "disabled (polling)",
-                   (int)((rflags >> 9) & 1));
+                   irq_on ? "unmasked" : "masked");
     console_printf("  Sleep state:  hlt @ IRQ0 %u Hz quantum\n\n", freq);
 }
 
