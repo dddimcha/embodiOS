@@ -233,6 +233,10 @@ KERNEL_C_SOURCES = \
     core/cmd_power.c \
     core/rt_timer.c \
     core/cmd_motor.c \
+    core/emg/dsp.c \
+    core/emg/classify.c \
+    core/emg/emg.c \
+    core/cmd_emg.c \
     fs/embfs.c \
     drivers/pci/pci.c \
     drivers/block/virtio_blk.c \
@@ -320,6 +324,22 @@ KERNEL_C_SOURCES += \
     drivers/video/mailbox_fb.c \
     drivers/video/font8x16.c \
     drivers/gpio/bcm_gpio.c
+endif
+
+# WS-DRV block (SPEC-M0, branch m0-drv): EMG bench-loop hardware drivers.
+# BCM/RP1 SPI0 master + MCP3008 ADC + Feetech STS3215 TTL-bus servo.
+# aarch64-only sources; pi3/virt builds compile them to runtime stubs.
+# BOARD_HAS_EMG_HW=1 (pi4/pi5 only) switches the contract hooks
+# emg_hw_available/emg_hw_read and actuator_* from WS-DSP's weak stubs
+# to the strong hardware overrides in these files.
+ifeq ($(ARCH),aarch64)
+KERNEL_C_SOURCES += \
+    drivers/adc/bcm_spi.c \
+    drivers/adc/mcp3008.c \
+    drivers/actuator/feetech.c
+ifneq ($(filter $(BOARD),pi4 pi5),)
+    CFLAGS += -DBOARD_HAS_EMG_HW=1
+endif
 endif
 
 # Add gcov runtime stubs when coverage is enabled

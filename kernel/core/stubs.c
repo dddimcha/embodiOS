@@ -40,6 +40,7 @@ size_t strlen(const char *s);
 void arch_reboot(void);
 void pmm_print_stats(void);
 void heap_stats(void);
+int cmd_emg_dispatch(const char *command); /* core/cmd_emg.c (WS-DSP, SPEC-M0) */
 
 /* Helper to parse integer from string */
 static int parse_int(const char *s)
@@ -2688,6 +2689,9 @@ skip_ethercat:
                (command[5] == '\0' || command[5] == ' ')) {
         /* RT motor control demo — handled in core/cmd_motor.c */
         cmd_motor_dispatch(command + 5);
+    } else if (cmd_emg_dispatch(command)) {
+        /* WS-DSP (SPEC-M0): EMG bench loop (emg/emgcal/emgtest/m0demo) —
+         * handled in core/cmd_emg.c. Keep this hunk disjoint. */
     } else if (strcmp(command, "uptime") == 0) {
         uint64_t ticks = timer_get_ticks();
         uint32_t freq = timer_get_frequency();
