@@ -30,6 +30,7 @@
 #define BOARD_HAS_MAILBOX   1
 #define LINK_BASE           0x80000UL         /* kernel8.img load address */
 #define GIC_UART_INTID      89                /* SPI 57 (32+57) PL011 UART0 */
+#define BOARD_TICK_HZ       1000              /* 1 kHz kernel tick for EMG RT loop */
 
 #elif defined(BOARD_PI4)
 /* ---- Raspberry Pi 4 (BCM2711, Cortex-A72) ---- */
@@ -42,6 +43,7 @@
 #define BOARD_HAS_MAILBOX   1
 #define LINK_BASE           0x80000UL
 #define GIC_UART_INTID      153               /* SPI 121 PL011 UART0 */
+#define BOARD_TICK_HZ       1000
 /* NOTE: real Pi 4 firmware requires enable_gic=1 in config.txt for the
  * GIC to be usable from bare metal (emitted by scripts/make_sdcard.sh). */
 
@@ -56,6 +58,7 @@
 #define BOARD_HAS_MAILBOX   1
 #define LINK_BASE           0x80000UL
 #define GIC_UART_INTID      153               /* dtsi GIC_SPI 121 -> 32+121 */
+#define BOARD_TICK_HZ       1000
 
 #else
 /* ---- QEMU virt (default; unchanged v0.8.0 behavior) ---- */
@@ -68,6 +71,7 @@
 #define BOARD_HAS_MAILBOX   0
 #define LINK_BASE           0x40000000UL
 #define GIC_UART_INTID      33                /* SPI 1 */
+#define BOARD_TICK_HZ       100               /* QEMU TCG-friendly 100 Hz */
 #endif
 
 /* Board-is-Pi predicate (link base 0x80000, kernel8.img, firmware boot) */

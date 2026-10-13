@@ -6,9 +6,14 @@
 #include "embodios/types.h"
 #include "embodios/hal_timer.h"
 #include <embodios/console.h>
+#include "board.h"
+#include "embodios/rt_timer.h"
 
-/* Timer frequency (100 Hz = 10ms tick) */
-#define TIMER_FREQUENCY 100
+/* Kernel tick frequency: 1 kHz on Pi boards (EMG RT loop), 100 Hz on virt (TCG-friendly) */
+#ifndef BOARD_TICK_HZ
+#define BOARD_TICK_HZ 100
+#endif
+#define TIMER_FREQUENCY BOARD_TICK_HZ
 
 /* Timer state */
 static struct {
@@ -75,6 +80,9 @@ static void aarch64_timer_init(void)
         console_printf("aarch64_timer: counter frequency %llu Hz\n",
                        timer_state.counter_freq);
     }
+
+    /* Publish tick rate to the RT timer subsystem (EMG 1 kHz loop needs it) */
+    rt_timer_set_tick_hz(TIMER_FREQUENCY);
 
     /* Set default tick frequency */
     timer_state.frequency = TIMER_FREQUENCY;
